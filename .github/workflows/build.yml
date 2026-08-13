@@ -52,9 +52,12 @@ jobs:
         shell: pwsh
         run: |
           $vcpkgRoot = Join-Path $env:RUNNER_TEMP 'vcpkg'
-          git clone --depth 1 https://github.com/microsoft/vcpkg.git $vcpkgRoot
-          git -C $vcpkgRoot fetch --depth 1 origin $env:VCPKG_BASELINE
-          git -C $vcpkgRoot checkout FETCH_HEAD
+          # Full clone (NOT --depth 1): vcpkg.json pins a builtin-baseline,
+          # which requires the historical commit to exist locally. A shallow
+          # clone cannot check out that baseline ("cloned as a shallow
+          # repository"). See build.ps1 Ensure-Vcpkg.
+          git clone https://github.com/microsoft/vcpkg.git $vcpkgRoot
+          git -C $vcpkgRoot checkout $env:VCPKG_BASELINE
           & "$vcpkgRoot\bootstrap-vcpkg.bat" -disableMetrics
           if ($LASTEXITCODE -ne 0) { throw 'vcpkg bootstrap failed.' }
           "VCPKG_ROOT=$vcpkgRoot" >> $env:GITHUB_ENV
