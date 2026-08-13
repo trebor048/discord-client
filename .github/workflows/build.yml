@@ -102,9 +102,12 @@ jobs:
           # hardcoded "Visual Studio 17 2022" generator in CMakePresets.json.
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
           if (-not (Test-Path $vswhere)) { throw "vswhere not found at $vswhere" }
-          $req = '-requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64'
-          $lineVersion = (& $vswhere -latest -products * $req -property catalog_productLineVersion 2>$null).Trim()
-          $displayVersion = (& $vswhere -latest -products * $req -property catalog_productDisplayVersion 2>$null).Trim()
+          $vsArgs = @(
+            '-latest', '-products', '*',
+            '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'
+          )
+          $lineVersion = (& $vswhere @vsArgs -property catalog_productLineVersion 2>$null | Select-Object -First 1).Trim()
+          $displayVersion = (& $vswhere @vsArgs -property catalog_productDisplayVersion 2>$null | Select-Object -First 1).Trim()
           if (-not $lineVersion -or -not $displayVersion) {
             throw 'Unable to detect a Visual Studio installation with VC tools via vswhere.'
           }
