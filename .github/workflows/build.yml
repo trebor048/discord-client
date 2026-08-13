@@ -106,13 +106,19 @@ jobs:
             '-latest', '-products', '*',
             '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'
           )
-          $lineVersion = (& $vswhere @vsArgs -property catalog_productLineVersion 2>$null | Select-Object -First 1).Trim()
+          $displayName = (& $vswhere @vsArgs -property displayName 2>$null | Select-Object -First 1).Trim()
           $displayVersion = (& $vswhere @vsArgs -property catalog_productDisplayVersion 2>$null | Select-Object -First 1).Trim()
-          if (-not $lineVersion -or -not $displayVersion) {
+          if (-not $displayName -or -not $displayVersion) {
             throw 'Unable to detect a Visual Studio installation with VC tools via vswhere.'
           }
+          # CMake generator names take the form "Visual Studio <major> <year>",
+          # e.g. "Visual Studio 17 2022" or "Visual Studio 18 2026". Parse the
+          # year from the display name ("Visual Studio Enterprise 2026") and the
+          # major version from the product display version ("18.0.0").
           $major = ($displayVersion -split '\.')[0]
-          $generator = "Visual Studio $major $lineVersion"
+          $year = if ($displayName -match '(20\d\d)') { $Matches[1] }
+                  else { throw "Could not parse the Visual Studio year from display name: $displayName" }
+          $generator = "Visual Studio $major $year"
           Write-Host "Using CMake generator: $generator"
 
           cmake `
