@@ -1,0 +1,143 @@
+#pragma once
+
+#include <QString>
+#include <QColor>
+#include <QHash>
+#include <QUrl>
+#include <QStringList>
+#include <QVariant>
+#include <functional>
+
+#include "Core/Snowflake.hpp"
+
+namespace Acheron {
+namespace Core {
+namespace Notification {
+
+enum class NotificationType {
+    Message,
+    Mention,
+    DirectMessage,
+    GroupMessage,
+    FriendRequest,
+    FriendAccepted,
+    VoiceJoin,
+    VoiceLeave,
+    VoiceMove,
+    Custom
+};
+
+enum class NotificationPosition {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+    Center
+};
+
+enum class NotificationSoundType {
+    Default,
+    Message1,
+    Message2,
+    Message3,
+    Mention1,
+    Mention2,
+    Mention3,
+    Custom
+};
+
+struct SoundOverride {
+    bool enabled = false;
+    QString selectedSound = "default";
+    int volume = 100;
+    QString customFileId;
+    QString customUrl;
+};
+
+struct UserSoundMapping {
+    bool enabled = false;
+    QString selectedSound = "default";
+    int volume = 100;
+    QString customFileId;
+    QString customUrl;
+};
+
+struct ToastNotificationData {
+    QString title;
+    QString body;
+    QString iconUrl;
+    int attachments = 0;
+    int timeout = 5;
+    int opacity = 95;
+    QString channelName;
+    QString channelId;
+    QString guildName;
+    QString guildId;
+    Core::Snowflake authorId;
+    QColor badgeColor;
+    NotificationType type = NotificationType::Message;
+
+    std::function<void()> onClick;
+    std::function<void()> onIconClick;
+    std::function<void()> onDismiss;
+};
+
+struct NotificationSettings {
+    // Appearance
+    NotificationPosition position = NotificationPosition::BottomLeft;
+    int maxNotifications = 3;
+    int timeoutSeconds = 5;
+    int opacity = 95;
+    int edgeOffset = 20;
+    double scaleFactor = 1.0;
+    bool pauseOnHover = true;
+    bool renderImages = true;
+
+    // Notification Types
+    bool notifyMentions = true;
+    bool notifyDirectMessages = true;
+    bool notifyGroupMessages = true;
+    bool notifyFriendServerMessages = true;
+    bool notifyFriendRequests = true;
+    bool respectServerSettings = true;
+
+    // Privacy & Streaming
+    bool disableInStreamerMode = true;
+    enum class StreamingTreatment { Normal, NoContent, Ignore };
+    StreamingTreatment streamingTreatment = StreamingTreatment::Normal;
+
+    // Voice
+    bool notifyVoiceChannelJoins = false;
+    int voiceDebounceMs = 2000;
+
+    // Sound
+    int globalSoundVolume = 100;
+    bool soundForDMs = true;
+    bool soundForGroupDMs = true;
+    bool soundForMentions = true;
+    bool soundForFriendServerMessages = true;
+    bool soundForFriendRequests = true;
+    QHash<QString, SoundOverride> soundOverrides;
+    QHash<QString, UserSoundMapping> userSounds;
+
+    // Native Notifications
+    enum class NativeMode { Never, Always, NotFocused };
+    NativeMode nativeMode = NativeMode::NotFocused;
+
+    // Lists
+    QStringList notifyForList;
+    QStringList ignoreUsersList;
+};
+
+QString positionToString(NotificationPosition pos);
+NotificationPosition stringToPosition(const QString &str);
+QString streamingTreatmentToString(NotificationSettings::StreamingTreatment t);
+NotificationSettings::StreamingTreatment stringToStreamingTreatment(const QString &str);
+QString nativeModeToString(NotificationSettings::NativeMode m);
+NotificationSettings::NativeMode stringToNativeMode(const QString &str);
+
+QColor generateBadgeColor(const QString &id);
+
+} // namespace Notification
+} // namespace Core
+} // namespace Acheron

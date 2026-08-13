@@ -1,0 +1,22 @@
+<RCC>
+    <qresource prefix="/">
+        <file>resources/placeholder.png</file>
+        <file>resources/sounds/notification.mp3</file>
+        <file>resources/sounds/message1.mp3</file>
+        <file>resources/sounds/message2.mp3</file>
+        <file>resources/sounds/message3.mp3</file>
+        <file>resources/sounds/mention1.wav</file>
+        <file>resources/sounds/mention2.wav</file>
+        <file>resources/sounds/mention3.mp3</file>
+        <file>resources/icons/lucide/at-sign.svg</file>
+        <file>resources/icons/lucide/eye.svg</file>
+        <file>resources/icons/lucide/file-text.svg</file>
+        <file>resources/icons/lucide/handshake.svg</file>
+        <file>resources/icons/lucide/id-card.svg</file>
+        <file>resources/icons/lucide/lock.svg</file>
+        <file>resources/icons/lucide/message-circle.svg</file>
+        <file>resources/icons/lucide/pencil.svg</file>
+        <file>resources/icons/lucide/spool.svg</file>
+        <file>resources/icons/lucide/x.svg</file>
+    </qresource>
+</RCC>

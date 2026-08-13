@@ -1,0 +1,141 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+      - 'ci/**'
+
+  pull_request:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  QT_VERSION: '6.10.3'
+  VCPKG_BASELINE: 16c71a39e5a0fc0bdb3fad03beef8f38ee00ee3b
+  VCPKG_TRIPLET: x64-windows-static-md
+  CURL_IMPERSONATE_VERSION: v2.0.0
+
+jobs:
+  build-windows:
+    name: Windows
+    runs-on: ${{ github.repository_owner == 'ouwou' && 'windows-latest' || 'self-hosted' }}
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Initialize submodules
+        env:
+          HOME: C:\Users\me
+        run: |
+          git config --global core.longpaths true
+          git submodule update --init --recursive
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4.3.1
+        with:
+          version: ${{ env.QT_VERSION }}
+          modules: qtimageformats qtmultimedia
+          cache: true
+          setup-python: false
+
+      - name: Set up vcpkg
+        shell: pwsh
+        run: |
+          $vcpkgRoot = Join-Path $env:RUNNER_TEMP 'vcpkg'
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git $vcpkgRoot
+          git -C $vcpkgRoot fetch --depth 1 origin $env:VCPKG_BASELINE
+          git -C $vcpkgRoot checkout FETCH_HEAD
+          & "$vcpkgRoot\bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg bootstrap failed.' }
+          "VCPKG_ROOT=$vcpkgRoot" >> $env:GITHUB_ENV
+
+      - name: Cache vcpkg packages
+        uses: actions/cache@v6
+        with:
+          path: build/vcpkg_installed
+          key: >-
+            vcpkg-${{ runner.os }}-${{ env.VCPKG_TRIPLET }}-${{
+            env.VCPKG_BASELINE }}-${{ hashFiles('vcpkg.json',
+            'vcpkg-overlay-ports/mlspp/**') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ env.VCPKG_TRIPLET }}-${{ env.VCPKG_BASELINE }}-
+
+      - name: Install curl-impersonate
+        shell: pwsh
+        run: |
+          $version = $env:CURL_IMPERSONATE_VERSION
+          $archive = Join-Path $env:GITHUB_WORKSPACE 'libcurl-impersonate.tar.gz'
+          $destination = Join-Path $env:GITHUB_WORKSPACE 'curl-impersonate'
+          $url = "https://github.com/lexiforest/curl-impersonate/releases/download/$version/libcurl-impersonate-$version.x86_64-win32.tar.gz"
+          Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing
+          New-Item -ItemType Directory -Path $destination -Force | Out-Null
+          tar -xzf $archive -C $destination
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to extract curl-impersonate.' }
+          Remove-Item $archive -Force
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          $curlRoot = Join-Path $env:GITHUB_WORKSPACE 'curl-impersonate'
+          if (-not $env:Qt6_DIR) { throw 'Qt6_DIR was not set by install-qt-action.' }
+          cmake `
+            --preset windows `
+            "-DCMAKE_PREFIX_PATH=$env:Qt6_DIR" `
+            "-DCURL_INCLUDE_DIR=$curlRoot\include" `
+            "-DCURL_LIBRARY=$curlRoot\lib\libcurl-impersonate_imp.lib" `
+            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+
+      - name: Build
+        shell: pwsh
+        run: |
+          cmake --build --preset windows --config RelWithDebInfo --parallel
+
+      - name: Test
+        shell: pwsh
+        run: |
+          ctest --preset windows -C RelWithDebInfo --output-on-failure
+
+      - name: Deploy Qt
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        shell: pwsh
+        run: |
+          # The acheron_deploy target runs windeployqt AND copies non-Qt runtime
+          # files (e.g. opus.dll, a direct exec import that windeployqt cannot
+          # discover) into build/deploy/<Config>. See cmake/DeployQtRuntime.cmake.
+          cmake --build --preset windows --config RelWithDebInfo --target acheron_deploy
+
+      - name: Prepare artifact
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        shell: pwsh
+        run: |
+          $artifactName = 'acheron-windows'
+          $outputDirectory = Join-Path $env:GITHUB_WORKSPACE $artifactName
+          $deployDirectory = Join-Path $env:GITHUB_WORKSPACE 'build\deploy\RelWithDebInfo'
+          $curlBinaryDirectory = Join-Path $env:GITHUB_WORKSPACE 'curl-impersonate\lib'
+          if (-not (Test-Path $deployDirectory)) { throw "Deploy output was not found at: $deployDirectory" }
+          New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
+          Copy-Item -Path "$deployDirectory\*" -Destination $outputDirectory -Recurse -Force
+          $curlDlls = Get-ChildItem -Path $curlBinaryDirectory -Filter '*.dll' -File -ErrorAction Stop
+          if ($curlDlls.Count -eq 0) { throw 'No curl-impersonate DLLs were found.' }
+          Copy-Item -Path $curlDlls.FullName -Destination $outputDirectory -Force
+
+      - name: Upload artifact
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        uses: actions/upload-artifact@v7
+        with:
+          name: acheron-windows
+          path: acheron-windows
+          if-no-files-found: error
+          retention-days: 1

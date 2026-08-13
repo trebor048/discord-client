@@ -1,0 +1,277 @@
+#include <catch2/catch_all.hpp>
+#include <hpke/hpke.h>
+#include <namespace.h>
+
+#include "common.h"
+#include "test_vectors.h"
+
+namespace MLS_NAMESPACE::hpke {
+
+struct HPKETest
+{
+  static bytes key(const Context& ctx) { return ctx.key; }
+  static bytes nonce(const Context& ctx) { return ctx.nonce; }
+  static bytes exporter_secret(const Context& ctx)
+  {
+    return ctx.exporter_secret;
+  }
+};
+
+} // namespace MLS_NAMESPACE::hpke
+
+static void
+test_context(ReceiverContext& ctxR, const HPKETestVector& tv)
+{
+  auto key = MLS_NAMESPACE::hpke::HPKETest::key(ctxR);
+  REQUIRE(key == tv.key);
+
+  auto nonce = MLS_NAMESPACE::hpke::HPKETest::nonce(ctxR);
+  REQUIRE(nonce == tv.nonce);
+
+  auto exporter_secret = MLS_NAMESPACE::hpke::HPKETest::exporter_secret(ctxR);
+  REQUIRE(exporter_secret == tv.exporter_secret);
+
+  for (const auto& enc : tv.encryptions) {
+    auto plaintext = ctxR.open(enc.aad, enc.ciphertext);
+    REQUIRE(plaintext == enc.plaintext);
+  }
+
+  for (const auto& exp : tv.exports) {
+    auto value = ctxR.do_export(exp.context, exp.length);
+    REQUIRE(value == exp.value);
+  }
+}
+
+static void
+test_base_vector(const HPKETestVector& tv)
+{
+  if (!supported(tv.kem_id, tv.kdf_id, tv.aead_id)) {
+    return;
+  }
+
+  const auto& kem = select_kem(tv.kem_id);
+  auto hpke = HPKE(tv.kem_id, tv.kdf_id, tv.aead_id);
+
+  auto skR = kem.derive_key_pair(tv.ikmR);
+  auto skRm = kem.serialize_private(*skR);
+  REQUIRE(skRm == tv.skRm);
+
+  auto pkR = skR->public_key();
+  auto pkRm = kem.serialize(*pkR);
+  REQUIRE(pkRm == tv.pkRm);
+
+  auto ctxR = hpke.setup_base_r(tv.enc, *skR, tv.info);
+  test_context(ctxR, tv);
+}
+
+static void
+test_psk_vector(const HPKETestVector& tv)
+{
+  if (!supported_kem(tv.kem_id)) {
+    return;
+  }
+
+  const auto& kem = select_kem(tv.kem_id);
+  auto hpke = HPKE(tv.kem_id, tv.kdf_id, tv.aead_id);
+
+  auto skR = kem.derive_key_pair(tv.ikmR);
+  auto skRm = kem.serialize_private(*skR);
+  REQUIRE(skRm == tv.skRm);
+
+  auto pkR = skR->public_key();
+  auto pkRm = kem.serialize(*pkR);
+  REQUIRE(pkRm == tv.pkRm);
+
+  auto ctxR = hpke.setup_psk_r(tv.enc, *skR, tv.info, tv.psk, tv.psk_id);
+  test_context(ctxR, tv);
+}
+
+static void
+test_auth_vector(const HPKETestVector& tv)
+{
+  if (!supported_kem(tv.kem_id)) {
+    return;
+  }
+
+  const auto& kem = select_kem(tv.kem_id);
+  auto hpke = HPKE(tv.kem_id, tv.kdf_id, tv.aead_id);
+
+  auto skS = kem.derive_key_pair(tv.ikmS);
+  auto skSm = kem.serialize_private(*skS);
+  REQUIRE(skSm == tv.skSm);
+
+  auto pkS = skS->public_key();
+  auto pkSm = kem.serialize(*pkS);
+  REQUIRE(pkSm == tv.pkSm);
+
+  auto skR = kem.derive_key_pair(tv.ikmR);
+  auto skRm = kem.serialize_private(*skR);
+  REQUIRE(skRm == tv.skRm);
+
+  auto pkR = skR->public_key();
+  auto pkRm = kem.serialize(*pkR);
+  REQUIRE(pkRm == tv.pkRm);
+
+  auto ctxR = hpke.setup_auth_r(tv.enc, *skR, tv.info, *pkS);
+  test_context(ctxR, tv);
+}
+
+static void
+test_auth_psk_vector(const HPKETestVector& tv)
+{
+  if (!supported_kem(tv.kem_id)) {
+    return;
+  }
+
+  const auto& kem = select_kem(tv.kem_id);
+  auto hpke = HPKE(tv.kem_id, tv.kdf_id, tv.aead_id);
+
+  auto skS = kem.derive_key_pair(tv.ikmS);
+  auto skSm = kem.serialize_private(*skS);
+  REQUIRE(skSm == tv.skSm);
+
+  auto pkS = skS->public_key();
+  auto pkSm = kem.serialize(*pkS);
+  REQUIRE(pkSm == tv.pkSm);
+
+  auto skR = kem.derive_key_pair(tv.ikmR);
+  auto skRm = kem.serialize_private(*skR);
+  REQUIRE(skRm == tv.skRm);
+
+  auto pkR = skR->public_key();
+  auto pkRm = kem.serialize(*pkR);
+  REQUIRE(pkRm == tv.pkRm);
+
+  auto ctxR =
+    hpke.setup_auth_psk_r(tv.enc, *skR, tv.info, tv.psk, tv.psk_id, *pkS);
+  test_context(ctxR, tv);
+}
+
+TEST_CASE("HPKE Test Vectors")
+{
+  ensure_fips_if_required();
+
+  auto test_vector_bytes = bytes(test_vector_data);
+  auto test_vectors =
+    MLS_NAMESPACE::tls::get<HPKETestVectors>(test_vector_bytes);
+
+  for (const auto& tv : test_vectors.vectors) {
+    if (fips() && fips_disable(tv.aead_id)) {
+      continue;
+    }
+
+    switch (tv.mode) {
+      case HPKE::Mode::base:
+        test_base_vector(tv);
+        break;
+
+      case HPKE::Mode::psk:
+        test_psk_vector(tv);
+        break;
+
+      case HPKE::Mode::auth:
+        test_auth_vector(tv);
+        break;
+
+      case HPKE::Mode::auth_psk:
+        test_auth_psk_vector(tv);
+        break;
+    }
+  }
+}
+
+TEST_CASE("HPKE PQ Test Vectors")
+{
+  ensure_fips_if_required();
+
+  auto test_vector_bytes = bytes(test_vector_data_pq);
+  auto test_vectors =
+    MLS_NAMESPACE::tls::get<HPKETestVectors>(test_vector_bytes);
+
+  for (const auto& tv : test_vectors.vectors) {
+    if (fips() && fips_disable(tv.aead_id)) {
+      continue;
+    }
+
+    switch (tv.mode) {
+      case HPKE::Mode::base:
+        test_base_vector(tv);
+        break;
+
+      case HPKE::Mode::psk:
+        test_psk_vector(tv);
+        break;
+
+      default:
+        REQUIRE(false);
+    }
+  }
+}
+
+TEST_CASE("HPKE Round-Trip")
+{
+  ensure_fips_if_required();
+
+  const std::vector<KEM::ID> kems{
+    KEM::ID::DHKEM_P256_SHA256, KEM::ID::DHKEM_P384_SHA384,
+    KEM::ID::DHKEM_P384_SHA384, KEM::ID::DHKEM_P521_SHA512,
+#if !defined(WITH_BORINGSSL)
+    KEM::ID::DHKEM_X448_SHA512,
+#endif
+#if defined(WITH_PQ)
+    KEM::ID::MLKEM512,          KEM::ID::MLKEM768,
+    KEM::ID::MLKEM1024,         KEM::ID::MLKEM768_P256,
+    KEM::ID::MLKEM768_X25519,   KEM::ID::MLKEM1024_P384,
+#endif
+  };
+  const std::vector<KDF::ID> kdfs{ KDF::ID::HKDF_SHA256,
+                                   KDF::ID::HKDF_SHA384,
+                                   KDF::ID::HKDF_SHA512 };
+  const std::vector<AEAD::ID> aeads{ AEAD::ID::AES_128_GCM,
+                                     AEAD::ID::AES_256_GCM,
+                                     AEAD::ID::CHACHA20_POLY1305 };
+
+  const auto info = from_hex("00010203");
+  const auto plaintext = from_hex("04050607");
+  const auto aad = from_hex("08090a0b");
+  const auto ikmS = from_hex("A0A0A0A0");
+  const auto ikmR = from_hex("B0B0B0B0");
+  const auto iterations = int(256);
+
+  for (const auto& kem_id : kems) {
+    const auto& kem = select_kem(kem_id);
+    auto skS = kem.derive_key_pair(ikmS);
+    auto skR = kem.derive_key_pair(ikmR);
+
+    auto pkS = skS->public_key();
+    auto pkR = skR->public_key();
+
+    for (const auto& kdf_id : kdfs) {
+      for (const auto& aead_id : aeads) {
+        if (fips() && fips_disable(aead_id)) {
+          continue;
+        }
+
+        auto hpke = HPKE(kem_id, kdf_id, aead_id);
+
+        auto [enc_, ctxS_] = hpke.setup_base_s(*pkR, info);
+        auto enc = enc_;
+        auto ctxS = ctxS_;
+
+        auto ctxR = hpke.setup_base_r(enc, *skR, info);
+        REQUIRE(ctxS == ctxR);
+
+        auto last_encrypted = bytes{};
+        for (int i = 0; i < iterations; i += 1) {
+          auto encrypted = ctxS.seal(aad, plaintext);
+          REQUIRE(encrypted != last_encrypted);
+
+          auto decrypted = ctxR.open(aad, encrypted);
+          REQUIRE(decrypted == plaintext);
+
+          last_encrypted = encrypted;
+        }
+      }
+    }
+  }
+}

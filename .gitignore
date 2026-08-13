@@ -1,0 +1,94 @@
+# === Build directories ===
+/build/
+build-*/
+out/
+.firecrawl/
+
+# === CMake ===
+CMakeUserPresets.json
+CMakeFiles/
+cmake-build-*/
+CTestTestfile.cmake
+cmake_install.cmake
+compile_commands.json
+*.cmake.in
+
+# === IDE / Editor ===
+.vs/
+.vscode/
+.idea/
+*.user
+*.user.*
+*.aps
+*.suo
+*.sln.docstates
+
+# === Qt generated (in source tree) ===
+moc_*.cpp
+qrc_*.cpp
+ui_*.h
+*.moc
+
+# === vcpkg ===
+vcpkg_installed/
+vcpkg-install-run.log
+vcpkg-manifest-install.log
+
+# === Planning docs ===
+.planning/
+brainstorm-qol.md
+full-qol-plan.md
+new-features-plan.md
+remaining-qol-plan.md
+docs/improvement-plan.md
+docs/maestro/
+build-full.log
+
+# === Scripts output ===
+scripts/*
+!scripts/windows-runtime-smoke.ps1
+
+# === Local app/runtime deployment ===
+*.dll
+*.pdb
+*.lib
+acheron.exe
+D3Dcompiler_47.dll
+icuuc.dll
+libcurl.dll
+opus.dll
+zlib.dll
+
+# === Local copied runtime folders ===
+fonts/
+generic/
+iconengines/
+imageformats/
+networkinformation/
+platforms/
+sqldrivers/
+styles/
+tls/
+
+# === Local tools / scratch ===
+.qwen/
+.opencode/
+.swarm/
+.oneshot/
+.env
+CMakeLists.txt.bak
+curl-impersonate/
+libcurl-impersonate.tar.gz
+tools/.cache/
+
+# === OS files ===
+Thumbs.db
+.DS_Store
+*.swp
+*.swo
+*~
+
+
+# == MD ===
+PLAN.md
+AGENTS.md

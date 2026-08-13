@@ -1,0 +1,39 @@
+{
+  "name": "acheron",
+  "license": "GPL-3.0",
+  "dependencies": [
+    {
+      "name": "openssl",
+      "version>=": "3.0.7"
+    },
+    "mlspp",
+    {
+      "name": "curl",
+      "features": ["websockets"]
+    },
+    "libsodium",
+    "nlohmann-json",
+    "opus",
+    "vulkan-headers",
+    "nayuki-qr-code-generator",
+    {
+      "name": "zlib",
+      "platform": "windows"
+    }
+  ],
+  "builtin-baseline": "16c71a39e5a0fc0bdb3fad03beef8f38ee00ee3b",
+  "vcpkg-configuration": {
+    "overlay-ports": [
+      "./vcpkg-overlay-ports"
+    ],
+    "overlay-triplets": [
+      "./vcpkg-triplets"
+    ]
+  },
+  "overrides": [
+    {
+      "name": "openssl",
+      "version": "3.0.7"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+[submodule "vendor/qtkeychain"]
+	path = vendor/qtkeychain
+	url = https://github.com/frankosterfeld/qtkeychain.git
+[submodule "vendor/emoji-segmenter"]
+	path = vendor/emoji-segmenter
+	url = https://github.com/google/emoji-segmenter.git
+[submodule "vendor/libdave"]
+	path = vendor/libdave
+	url = https://github.com/discord/libdave
+[submodule "vendor/miniaudio"]
+	path = vendor/miniaudio
+	url = https://github.com/mackron/miniaudio.git
+[submodule "vendor/qrcodegen"]
+	path = vendor/qrcodegen
+	url = https://github.com/nayuki/QR-Code-generator.git
+[submodule "vendor/mlspp"]
+	path = vendor/mlspp
+	url = https://github.com/cisco/mlspp.git
+[submodule "vendor/rnnoise"]
+	path = vendor/rnnoise
+	url = https://github.com/xiph/rnnoise

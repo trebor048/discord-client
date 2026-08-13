@@ -1,0 +1,1330 @@
+#pragma once
+
+#include <memory>
+
+#include <QString>
+#include <QColor>
+#include <QImage>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QJsonDocument>
+
+#include "Enums.hpp"
+
+#include "Core/Snowflake.hpp"
+#include "Core/JsonUtils.hpp"
+
+namespace Acheron {
+namespace Discord {
+
+struct User : Core::JsonUtils::JsonObject
+{
+    Field<Core::Snowflake> id;
+    Field<QString> username;
+    Field<QString, false, true> globalName;
+    Field<QString, false, true> avatar;
+    Field<bool, true> bot;
+    Field<QString, true, true> banner;
+    Field<int, true, true> accentColor;
+    Field<int, true> publicFlags;
+    Field<PremiumType, true, true> premiumType;
+
+    static User fromJson(const QJsonObject &obj)
+    {
+        User user;
+        get(obj, "id", user.id);
+        get(obj, "username", user.username);
+        get(obj, "global_name", user.globalName);
+        get(obj, "avatar", user.avatar);
+        get(obj, "bot", user.bot);
+        get(obj, "banner", user.banner);
+        get(obj, "accent_color", user.accentColor);
+        get(obj, "public_flags", user.publicFlags);
+        get(obj, "premium_type", user.premiumType);
+        return user;
+    }
+
+    QString getDisplayName() const
+    {
+        if (globalName.hasValue() && !globalName->isEmpty())
+            return globalName;
+        return username;
+    }
+};
+
+struct Member : Core::JsonUtils::JsonObject
+{
+    Field<User, true> user;
+    Field<QString, true, true> nick;
+    Field<QString, true, true> avatar;
+    Field<QList<Core::Snowflake>, true> roles;
+    Field<QDateTime, true> joinedAt;
+    Field<QDateTime, true, true> premiumSince;
+    Field<bool, true> deaf;
+    Field<bool, true> mute;
+    Field<int, true> flags;
+    Field<bool, true> pending;
+    Field<QDateTime, true, true> communicationDisabledUntil;
+    Field<Core::Snowflake, true> userId; // supplemental
+
+    static Member fromJson(const QJsonObject &obj)
+    {
+        Member member;
+        get(obj, "user", member.user);
+        get(obj, "nick", member.nick);
+        get(obj, "avatar", member.avatar);
+        get(obj, "roles", member.roles);
+        get(obj, "joined_at", member.joinedAt);
+        get(obj, "premium_since", member.premiumSince);
+        get(obj, "deaf", member.deaf);
+        get(obj, "mute", member.mute);
+        get(obj, "flags", member.flags);
+        get(obj, "pending", member.pending);
+        get(obj, "communication_disabled_until", member.communicationDisabledUntil);
+        get(obj, "user_id", member.userId);
+        return member;
+    }
+};
+
+struct Role : Core::JsonUtils::JsonObject
+{
+    Field<Core::Snowflake> id;
+    Field<QString> name;
+    Field<Permissions> permissions;
+    Field<int> position;
+    Field<int, true> color;
+    Field<bool, true> hoist;
+    Field<QString, true, true> icon;
+    Field<QString, true, true> unicodeEmoji;
+    Field<bool, true> managed;
+    Field<bool, true> mentionable;
+
+    static Role fromJson(const QJsonObject &obj)
+    {
+        Role role;
+        get(obj, "id", role.id);
+        get(obj, "name", role.name);
+        if (obj.contains("permissions")) {
+            QString permStr = obj["permissions"].toString();
+            role.permissions = Permissions::fromInt(permStr.toULongLong());
+        }
+        get(obj, "position", role.position);
+        get(obj, "color", role.color);
+        get(obj, "hoist", role.hoist);
+        get(obj, "icon", role.icon);
+        get(obj, "unicode_emoji", role.unicodeEmoji);
+        get(obj, "managed", role.managed);
+        get(obj, "mentionable", role.mentionable);
+        return role;
+    }
+
+    bool hasColor() const
+    {
+        return color.hasValue() && color.get() != 0;
+    }
+
+    QColor getColor() const
+    {
+        return hasColor() ? QColor::fromRgb(color.get()) : QColor();
+    }
+};
+
+struct PermissionOverwrite : Core::JsonUtils::JsonObject
+{
+    enum class Type {
+        Role = 0,
+        Member = 1,
+    };
+
+    Field<Core::Snowflake> id;
+    Field<Type> type;
+    Field<Permissions> allow;
+    Field<Permissions> deny;
+
+    static PermissionOverwrite fromJson(const QJsonObject &obj)
+    {
+        PermissionOverwrite overwrite;
+        get(obj, "id", overwrite.id);
+        if (obj.contains("type"))
+            overwrite.type = static_cast<Type>(obj["type"].toInt());
+        if (obj.contains("allow")) {
+            QString allowStr = obj["allow"].toString();
+            overwrite.allow = Permissions::fromInt(allowStr.toULongLong());
+        }
+        if (obj.contains("deny")) {
+            QString denyStr = obj["deny"].toString();
+            overwrite.deny = Permissions::fromInt(denyStr.toULongLong());
+        }
+        return overwrite;
+    }
+};
+
+struct ThreadMember : Core::JsonUtils::JsonObject
+{
+    Field<Core::Snowflake, true> id; // thread id
+    Field<Core::Snowflake, true> userId;
+    Field<QDateTime> joinTimestamp;
+
+    static ThreadMember fromJson(const QJsonObject &obj)
+    {
+        ThreadMember member;
+        get(obj, "id", member.id);
+        get(obj, "user_id", member.userId);
+        get(obj, "join_timestamp", member.joinTimestamp);
+        return member;
+    }
+};
+
+struct Channel : Core::JsonUtils::JsonObject
+{
+    Field<Core::Snowflake> id;
+    Field<ChannelType> type;
+    Field<QString, true, true> name;
+    Field<int, true> position;
+    Field<Core::Snowflake, true> guildId;
+    Field<Core::Snowflake, true, true> parentId;
+    Field<QList<PermissionOverwrite>, true> permissionOverwrites;
+    Field<QList<User>, true> recipients;
+    Field<QList<Core::Snowflake>, true> recipientIds;
+    Field<Core::Snowflake, true, true> lastMessageId;
+    Field<QString, true, true> icon;
+    Field<Core::Snowflake, true> ownerId;
+    Field<int, true> rateLimitPerUser;
+    Field<int, true> userLimit;
+
+    // Thread/forum fields
+    struct ThreadMetadata : Core::JsonUtils::JsonObject
+    {
+        Field<bool> archived;
+        Field<QDateTime, true> archiveTimestamp;
+        Field<int> autoArchiveDuration;
+        Field<bool, true> locked;
+        Field<bool, true> invitable;
+        Field<QDateTime, true> createTimestamp;
+
+        static ThreadMetadata fromJson(const QJsonObject &obj)
+        {
+            ThreadMetadata meta;
+            get(obj, "archived", meta.archived);
+            get(obj, "archive_timestamp", meta.archiveTimestamp);
+            get(obj, "auto_archive_duration", meta.autoArchiveDuration);
+            get(obj, "locked", meta.locked);
+            get(obj, "invitable", meta.invitable);
+            get(obj, "create_timestamp", meta.createTimestamp);
+            return meta;
+        }
+    };
+
+    struct ForumTag : Core::JsonUtils::JsonObject
+    {
+        Field<Core::Snowflake> id;
+        Field<QString> name;
+        Field<bool> moderated;
+        Field<Core::Snowflake, false, true> emojiId;
+        Field<QString, true, true> emojiName;
+
+        static ForumTag fromJson(const QJsonObject &obj)
+        {
+            ForumTag tag;
+            get(obj, "id", tag.id);
+            get(obj, "name", tag.name);
+            get(obj, "moderated", tag.moderated);
+            get(obj, "emoji_id", tag.emojiId);
+            get(obj, "emoji_name", tag.emojiName);
+            return tag;
+        }
+    };
+
+    struct DefaultReaction : Core::JsonUtils::JsonObject
+    {
+        Field<Core::Snowflake, false, true> emojiId;
+        Field<QString, true, true> emojiName;
+
+        static DefaultReaction fromJson(const QJsonObject &obj)
+        {
+            DefaultReaction reaction;
+            get(obj, "emoji_id", reaction.emojiId);
+            get(obj, "emoji_name", reaction.emojiName);
+            return reaction;
+        }
+    };
+
+    Field<ThreadMetadata, true> threadMetadata;
+    Field<ThreadMember, true> member;
+    Field<QList<ForumTag>, true> availableTags;
+    Field<QList<Core::Snowflake>, true> appliedTags;
+    Field<int, true> messageCount;
+    Field<int, true> memberCount;
+    Field<int, true> totalMessageSent;
+    Field<ChannelFlags, true> flags;
+    Field<int, true, true> defaultSortOrder;
+    Field<int, true> defaultAutoArchiveDuration;
+    Field<DefaultReaction, true> defaultReactionEmoji;
+    Field<int, true> defaultForumLayout;
+    Field<int, true> defaultThreadRateLimitPerUser;
+
+    // available_tags persistence
+    QString availableTagsJson;
+
+    static Channel fromJson(const QJsonObject &obj)
+    {
+        Channel channel;
+        get(obj, "id", channel.id);
+        get(obj, "type", channel.type);
+        get(obj, "name", channel.name);
+        get(obj, "position", channel.position);
+        get(obj, "guild_id", channel.guildId);
+        get(obj, "parent_id", channel.parentId);
+        get(obj, "permission_overwrites", channel.permissionOverwrites);
+        get(obj, "recipients", channel.recipients);
+        get(obj, "recipient_ids", channel.recipientIds);
+        get(obj, "last_message_id", channel.lastMessageId);
+        get(obj, "icon", channel.icon);
+        get(obj, "owner_id", channel.ownerId);
+        get(obj, "rate_limit_per_user", channel.rateLimitPerUser);
+        get(obj, "user_limit", channel.userLimit);
+        get(obj, "thread_metadata", channel.threadMetadata);
+        get(obj, "member_count", channel.memberCount);
+        get(obj, "message_count", channel.messageCount);
+        get(obj, "total_message_sent", channel.totalMessageSent);
+        get(obj, "default_auto_archive_duration", channel.defaultAutoArchiveDuration);
+        get(obj, "flags", channel.flags);
+        get(obj, "available_tags", channel.availableTags);
+        get(obj, "applied_tags", channel.appliedTags);
+        get(obj, "default_reaction_emoji", channel.defaultReactionEmoji);
+        get(obj, "default_sort_order", channel.defaultSortOrder);
+        get(obj, "default_forum_layout", channel.defaultForumLayout);
+        get(obj, "default_thread_rate_limit_per_user", channel.defaultThreadRateLimitPerUser);
+        get(obj, "member", channel.member);
+
+        if (obj.contains("available_tags")) {
+            QJsonDocument doc(obj.value("available_tags").toArray());
+            channel.availableTagsJson = QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
+        }
+
+        return channel;
+    }
+
+    Core::Snowflake effectiveLastMessageId() const
+    {
+        if (lastMessageId.hasValue() && lastMessageId->isValid())
+            return lastMessageId.get();
+        return id.get();
+    }
+
+    bool isArchived() const
+    {
+        return threadMetadata.hasValue() && threadMetadata->archived.hasValue() && threadMetadata->archived.get();
+    }
+
+    bool isPinned() const { return flags.hasValue() && flags->testFlag(ChannelFlag::PINNED); }
+
+    bool isThread() const { return type.hasValue() && isThreadType(type.get()); }
+
+    bool isForum() const { return type.hasValue() && type.get() == ChannelType::GUILD_FORUM; }
+};
+
+struct Guild : Core::JsonUtils::JsonObject
+{
+    Field<Core::Snowflake> id;
+    Field<QString> name;
+    Field<QString> icon;
+    Field<Core::Snowflake> ownerId;
+    Field<QList<Role>, true> roles;
+    Field<PremiumTier, true> premiumTier;
+    Field<Core::Snowflake, false, true> rulesChannelId;
+    Field<MessageNotificationLevel, true> defaultMessageNotifications;
+
+    static Guild fromJson(const QJsonObject &obj)
+    {
+        Guild guild;
+        get(obj, "id", guild.id);
+        get(obj, "name", guild.name);
+        get(obj, "icon", guild.icon);
+        get(obj, "owner_id", guild.ownerId);
+        get(obj, "roles", guild.roles);
+        get(obj, "premium_tier", guild.premiumTier);
+        get(obj, "rules_channel_id", guild.rulesChannelId);
+        get(obj, "default_message_notifications", guild.defaultMessageNotifications);
+        return guild;
+    }
+};
+
+struct VoiceState : Core::JsonUtils::JsonObject
+{
+    Field<Core::Snowflake, true> guildId;
+    Field<Core::Snowflake, false, true> channelId;
+    Field<Core::Snowflake> userId;
+    Field<QString> sessionId;
+    Field<bool> deaf;
+    Field<bool> mute;
+    Field<bool> selfDeaf;
+    Field<bool> selfMute;
+    Field<bool, true> selfStream;
+    Field<bool> selfVideo;
+    Field<bool> suppress;
+    Field<QString, true> requestToSpeakTimestamp;
+
+    static VoiceState fromJson(const QJsonObject &obj)
+    {
+        VoiceState state;
+        get(obj, "guild_id", state.guildId);
+        get(obj, "channel_id", state.channelId);
+        get(obj, "user_id", state.userId);
+        get(obj, "session_id", state.sessionId);
+        get(obj, "deaf", state.deaf);
+        get(obj, "mute", state.mute);
+        get(obj, "self_deaf", state.selfDeaf);
+        get(obj, "self_mute", state.selfMute);
+        get(obj, "self_stream", state.selfStream);
+        get(obj, "self_video", state.selfVideo);
+        get(obj, "suppress", state.suppress);
+        get(obj, "request_to_speak_timestamp", state.requestToSpeakTimestamp);
+        return state;
+    }
+};
+
+struct Emoji : Core::JsonUtils::JsonObject
+{
+    Field<Core::Snowflake, false, true> id; // null for unicode emojis
+    Field<QString> name;
+    Field<bool, true> animated;
+    Field<bool, true> available;
+    Field<bool, true> managed;
+    Field<bool, true> requireColons;
+    Field<QList<Core::Snowflake>, true> roles;
+
+    static Emoji fromJson(const QJsonObject &obj)
+    {
+        Emoji emoji;
+        if (!obj.contains("id") || obj.value("id").isNull())
+            emoji.id = nullptr;
+        else
+            get(obj, "id", emoji.id);
+        get(obj, "name", emoji.name);
+        get(obj, "animated", emoji.animated);
+        get(obj, "available", emoji.available);
+        get(obj, "managed", emoji.managed);
+        get(obj, "require_colons", emoji.requireColons);
+        get(obj, "roles", emoji.roles);
+        return emoji;
+    }
+
+    bool isUnicode() const { return !id.hasValue(); }
+
+    QString getImageUrl(int size = 48) const
+    {
+        if (isUnicode())
+            return {};
+        return QString("https://cdn.discordapp.com/emojis/%1.webp?size=%2")
+                .arg(id->toString())
+                .arg(size);
+    }
+};
+
+enum class StickerFormatType : int {
+    PNG = 1,
+    APNG = 2,
+    Lottie = 3,
+    GIF = 4,
+};
+
+struct Sticker : Core::JsonUtils::JsonObject
+{
+    Field<Core::Snowflake> id;
+    Field<QString> name;
+    Field<StickerFormatType> formatType;
+    Field<QString, true> description;
+    Field<QString, true> tags;
+    Field<Core::Snowflake, true> guildId;
+    Field<bool, true> available;
+
+    static Sticker fromJson(const QJsonObject &obj)
+    {
+        Sticker s;
+        get(obj, "id", s.id);
+        get(obj, "name", s.name);
+        get(obj, "format_type", s.formatType);
+        get(obj, "description", s.description);
+        get(obj, "tags", s.tags);
+        get(obj, "guild_id", s.guildId);
+        get(obj, "available", s.available);
+        return s;
+    }
+};
+
+struct GatewayGuild : Core::JsonUtils::JsonObject
+{
+    Field<Guild> properties;
+    Field<QList<Channel>> channels;
+    // active/joined
+    Field<QList<Channel>, true> threads;
+    Field<QList<Role>, true> roles;
+    Field<QList<Member>, true> members;
+    Field<QList<Emoji>, true> emojis;
+    Field<QList<Sticker>, true> stickers;
+    Field<QDateTime, true> joinedAt;
+    Field<bool, true> unavailable;
+
+    static GatewayGuild fromJson(const QJsonObject &obj)
+    {
+        GatewayGuild guild;
+        get(obj, "properties", guild.properties);
+        get(obj, "channels", guild.channels);
+        get(obj, "threads", guild.threads);
+        get(obj, "roles", guild.roles);
+        get(obj, "members", guild.members);
+        get(obj, "emojis", guild.emojis);
+        get(obj, "stickers", guild.stickers);
+        get(obj, "joined_at", guild.joinedAt);
+        get(obj, "unavailable", guild.unavailable);
+        return guild;
+    }
+
+    Guild asGuild() const
+    {
+        Guild guild = properties;
+        guild.roles = roles;
+        return guild;
+    }
+};
+
+struct EmbedFooter : Core::JsonUtils::JsonObject
+{
+    Field<QString> text;
+    Field<QString, true> iconUrl;
+    Field<QString, true> proxyIconUrl;
+
+    static EmbedFooter fromJson(const QJsonObject &obj)
+    {
+        EmbedFooter footer;
+        get(obj, "text", footer.text);
+        get(obj, "icon_url", footer.iconUrl);
+        get(obj, "proxy_icon_url", footer.proxyIconUrl);
+        return footer;
+    }
+};
+
+struct EmbedMedia : Core::JsonUtils::JsonObject
+{
+    Field<QString> url;
+    Field<QString, true> proxyUrl;
+    Field<int, true> width;
+    Field<int, true> height;
+    Field<QString, true> contentType;
+
+    static EmbedMedia fromJson(const QJsonObject &obj)
+    {
+        EmbedMedia image;
+        get(obj, "url", image.url);
+        get(obj, "proxy_url", image.proxyUrl);
+        get(obj, "width", image.width);
+        get(obj, "height", image.height);
+        get(obj, "content_type", image.contentType);
+        return image;
+    }
+};
+
+struct EmbedProvider : Core::JsonUtils::JsonObject
+{
+    Field<QString, true> name;
+    Field<QString, true> url;
+
+    static EmbedProvider fromJson(const QJsonObject &obj)
+    {
+        EmbedProvider provider;
+        get(obj, "name", provider.name);
+        get(obj, "url", provider.url);
+        return provider;
+    }
+};
+
+struct EmbedAuthor : Core::JsonUtils::JsonObject
+{
+    Field<QString> name;
+    Field<QString, true> url;
+    Field<QString, true> iconUrl;
+    Field<QString, true> proxyIconUrl;
+
+    static EmbedAuthor fromJson(const QJsonObject &obj)
+    {
+        EmbedAuthor author;
+        get(obj, "name", author.name);
+        get(obj, "url", author.url);
+        get(obj, "icon_url", author.iconUrl);
+        get(obj, "proxy_icon_url", author.proxyIconUrl);
+        return author;
+    }
+};
+
+struct EmbedField : Core::JsonUtils::JsonObject
+{
+    Field<QString> name;
+    Field<QString> value;
+    Field<bool, true> isInline;
+
+    static EmbedField fromJson(const QJsonObject &obj)
+    {
+        EmbedField field;
+        get(obj, "name", field.name);
+        get(obj, "value", field.value);
+        get(obj, "inline", field.isInline);
+        return field;
+    }
+};
+
+struct Embed : Core::JsonUtils::JsonObject
+{
+    Field<QString, true> title;
+    Field<QString, true> type;
+    Field<QString, true> description;
+    Field<QString, true> url;
+    Field<QDateTime, true> timestamp;
+    Field<int, true> color;
+    Field<EmbedFooter, true> footer;
+    Field<EmbedMedia, true> image;
+    Field<EmbedMedia, true> thumbnail;
+    Field<EmbedMedia, true> video;
+    Field<EmbedProvider, true> provider;
+    Field<EmbedAuthor, true> author;
+    Field<QList<EmbedField>, true> fields;
+
+    static Embed fromJson(const QJsonObject &obj)
+    {
+        Embed embed;
+        get(obj, "title", embed.title);
+        get(obj, "type", embed.type);
+        get(obj, "description", embed.description);
+        get(obj, "url", embed.url);
+        get(obj, "timestamp", embed.timestamp);
+        get(obj, "color", embed.color);
+        get(obj, "footer", embed.footer);
+        get(obj, "image", embed.image);
+        get(obj, "thumbnail", embed.thumbnail);
+        get(obj, "video", embed.video);
+        get(obj, "provider", embed.provider);
+        get(obj, "author", embed.author);
+        get(obj, "fields", embed.fields);
+        return embed;
+    }
+};
+
+struct Attachment : Core::JsonUtils::JsonObject
+{
+    Field<Core::Snowflake> id;
+    Field<QString> filename;
+    Field<QString, true> contentType;
+    Field<qint64> size;
+    Field<QString> url;
+    Field<QString> proxyUrl;
+    Field<int, true> width;
+    Field<int, true> height;
+    Field<AttachmentFlags, true> flags;
+
+    // Voice message fields
+    Field<QString, true> waveform;
+    Field<double, true> durationSecs;
+
+    // local preview of pasted bitmaps
+    QImage localPreview;
+
+    static Attachment fromJson(const QJsonObject &obj)
+    {
+        Attachment att;
+        get(obj, "id", att.id);
+        get(obj, "filename", att.filename);
+        get(obj, "content_type", att.contentType);
+        get(obj, "size", att.size);
+        get(obj, "url", att.url);
+        get(obj, "proxy_url", att.proxyUrl);
+        get(obj, "width", att.width);
+        get(obj, "height", att.height);
+        get(obj, "flags", att.flags);
+        get(obj, "waveform", att.waveform);
+        get(obj, "duration_secs", att.durationSecs);
+        return att;
+    }
+
+    bool isImage() const
+    {
+        if (!contentType.hasValue())
+            return false;
+        return contentType->startsWith("image/");
+    }
+
+    bool isVideo() const
+    {
+        if (!contentType.hasValue())
+            return false;
+        return contentType->startsWith("video/");
+    }
+
+    bool isSpoiler() const
+    {
+        return flags.hasValue() && flags->testFlag(AttachmentFlag::IS_SPOILER);
+    }
+
+    bool isVoiceMessage() const
+    {
+        if (!contentType.hasValue())
+            return false;
+        return contentType->startsWith("audio/");
+    }
+};
+
+struct ReactionCountDetails : Core::JsonUtils::JsonObject
+{
+    Field<int> burst;
+    Field<int> normal;
+
+    static ReactionCountDetails fromJson(const QJsonObject &obj)
+    {
+        ReactionCountDetails details;
+        get(obj, "burst", details.burst);
+        get(obj, "normal", details.normal);
+        return details;
+    }
+};
+
+struct Reaction : Core::JsonUtils::JsonObject
+{
+    Field<Emoji> emoji;
+    Field<int> count;
+    Field<ReactionCountDetails, true> countDetails;
+    Field<bool> me;
+    Field<bool, true> meBurst;
+    Field<int, true> burstCount;
+    Field<QList<QString>, true> burstColors;
+
+    static Reaction fromJson(const QJsonObject &obj)
+    {
+        Reaction reaction;
+        get(obj, "emoji", reaction.emoji);
+        get(obj, "count", reaction.count);
+        get(obj, "count_details", reaction.countDetails);
+        get(obj, "me", reaction.me);
+        get(obj, "me_burst", reaction.meBurst);
+        get(obj, "burst_count", reaction.burstCount);
+        get(obj, "burst_colors", reaction.burstColors);
+        return reaction;
+    }
+
+    QColor getBrightestBurstColor() const
+    {
+        if (!burstColors.hasValue() || burstColors->isEmpty())
+            return {};
+
+        QColor best;
+        float maxSaturation = -1;
+
+        for (const QString &hex : *burstColors) {
+            QColor color(hex);
+            if (!color.isValid())
+                continue;
+            if (color.saturationF() > maxSaturation) {
+                maxSaturation = color.saturationF();
+                best = color;
+            }
+        }
+
+        return best;
+    }
+};
+
+struct MessageReference : Core::JsonUtils::JsonObject
+{
+    Field<int, true> type;
+    Field<Core::Snowflake, true> messageId;
+    Field<Core::Snowflake, true> channelId;
+    Field<Core::Snowflake, true> guildId;
+
+    static MessageReference fromJson(const QJsonObject &obj)
+    {
+        MessageReference ref;
+        get(obj, "type", ref.type);
+        get(obj, "message_id", ref.messageId);
+        get(obj, "channel_id", ref.channelId);
+        get(obj, "guild_id", ref.guildId);
+        return ref;
+    }
+};
+
+struct Message : Core::JsonUtils::JsonObject
+{
+    Field<Core::Snowflake> id;
+    Field<QString, true> nonce;
+    Field<Core::Snowflake> channelId;
+    Field<User> author;
+    Field<QString> content;
+    Field<QDateTime> timestamp;
+    Field<QDateTime, false, true> editedTimestamp;
+    Field<MessageType> type;
+    Field<MessageFlags> flags;
+    Field<QList<Attachment>, true> attachments;
+    Field<QList<Embed>, true> embeds;
+    Field<QList<User>, true> mentions;
+    Field<QList<Core::Snowflake>, true> mentionRoles;
+    Field<QList<Reaction>, true> reactions;
+    Field<QList<Sticker>, true> stickerItems;
+
+    Field<MessageReference, true> messageReference;
+
+    // tri-state for referenced_message:
+    //   nullptr + referencedMessageNull=false  -> backend didn't fetch (unknown)
+    //   nullptr + referencedMessageNull=true   -> referenced message was deleted
+    //   non-null                               -> referenced message is present
+    std::shared_ptr<Message> referencedMessage;
+    bool referencedMessageNull = false;
+
+    // TRANSIENT for MESSAGE_UPDATE
+    Field<Core::Snowflake, true> guildId;
+    Field<ChannelType, true> channelType;
+
+    // cached data
+    QString parsedContentCached;
+    QString embedsJson;
+    QString reactionsJson;
+
+    // keys present in the original MESSAGE_UPDATE payload
+    QSet<QString> presentKeys;
+
+    // sent
+    bool isPendingOutbound = false;
+
+    static Message fromJson(const QJsonObject &obj)
+    {
+        Message message;
+
+        const QStringList keys = obj.keys();
+        message.presentKeys = QSet<QString>(keys.cbegin(), keys.cend());
+
+        get(obj, "id", message.id);
+        get(obj, "nonce", message.nonce);
+        get(obj, "channel_id", message.channelId);
+        get(obj, "author", message.author);
+        get(obj, "content", message.content);
+        get(obj, "timestamp", message.timestamp);
+        get(obj, "edited_timestamp", message.editedTimestamp);
+        get(obj, "type", message.type);
+        get(obj, "flags", message.flags);
+        get(obj, "attachments", message.attachments);
+        get(obj, "embeds", message.embeds);
+        get(obj, "mentions", message.mentions);
+        get(obj, "mention_roles", message.mentionRoles);
+        get(obj, "reactions", message.reactions);
+        get(obj, "sticker_items", message.stickerItems);
+        get(obj, "message_reference", message.messageReference);
+        get(obj, "guild_id", message.guildId);
+        get(obj, "channel_type", message.channelType);
+
+        // referenced_message: manually handle tri-state (absent / null / object)
+        auto refIt = obj.find("referenced_message");
+        if (refIt != obj.end()) {
+            if (refIt.value().isNull()) {
+                message.referencedMessageNull = true;
+            } else {
+                message.referencedMessage =
+                        std::make_shared<Message>(fromJson(refIt.value().toObject()));
+            }
+        }
+
+        if (obj.contains("embeds")) {
+            QJsonDocument doc(obj.value("embeds").toArray());
+            message.embedsJson = QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
+        }
+
+        if (obj.contains("reactions")) {
+            QJsonDocument doc(obj.value("reactions").toArray());
+            message.reactionsJson = QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
+        }
+
+        return message;
+    }
+
+    void applyUpdate(const Message &update)
+    {
+        const QSet<QString> &present = update.presentKeys;
+
+        if (present.contains(QStringLiteral("content")))
+            content = update.content;
+        if (present.contains(QStringLiteral("edited_timestamp")))
+            editedTimestamp = update.editedTimestamp;
+        if (present.contains(QStringLiteral("author")))
+            author = update.author;
+        if (present.contains(QStringLiteral("timestamp")))
+            timestamp = update.timestamp;
+        if (present.contains(QStringLiteral("type")))
+            type = update.type;
+        if (present.contains(QStringLiteral("flags")))
+            flags = update.flags;
+        if (present.contains(QStringLiteral("mentions")))
+            mentions = update.mentions;
+        if (present.contains(QStringLiteral("mention_roles")))
+            mentionRoles = update.mentionRoles;
+        if (present.contains(QStringLiteral("attachments")))
+            attachments = update.attachments;
+        if (present.contains(QStringLiteral("message_reference")))
+            messageReference = update.messageReference;
+
+        if (present.contains(QStringLiteral("embeds"))) {
+            embeds = update.embeds;
+            embedsJson = update.embedsJson;
+        }
+
+        if (present.contains(QStringLiteral("reactions"))) {
+            reactions = update.reactions;
+            reactionsJson = update.reactionsJson;
+        }
+    }
+};
+
+struct MuteConfig : Core::JsonUtils::JsonObject
+{
+    Field<QString, true, true> endTime;
+    Field<int, true> selectedTimeWindow;
+
+    static MuteConfig fromJson(const QJsonObject &obj)
+    {
+        MuteConfig config;
+        get(obj, "end_time", config.endTime);
+        get(obj, "selected_time_window", config.selectedTimeWindow);
+        return config;
+    }
+};
+
+struct ChannelOverride : Core::JsonUtils::JsonObject
+{
+    Field<Core::Snowflake> channelId;
+    Field<bool, true> collapsed;
+    Field<int, true> flags;
+    Field<MessageNotificationLevel, true> messageNotifications;
+    Field<bool, true> muted;
+    Field<MuteConfig, true, true> muteConfig;
+
+    static ChannelOverride fromJson(const QJsonObject &obj)
+    {
+        ChannelOverride co;
+        get(obj, "channel_id", co.channelId);
+        get(obj, "collapsed", co.collapsed);
+        get(obj, "flags", co.flags);
+        get(obj, "message_notifications", co.messageNotifications);
+        get(obj, "muted", co.muted);
+        get(obj, "mute_config", co.muteConfig);
+        return co;
+    }
+};
+
+struct UserGuildSettings : Core::JsonUtils::JsonObject
+{
+    Field<QList<ChannelOverride>, true> channelOverrides;
+    Field<int, true> flags;
+    Field<Core::Snowflake, false, true> guildId;
+    Field<bool, true> hideMutedChannels;
+    Field<MessageNotificationLevel, true> messageNotifications;
+    Field<bool, true> mobilePush;
+    Field<bool, true> muteScheduledEvents;
+    Field<bool, true> muted;
+    Field<MuteConfig, true, true> muteConfig;
+    Field<int, true> notifyHighlights;
+    Field<bool, true> suppressEveryone;
+    Field<bool, true> suppressRoles;
+    Field<int, true> version;
+
+    static UserGuildSettings fromJson(const QJsonObject &obj)
+    {
+        UserGuildSettings s;
+        get(obj, "channel_overrides", s.channelOverrides);
+        get(obj, "flags", s.flags);
+        get(obj, "guild_id", s.guildId);
+        get(obj, "hide_muted_channels", s.hideMutedChannels);
+        get(obj, "message_notifications", s.messageNotifications);
+        get(obj, "mobile_push", s.mobilePush);
+        get(obj, "mute_scheduled_events", s.muteScheduledEvents);
+        get(obj, "muted", s.muted);
+        get(obj, "mute_config", s.muteConfig);
+        get(obj, "notify_highlights", s.notifyHighlights);
+        get(obj, "suppress_everyone", s.suppressEveryone);
+        get(obj, "suppress_roles", s.suppressRoles);
+        get(obj, "version", s.version);
+        return s;
+    }
+};
+
+struct GuildFolderEntry : Core::JsonUtils::JsonObject
+{
+    Field<QList<Core::Snowflake>> guildIds;
+    Field<qint64, false, true> id;
+    Field<QString, false, true> name;
+    Field<qint64, false, true> color;
+
+    static GuildFolderEntry fromJson(const QJsonObject &obj)
+    {
+        GuildFolderEntry entry;
+        get(obj, "guild_ids", entry.guildIds);
+        get(obj, "id", entry.id);
+        get(obj, "name", entry.name);
+        get(obj, "color", entry.color);
+        return entry;
+    }
+};
+
+struct UserSettings : Core::JsonUtils::JsonObject
+{
+    Field<QList<GuildFolderEntry>, true> guildFolders;
+
+    static UserSettings fromJson(const QJsonObject &obj)
+    {
+        UserSettings settings;
+        get(obj, "guild_folders", settings.guildFolders);
+        return settings;
+    }
+};
+
+struct Relationship : Core::JsonUtils::JsonObject
+{
+    Field<Core::Snowflake> id;
+    Field<RelationshipType> type;
+    Field<User> user;
+    Field<QString, false, true> nickname;
+    Field<bool> userIgnored;
+    Field<bool, true> isSpamRequest;
+    Field<bool, true> strangerRequest;
+    Field<QDateTime, true> since;
+
+    static Relationship fromJson(const QJsonObject &obj)
+    {
+        Relationship r;
+        get(obj, "id", r.id);
+        get(obj, "type", r.type);
+        get(obj, "user", r.user);
+        get(obj, "nickname", r.nickname);
+        get(obj, "user_ignored", r.userIgnored);
+        get(obj, "is_spam_request", r.isSpamRequest);
+        get(obj, "stranger_request", r.strangerRequest);
+        get(obj, "since", r.since);
+        return r;
+    }
+};
+
+struct ReadStateEntry : Core::JsonUtils::JsonObject
+{
+    Field<Core::Snowflake> id;
+    Field<int, true> readStateType;
+    Field<Core::Snowflake, true, true> lastMessageId;
+    Field<int, true> mentionCount;
+    Field<int, true> flags;
+    Field<int, true, true> lastViewed;
+    Field<QString, true, true> lastPinTimestamp;
+
+    static ReadStateEntry fromJson(const QJsonObject &obj)
+    {
+        ReadStateEntry entry;
+        get(obj, "id", entry.id);
+        get(obj, "read_state_type", entry.readStateType);
+        get(obj, "last_message_id", entry.lastMessageId);
+        get(obj, "mention_count", entry.mentionCount);
+        get(obj, "flags", entry.flags);
+        get(obj, "last_viewed", entry.lastViewed);
+        get(obj, "last_pin_timestamp", entry.lastPinTimestamp);
+        return entry;
+    }
+};
+
+struct ConnectedAccount : Core::JsonUtils::JsonObject
+{
+    Field<QString> id;
+    Field<QString> type;
+    Field<QString> name;
+    Field<bool> verified;
+
+    static ConnectedAccount fromJson(const QJsonObject &obj)
+    {
+        ConnectedAccount c;
+        get(obj, "id", c.id);
+        get(obj, "type", c.type);
+        get(obj, "name", c.name);
+        get(obj, "verified", c.verified);
+        return c;
+    }
+};
+
+struct MutualGuildEntry : Core::JsonUtils::JsonObject
+{
+    Field<Core::Snowflake> id;
+    Field<QString, false, true> nick;
+
+    static MutualGuildEntry fromJson(const QJsonObject &obj)
+    {
+        MutualGuildEntry m;
+        get(obj, "id", m.id);
+        get(obj, "nick", m.nick);
+        return m;
+    }
+};
+
+struct UserProfileBadge : Core::JsonUtils::JsonObject
+{
+    Field<QString> id;
+    Field<QString> description;
+    Field<QString> icon;
+    Field<QString, true> link;
+
+    static UserProfileBadge fromJson(const QJsonObject &obj)
+    {
+        UserProfileBadge b;
+        get(obj, "id", b.id);
+        get(obj, "description", b.description);
+        get(obj, "icon", b.icon);
+        get(obj, "link", b.link);
+        return b;
+    }
+};
+
+struct UserProfileData : Core::JsonUtils::JsonObject
+{
+    Field<QString, true> bio;
+    Field<int, true, true> accentColor;
+    Field<QString, true, true> banner;
+    Field<QString> pronouns;
+
+    static UserProfileData fromJson(const QJsonObject &obj)
+    {
+        UserProfileData p;
+        get(obj, "bio", p.bio);
+        get(obj, "accent_color", p.accentColor);
+        get(obj, "banner", p.banner);
+        get(obj, "pronouns", p.pronouns);
+        return p;
+    }
+};
+
+struct GuildMemberProfile : Core::JsonUtils::JsonObject
+{
+    Field<Core::Snowflake, true> guildId;
+    Field<QString, true> bio;
+    Field<int, true, true> accentColor;
+    Field<QString, true, true> banner;
+    Field<QString> pronouns;
+
+    static GuildMemberProfile fromJson(const QJsonObject &obj)
+    {
+        GuildMemberProfile p;
+        get(obj, "guild_id", p.guildId);
+        get(obj, "bio", p.bio);
+        get(obj, "accent_color", p.accentColor);
+        get(obj, "banner", p.banner);
+        get(obj, "pronouns", p.pronouns);
+        return p;
+    }
+};
+
+struct UserProfile : Core::JsonUtils::JsonObject
+{
+    Field<User> user;
+    Field<UserProfileData> userProfile;
+    Field<PremiumType, false, true> premiumType;
+    Field<QDateTime, false, true> premiumSince;
+    Field<QDateTime, false, true> premiumGuildSince;
+    Field<QList<ConnectedAccount>> connectedAccounts;
+    Field<QList<MutualGuildEntry>, true> mutualGuilds;
+    Field<QList<User>, true> mutualFriends;
+    Field<int, true> mutualFriendsCount;
+    Field<Member, true> guildMember;
+    Field<GuildMemberProfile, true> guildMemberProfile;
+    Field<QList<UserProfileBadge>> badges;
+    Field<QString, true, true> legacyUsername;
+
+    static UserProfile fromJson(const QJsonObject &obj)
+    {
+        UserProfile p;
+        get(obj, "user", p.user);
+        get(obj, "user_profile", p.userProfile);
+        get(obj, "premium_type", p.premiumType);
+        get(obj, "premium_since", p.premiumSince);
+        get(obj, "premium_guild_since", p.premiumGuildSince);
+        get(obj, "connected_accounts", p.connectedAccounts);
+        get(obj, "mutual_guilds", p.mutualGuilds);
+        get(obj, "mutual_friends", p.mutualFriends);
+        get(obj, "mutual_friends_count", p.mutualFriendsCount);
+        get(obj, "guild_member", p.guildMember);
+        get(obj, "guild_member_profile", p.guildMemberProfile);
+        get(obj, "badges", p.badges);
+        get(obj, "legacy_username", p.legacyUsername);
+        return p;
+    }
+};
+
+// === REST API response structs ===
+
+struct BanEntry : Core::JsonUtils::JsonObject
+{
+    Field<User> user;
+    Field<QString, true> reason;
+
+    static BanEntry fromJson(const QJsonObject &obj)
+    {
+        BanEntry b;
+        get(obj, "user", b.user);
+        get(obj, "reason", b.reason);
+        return b;
+    }
+};
+
+struct InviteData : Core::JsonUtils::JsonObject
+{
+    Field<QString> code;
+    Field<User, true> inviter;
+    Field<Core::Snowflake, true> guildId;
+    Field<Core::Snowflake, true> channelId;
+    Field<int, true> uses;
+    Field<int, true> maxUses;
+    Field<int, true> maxAge;
+    Field<bool, true> temporary;
+    Field<QDateTime, true> createdAt;
+    Field<int, true> channelType;
+
+    static InviteData fromJson(const QJsonObject &obj)
+    {
+        InviteData i;
+        get(obj, "code", i.code);
+        get(obj, "inviter", i.inviter);
+        get(obj, "guild_id", i.guildId);
+        get(obj, "channel_id", i.channelId);
+        get(obj, "uses", i.uses);
+        get(obj, "max_uses", i.maxUses);
+        get(obj, "max_age", i.maxAge);
+        get(obj, "temporary", i.temporary);
+        get(obj, "created_at", i.createdAt);
+        get(obj, "channel_type", i.channelType);
+        return i;
+    }
+};
+
+struct WebhookData : Core::JsonUtils::JsonObject
+{
+    Field<Core::Snowflake> id;
+    Field<int> type;
+    Field<Core::Snowflake, true> guildId;
+    Field<Core::Snowflake, true> channelId;
+    Field<User, true> creator;
+    Field<QString> name;
+    Field<QString, true, true> avatar;
+    Field<QString, true> token;
+
+    static WebhookData fromJson(const QJsonObject &obj)
+    {
+        WebhookData w;
+        get(obj, "id", w.id);
+        get(obj, "type", w.type);
+        get(obj, "guild_id", w.guildId);
+        get(obj, "channel_id", w.channelId);
+        get(obj, "user", w.creator);
+        get(obj, "name", w.name);
+        get(obj, "avatar", w.avatar);
+        get(obj, "token", w.token);
+        return w;
+    }
+};
+
+struct IntegrationData : Core::JsonUtils::JsonObject
+{
+    Field<Core::Snowflake> id;
+    Field<QString> type;
+    Field<QString, true> name;
+    Field<bool, true> enabled;
+    Field<bool, true> syncing;
+    Field<Core::Snowflake, true> roleId;
+    Field<bool, true> enableEmoticons;
+    Field<int, true> expireBehavior;
+    Field<int, true> expireGracePeriod;
+    Field<User, true> user;
+    Field<QJsonObject, true> account;
+    Field<QDateTime, true> syncedAt;
+
+    static IntegrationData fromJson(const QJsonObject &obj)
+    {
+        IntegrationData i;
+        get(obj, "id", i.id);
+        get(obj, "type", i.type);
+        get(obj, "name", i.name);
+        get(obj, "enabled", i.enabled);
+        get(obj, "syncing", i.syncing);
+        get(obj, "role_id", i.roleId);
+        get(obj, "enable_emoticons", i.enableEmoticons);
+        get(obj, "expire_behavior", i.expireBehavior);
+        get(obj, "expire_grace_period", i.expireGracePeriod);
+        get(obj, "user", i.user);
+        if (obj.contains("account"))
+            i.account = obj["account"].toObject();
+        get(obj, "synced_at", i.syncedAt);
+        return i;
+    }
+};
+
+struct AuditLogEntry : Core::JsonUtils::JsonObject
+{
+    Field<Core::Snowflake> id;
+    Field<Core::Snowflake, true> userId;
+    Field<int, true> actionType;
+    Field<Core::Snowflake, true> targetId;
+    Field<QJsonArray, true> changes;
+    Field<QString, true> reason;
+
+    static AuditLogEntry fromJson(const QJsonObject &obj)
+    {
+        AuditLogEntry e;
+        get(obj, "id", e.id);
+        get(obj, "user_id", e.userId);
+        get(obj, "action_type", e.actionType);
+        get(obj, "target_id", e.targetId);
+        if (obj.contains("changes"))
+            e.changes = obj["changes"].toArray();
+        get(obj, "reason", e.reason);
+        return e;
+    }
+};
+
+struct AuditLogData : Core::JsonUtils::JsonObject
+{
+    Field<QList<AuditLogEntry>> auditLogEntries;
+    Field<QList<User>, true> users;
+    Field<QList<WebhookData>, true> webhooks;
+    Field<QList<IntegrationData>, true> integrations;
+
+    static AuditLogData fromJson(const QJsonObject &obj)
+    {
+        AuditLogData a;
+        if (obj.contains("audit_log_entries")) {
+            QJsonArray arr = obj["audit_log_entries"].toArray();
+            QList<AuditLogEntry> entries;
+            for (const QJsonValue &val : arr)
+                entries.append(AuditLogEntry::fromJson(val.toObject()));
+            a.auditLogEntries = entries;
+        }
+        if (obj.contains("users")) {
+            QJsonArray arr = obj["users"].toArray();
+            QList<User> users;
+            for (const QJsonValue &val : arr)
+                users.append(User::fromJson(val.toObject()));
+            a.users = users;
+        }
+        if (obj.contains("webhooks")) {
+            QJsonArray arr = obj["webhooks"].toArray();
+            QList<WebhookData> webhooks;
+            for (const QJsonValue &val : arr)
+                webhooks.append(WebhookData::fromJson(val.toObject()));
+            a.webhooks = webhooks;
+        }
+        if (obj.contains("integrations")) {
+            QJsonArray arr = obj["integrations"].toArray();
+            QList<IntegrationData> integrations;
+            for (const QJsonValue &val : arr)
+                integrations.append(IntegrationData::fromJson(val.toObject()));
+            a.integrations = integrations;
+        }
+        return a;
+    }
+};
+
+} // namespace Discord
+} // namespace Acheron

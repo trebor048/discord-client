@@ -1,0 +1,236 @@
+#include "common.h"
+#include <set>
+#include <stdexcept>
+
+#include <catch2/catch_all.hpp>
+#include <openssl/crypto.h>
+
+#if defined(WITH_OPENSSL3)
+#include <openssl/evp.h>
+#include <openssl/provider.h>
+#endif
+
+void
+ensure_fips_if_required()
+{
+  // NOLINTNEXTLINE (concurrency-mt-unsafe)
+  const auto* require = std::getenv("REQUIRE_FIPS");
+#if defined(WITH_OPENSSL3)
+  if (require != nullptr && OSSL_PROVIDER_available(nullptr, "fips") == 0) {
+    REQUIRE(OSSL_PROVIDER_load(nullptr, "fips") != nullptr);
+  }
+#else
+  if (require != nullptr && FIPS_mode() == 0) {
+    REQUIRE(FIPS_mode_set(1) == 1);
+  }
+#endif
+}
+
+bool
+fips()
+{
+#if defined(WITH_OPENSSL3)
+  return OSSL_PROVIDER_available(nullptr, "fips") == 1 ||
+         EVP_default_properties_is_fips_enabled(nullptr) == 1;
+#else
+  return FIPS_mode() != 0;
+#endif
+}
+
+bool
+fips_disable(AEAD::ID id)
+{
+  static const auto disabled = std::set<AEAD::ID>{
+    AEAD::ID::CHACHA20_POLY1305,
+  };
+  return disabled.count(id) > 0;
+}
+
+bool
+fips_disable(Signature::ID id)
+{
+  static const auto disabled = std::set<Signature::ID>{
+#if !defined(WITH_BORINGSSL)
+    Signature::ID::Ed448,
+#endif
+  };
+  return disabled.count(id) > 0;
+}
+
+const Signature&
+select_signature(Signature::ID id)
+{
+  switch (id) {
+    case Signature::ID::P256_SHA256:
+      return Signature::get<Signature::ID::P256_SHA256>();
+
+    case Signature::ID::P384_SHA384:
+      return Signature::get<Signature::ID::P384_SHA384>();
+
+    case Signature::ID::P521_SHA512:
+      return Signature::get<Signature::ID::P521_SHA512>();
+
+    case Signature::ID::Ed25519:
+      return Signature::get<Signature::ID::Ed25519>();
+
+#if !defined(WITH_BORINGSSL)
+    case Signature::ID::Ed448:
+      return Signature::get<Signature::ID::Ed448>();
+#endif
+
+    case Signature::ID::RSA_SHA256:
+      return Signature::get<Signature::ID::RSA_SHA256>();
+
+    case Signature::ID::RSA_SHA384:
+      return Signature::get<Signature::ID::RSA_SHA384>();
+
+    case Signature::ID::RSA_SHA512:
+      return Signature::get<Signature::ID::RSA_SHA512>();
+
+    default:
+      throw std::runtime_error("Unknown algorithm");
+  }
+}
+
+bool
+supported_kem(KEM::ID id)
+{
+  switch (id) {
+    case KEM::ID::DHKEM_P256_SHA256:
+    case KEM::ID::DHKEM_P384_SHA384:
+    case KEM::ID::DHKEM_P521_SHA512:
+    case KEM::ID::DHKEM_X25519_SHA256:
+#if !defined(WITH_BORINGSSL)
+    case KEM::ID::DHKEM_X448_SHA512:
+#endif
+#if defined(WITH_PQ)
+    case KEM::ID::MLKEM512:
+    case KEM::ID::MLKEM768:
+    case KEM::ID::MLKEM1024:
+    case KEM::ID::MLKEM768_P256:
+    case KEM::ID::MLKEM1024_P384:
+    case KEM::ID::MLKEM768_X25519:
+#endif
+      return true;
+
+    default:
+      return false;
+  }
+}
+
+bool
+supported_kdf(KDF::ID id)
+{
+  switch (id) {
+    case KDF::ID::HKDF_SHA256:
+    case KDF::ID::HKDF_SHA384:
+    case KDF::ID::HKDF_SHA512:
+      return true;
+
+    default:
+      return false;
+  }
+}
+
+bool
+supported_aead(AEAD::ID id)
+{
+  switch (id) {
+    case AEAD::ID::AES_128_GCM:
+    case AEAD::ID::AES_256_GCM:
+    case AEAD::ID::CHACHA20_POLY1305:
+    case AEAD::ID::export_only:
+      return true;
+
+    default:
+      return false;
+  }
+}
+
+bool
+supported(KEM::ID kem, KDF::ID kdf, AEAD::ID aead)
+{
+  return supported_kem(kem) && supported_kdf(kdf) && supported_aead(aead);
+}
+
+const KEM&
+select_kem(KEM::ID id)
+{
+  switch (id) {
+    case KEM::ID::DHKEM_P256_SHA256:
+      return KEM::get<KEM::ID::DHKEM_P256_SHA256>();
+
+    case KEM::ID::DHKEM_P384_SHA384:
+      return KEM::get<KEM::ID::DHKEM_P384_SHA384>();
+
+    case KEM::ID::DHKEM_P521_SHA512:
+      return KEM::get<KEM::ID::DHKEM_P521_SHA512>();
+
+    case KEM::ID::DHKEM_X25519_SHA256:
+      return KEM::get<KEM::ID::DHKEM_X25519_SHA256>();
+
+#if !defined(WITH_BORINGSSL)
+    case KEM::ID::DHKEM_X448_SHA512:
+      return KEM::get<KEM::ID::DHKEM_X448_SHA512>();
+#endif
+
+#if defined(WITH_PQ)
+    case KEM::ID::MLKEM512:
+      return KEM::get<KEM::ID::MLKEM512>();
+
+    case KEM::ID::MLKEM768:
+      return KEM::get<KEM::ID::MLKEM768>();
+
+    case KEM::ID::MLKEM1024:
+      return KEM::get<KEM::ID::MLKEM1024>();
+
+    case KEM::ID::MLKEM768_P256:
+      return KEM::get<KEM::ID::MLKEM768_P256>();
+
+    case KEM::ID::MLKEM1024_P384:
+      return KEM::get<KEM::ID::MLKEM1024_P384>();
+
+    case KEM::ID::MLKEM768_X25519:
+      return KEM::get<KEM::ID::MLKEM768_X25519>();
+#endif
+
+    default:
+      throw std::runtime_error("Unknown algorithm");
+  }
+}
+
+const KDF&
+select_kdf(KDF::ID id)
+{
+  switch (id) {
+    case KDF::ID::HKDF_SHA256:
+      return KDF::get<KDF::ID::HKDF_SHA256>();
+
+    case KDF::ID::HKDF_SHA384:
+      return KDF::get<KDF::ID::HKDF_SHA384>();
+
+    case KDF::ID::HKDF_SHA512:
+      return KDF::get<KDF::ID::HKDF_SHA512>();
+
+    default:
+      throw std::runtime_error("Unknown algorithm");
+  }
+}
+
+const AEAD&
+select_aead(AEAD::ID id)
+{
+  switch (id) {
+    case AEAD::ID::AES_128_GCM:
+      return AEAD::get<AEAD::ID::AES_128_GCM>();
+
+    case AEAD::ID::AES_256_GCM:
+      return AEAD::get<AEAD::ID::AES_256_GCM>();
+
+    case AEAD::ID::CHACHA20_POLY1305:
+      return AEAD::get<AEAD::ID::CHACHA20_POLY1305>();
+
+    default:
+      throw std::runtime_error("Unknown algorithm");
+  }
+}

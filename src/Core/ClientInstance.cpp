@@ -1,0 +1,1310 @@
+#include "ClientInstance.hpp"
+#include "ReadStateManager.hpp"
+#ifndef ACHERON_NO_VOICE
+#include "Core/AV/VoiceManager.hpp"
+#endif
+
+#include <algorithm>
+
+#include <QSet>
+#include <QTimer>
+
+#include "Core/EmojiCatalog.hpp"
+#include "Core/Logging.hpp"
+#include "Discord/Entities.hpp"
+#include "ForumManager.hpp"
+#include "Discord/Enums.hpp"
+#include "Storage/DatabaseManager.hpp"
+#include "Storage/GuildRepository.hpp"
+#include "Storage/ChannelRepository.hpp"
+#include "Storage/RoleRepository.hpp"
+#include "Storage/MemberRepository.hpp"
+#include "Storage/Transaction.hpp"
+
+namespace Acheron {
+namespace Core {
+
+namespace {
+constexpr int kPendingMemberRequestTimeoutMs = 5 * 60 * 1000;
+constexpr int kPendingMemberRequestSweepMs = 60 * 1000;
+
+void registerGuildEmojis(const Discord::GatewayGuild &guild)
+{
+    if (!guild.emojis.hasValue() || !guild.properties.hasValue())
+        return;
+
+    const QString guildName = guild.properties->name.hasValue() ? guild.properties->name.get()
+                                                                 : QString();
+    const QString guildIdStr = guild.properties->id.hasValue()
+                                       ? QString::number(guild.properties->id.get())
+                                       : QString();
+    QVector<EmojiCatalogItem> items;
+    items.reserve(guild.emojis->size());
+    for (const auto &emoji : guild.emojis.get()) {
+        if (!emoji.id.hasValue() || emoji.id->toString().isEmpty() || !emoji.name.hasValue())
+            continue;
+
+        EmojiCatalogItem item;
+        item.name = emoji.name.get();
+        item.customId = emoji.id->toString();
+        item.animated = emoji.animated.get();
+        item.guildName = guildName;
+        item.guildId = guildIdStr;
+        items.append(item);
+    }
+    EmojiCatalog::registerCustomEmojis(items);
+}
+
+void updateGuildEmojis(Core::Snowflake guildId, const QList<Discord::Emoji> &emojis,
+                       const QString &guildName)
+{
+    const QString gid = QString::number(guildId);
+    EmojiCatalog::unregisterCustomEmojisByGuild(gid);
+
+    QVector<EmojiCatalogItem> items;
+    items.reserve(emojis.size());
+    for (const auto &emoji : emojis) {
+        if (!emoji.id.hasValue() || emoji.id->toString().isEmpty() || !emoji.name.hasValue())
+            continue;
+
+        EmojiCatalogItem item;
+        item.name = emoji.name.get();
+        item.customId = emoji.id->toString();
+        item.animated = emoji.animated.get();
+        item.guildName = guildName;
+        item.guildId = gid;
+        items.append(item);
+    }
+    EmojiCatalog::registerCustomEmojis(items);
+}
+} // namespace
+ClientInstance::ClientInstance(const AccountInfo &info,
+                               Discord::CaptchaResolver *captchaResolver,
+                               QObject *parent)
+    : QObject(parent),
+      account(info),
+      roleRepo(info.id),
+      guildRepo(info.id),
+      channelRepo(info.id),
+      memberRepo(info.id)
+{
+    client = new Discord::Client(info.token, info.gatewayUrl, info.restUrl, captchaResolver, this);
+
+    Storage::DatabaseManager::instance().openCacheDatabase(info.id);
+
+    userManager = new UserManager(info.id, this);
+    messageManager = new MessageManager(info.id, client, userManager, this);
+    messageManager->setChannelResolver([this](Snowflake channelId) -> QString {
+        auto ch = channelRepo.getChannel(channelId);
+        if (ch && ch->name.hasValue())
+            return ch->name.get();
+        return QString::number(channelId);
+    });
+
+    permissionManager = new PermissionManager(info.id, this);
+    readStateManager = new ReadStateManager(info.id, permissionManager, this);
+    forumManager = new ForumManager(client, channelRepo, readStateManager, this);
+    memberListManager = new MemberListManager(channelRepo, roleRepo, this);
+    relationshipManager = new RelationshipManager(this);
+    pendingMemberRequestCleanupTimer = new QTimer(this);
+    pendingMemberRequestCleanupTimer->setInterval(kPendingMemberRequestSweepMs);
+    connect(pendingMemberRequestCleanupTimer, &QTimer::timeout, this,
+            &ClientInstance::cleanupPendingMemberRequests);
+    pendingMemberRequestCleanupTimer->start();
+#ifndef ACHERON_NO_VOICE
+    voiceManager = new AV::VoiceManager(info.id, this);
+#endif
+
+    connect(client, &Discord::Client::stateChanged, this, &ClientInstance::stateChanged);
+    connect(client, &Discord::Client::reconnecting, this, &ClientInstance::reconnecting);
+    connect(client, &Discord::Client::authenticationFailed, this,
+            [this]() { emit authenticationFailed(account); });
+
+    connect(client, &Discord::Client::ready, this, [this](const Discord::Ready &ready) {
+        account.username = ready.user->username;
+        account.displayName = ready.user->globalName;
+        account.avatar = ready.user->avatar;
+        emit detailsUpdated(account);
+
+        // Populate in-memory state — this must happen regardless of DB status
+        // so the UI shows guilds/channels even if caching fails.
+        userManager->saveUser(ready.user);
+        if (ready.users.hasValue())
+            userManager->saveUsers(ready.users.get());
+        if (ready.relationships.hasValue())
+            relationshipManager->loadFromReady(ready.relationships.get());
+        userManager->loadNotesFromReady(ready.notes.get());
+        readStateManager->loadFromReady(
+                ready.readState.hasValue() ? ready.readState.get()
+                                           : QList<Discord::ReadStateEntry>{},
+                ready.userGuildSettings.hasValue() ? ready.userGuildSettings.get()
+                                                   : QList<Discord::UserGuildSettings>{});
+
+        for (const auto &guild : ready.guilds.get()) {
+            if (!guild.properties.hasValue())
+                continue;
+            initGuildReadState(guild);
+            registerGuildEmojis(guild);
+        }
+        emit customEmojisChanged();
+
+        forumManager->loadFromReady(ready.guilds.get());
+
+        if (ready.privateChannels.hasValue()) {
+            for (const auto &channel : ready.privateChannels.get()) {
+                Snowflake lastMsg = channel.lastMessageId.hasValue()
+                                            ? channel.lastMessageId.get()
+                                            : channel.id.get();
+                readStateManager->updateChannelLastMessageId(channel.id.get(), lastMsg);
+            }
+        }
+
+        // Emit ready BEFORE attempting DB persistence — the UI depends on this
+        // signal to populate the channel tree and show content to the user.
+        emit this->ready(ready);
+
+        // Cache persistence is best-effort; failures are logged but do not
+        // prevent the UI from working.
+        {
+            QString connName = Storage::DatabaseManager::instance().getCacheConnectionName(account.id);
+            QSqlDatabase db = QSqlDatabase::database(connName);
+            if (!db.isValid()) {
+                qCWarning(LogCore) << "Skipping READY cache persistence — DB unavailable";
+                return;
+            }
+
+            Storage::Transaction txn(db);
+            if (!txn.ownsTransaction()) {
+                qCWarning(LogCore) << "Skipping READY cache persistence — transaction failed";
+                return;
+            }
+
+            for (size_t i = 0; i < ready.guilds->size(); i++) {
+                const auto &guild = ready.guilds->at(i);
+                const QList<Discord::Member> *members = ready.mergedMembers.hasValue()
+                    ? &ready.mergedMembers->at(i) : nullptr;
+                saveGuild(guild, members, ready.user->id.get(), db);
+            }
+
+            if (ready.privateChannels.hasValue()) {
+                for (const auto &channel : ready.privateChannels.get()) {
+                    channelRepo.saveChannel(channel, db);
+                    QList<Core::Snowflake> recipientIds;
+                    if (channel.recipients.hasValue()) {
+                        for (const auto &user : channel.recipients.get())
+                            recipientIds.append(user.id.get());
+                    } else if (channel.recipientIds.hasValue()) {
+                        recipientIds = channel.recipientIds.get();
+                    }
+                    if (!recipientIds.isEmpty())
+                        channelRepo.saveChannelRecipients(channel.id.get(), recipientIds, db);
+                }
+            }
+
+            txn.commit();
+        }
+    });
+
+    connect(client, &Discord::Client::readySupplemental, this,
+            [this](const Discord::ReadySupplemental &data) {
+                QString connName =
+                        Storage::DatabaseManager::instance().getCacheConnectionName(account.id);
+                QSqlDatabase db = QSqlDatabase::database(connName);
+
+                if (!db.transaction()) {
+                    qCWarning(LogCore) << "Failed to start READY_SUPPLEMENTAL cache transaction";
+                    return;
+                }
+
+                if (!data.guilds.hasValue() || !data.mergedMembers.hasValue()) {
+                    qCWarning(LogCore) << "READY_SUPPLEMENTAL payload missing guild or member data";
+                    db.rollback();
+                    return;
+                }
+
+                if (data.guilds->size() != data.mergedMembers->size()) {
+                    qCWarning(LogCore) << "READY_SUPPLEMENTAL payload guild/member array size mismatch:"
+                                       << data.guilds->size() << "guilds vs"
+                                       << data.mergedMembers->size() << "member groups";
+                    db.rollback();
+                    return;
+                }
+
+                for (size_t i = 0; i < data.mergedMembers->size(); i++) {
+                    const auto &guild = data.guilds->at(i);
+                    const auto &members = data.mergedMembers->at(i);
+
+                    for (const auto &member : members)
+                        if (!memberRepo.saveMember(guild.id, member.userId.get(), member))
+                            goto rollback;
+                }
+
+                if (!db.commit()) {
+                    qCWarning(LogCore) << "Failed to commit READY_SUPPLEMENTAL cache transaction:"
+                                       << db.lastError().text();
+                    db.rollback();
+                    return;
+                }
+
+#ifndef ACHERON_NO_VOICE
+                for (const auto &guild : data.guilds.get()) {
+                    if (!guild.voiceStates.hasValue())
+                        continue;
+                    for (auto vs : guild.voiceStates.get()) {
+                        if (!vs.guildId.hasValue())
+                            vs.guildId = guild.id.get();
+                        voiceManager->handleVoiceStateUpdate(vs);
+                    }
+                }
+#endif
+                return;
+
+rollback:
+                db.rollback();
+                return;
+            });
+
+    connect(client, &Discord::Client::messageCreated, messageManager, &MessageManager::onMessageCreated);
+    connect(client, &Discord::Client::messageUpdated, messageManager, &MessageManager::onMessageUpdated);
+    connect(client, &Discord::Client::messageDeleted, messageManager, &MessageManager::onMessageDeleted);
+    connect(client, &Discord::Client::messageSendFailed, messageManager, &MessageManager::onMessageSendFailed);
+    connect(client, &Discord::Client::attachmentUploadProgress, messageManager, &MessageManager::attachmentUploadProgress);
+    connect(client, &Discord::Client::messageReactionAdd, messageManager, &MessageManager::onReactionAdd);
+    connect(client, &Discord::Client::messageReactionAddMany, messageManager, &MessageManager::onReactionAddMany);
+    connect(client, &Discord::Client::messageReactionRemove, messageManager, &MessageManager::onReactionRemove);
+    connect(client, &Discord::Client::messageReactionRemoveAll, messageManager, &MessageManager::onReactionRemoveAll);
+    connect(client, &Discord::Client::messageReactionRemoveEmoji, messageManager, &MessageManager::onReactionRemoveEmoji);
+    connect(client, &Discord::Client::relationshipAdded, relationshipManager, &RelationshipManager::onRelationshipAdded);
+    connect(client, &Discord::Client::relationshipUpdated, relationshipManager, &RelationshipManager::onRelationshipUpdated);
+    connect(client, &Discord::Client::relationshipRemoved, relationshipManager, &RelationshipManager::onRelationshipRemoved);
+    connect(client, &Discord::Client::userNoteUpdated, this,
+            [this](const Discord::UserNoteUpdate &event) {
+                if (event.id.hasValue() && event.note.hasValue())
+                    userManager->setCachedNote(event.id.get(), event.note.get());
+            });
+
+    connect(client, &Discord::Client::guildCreated, this, &ClientInstance::onGuildCreated);
+    connect(client, &Discord::Client::guildDeleted, this, &ClientInstance::onGuildDeleted);
+    connect(client, &Discord::Client::guildEmojisUpdated, this, [this](const Discord::GuildEmojisUpdate &event) {
+        QString guildName;
+        auto guild = guildRepo.getGuild(event.guildId.get());
+        if (guild && guild->name.hasValue())
+            guildName = guild->name.get();
+        updateGuildEmojis(event.guildId.get(), event.emojis.get(), guildName);
+        emit customEmojisChanged();
+    });
+    connect(client, &Discord::Client::guildStickersUpdated, this, [this](const Discord::GuildStickersUpdate &event) {
+        stickerStore[event.guildId.get()] = event.stickers.get();
+        emit stickerStoreChanged(event.guildId.get());
+    });
+    connect(client, &Discord::Client::channelCreated, this, &ClientInstance::onChannelCreated);
+    connect(client, &Discord::Client::channelUpdated, this, &ClientInstance::onChannelUpdated);
+    connect(client, &Discord::Client::channelDeleted, this, &ClientInstance::onChannelDeleted);
+    connect(client, &Discord::Client::guildRoleCreated, this, &ClientInstance::onGuildRoleCreated);
+    connect(client, &Discord::Client::guildRoleUpdated, this, &ClientInstance::onGuildRoleUpdated);
+    connect(client, &Discord::Client::guildRoleDeleted, this, &ClientInstance::onGuildRoleDeleted);
+    connect(client, &Discord::Client::guildMembersChunk, this, &ClientInstance::onGuildMembersChunk);
+    connect(client, &Discord::Client::guildMemberUpdated, this, &ClientInstance::onGuildMemberUpdate);
+    connect(client, &Discord::Client::guildMemberListUpdate, memberListManager, &MemberListManager::handleMemberListUpdate);
+    connect(client, &Discord::Client::guildMemberListUpdate, this, &ClientInstance::onGuildMemberListUpdate);
+    connect(memberListManager, &MemberListManager::subscriptionRequested, client, &Discord::Client::subscribeToGuildChannel);
+    connect(messageManager, &MessageManager::messagesReceived, this, &ClientInstance::onMessagesReceived);
+
+    connect(client, &Discord::Client::messageAcked, readStateManager, &ReadStateManager::onMessageAck);
+    connect(client, &Discord::Client::userGuildSettingsUpdated, readStateManager, &ReadStateManager::onUserGuildSettingsUpdate);
+
+    connect(client, &Discord::Client::messageCreated, this, &ClientInstance::onMessageCreated);
+
+    connect(client, &Discord::Client::threadCreated, forumManager, &ForumManager::onThreadCreated);
+    connect(client, &Discord::Client::threadUpdated, forumManager, &ForumManager::onThreadUpdated);
+    connect(client, &Discord::Client::threadDeleted, forumManager, &ForumManager::onThreadDeleted);
+    connect(client, &Discord::Client::threadListSync, forumManager, &ForumManager::onThreadListSync);
+    connect(client, &Discord::Client::threadMemberUpdated, forumManager, &ForumManager::onThreadMemberUpdate);
+    connect(client, &Discord::Client::forumUnreads, forumManager, &ForumManager::onForumUnreads);
+    connect(client, &Discord::Client::messageCreated, forumManager, &ForumManager::onMessageCreated);
+
+    connect(client, &Discord::Client::threadCreated, this, &ClientInstance::onThreadCreated);
+    connect(client, &Discord::Client::threadUpdated, this, &ClientInstance::onThreadUpdated);
+    connect(client, &Discord::Client::threadDeleted, this, &ClientInstance::onThreadDeleted);
+    connect(client, &Discord::Client::threadListSync, this, &ClientInstance::onThreadListSync);
+    connect(client, &Discord::Client::threadMemberUpdated, this, &ClientInstance::onThreadMemberUpdate);
+    connect(client, &Discord::Client::threadMembersUpdated, this, &ClientInstance::onThreadMembersUpdate);
+
+    connect(forumManager, &ForumManager::badgeChanged, this, &ClientInstance::forumBadgeChanged);
+    connect(forumManager, &ForumManager::joinedPostsChanged, this, &ClientInstance::forumJoinedPostsChanged);
+
+    connect(readStateManager, &ReadStateManager::readStateUpdated, this, &ClientInstance::readStateChanged);
+    connect(readStateManager, &ReadStateManager::guildSettingsUpdated, this, &ClientInstance::guildSettingsChanged);
+
+    connect(readStateManager, &ReadStateManager::ackRequested, this, &ClientInstance::handleAckRequest);
+    connect(readStateManager, &ReadStateManager::bulkAckRequested, this, &ClientInstance::handleBulkAckRequest);
+
+    connect(client, &Discord::Client::voiceStateUpdated, this,
+            [this](const Discord::VoiceState &event) {
+                qCInfo(LogVoice) << "VOICE_STATE_UPDATE: user" << event.userId.get()
+                                 << "channel" << (event.channelId.isNull() ? 0 : static_cast<quint64>(event.channelId.get()))
+                                 << "session" << event.sessionId.get()
+                                 << "mute" << event.selfMute.get()
+                                 << "deaf" << event.selfDeaf.get();
+
+                // track our own voice state
+                if (event.userId.get() == account.id) {
+                    if (event.channelId.isNull() || !event.channelId.get().isValid()) {
+                        currentVoiceChannelId = Snowflake::Invalid;
+                        currentVoiceGuildId = Snowflake::Invalid;
+                    } else {
+                        currentVoiceChannelId = event.channelId.get();
+                        currentVoiceGuildId = event.guildId.hasValue() ? event.guildId.get() : Snowflake::Invalid;
+                    }
+                    emit voiceStateChanged(currentVoiceChannelId, currentVoiceGuildId);
+                }
+
+#ifndef ACHERON_NO_VOICE
+                voiceManager->handleVoiceStateUpdate(event);
+#endif
+            });
+
+    connect(client, &Discord::Client::presenceUpdated, this,
+            [this](const Discord::PresenceUpdate &event) {
+                // Track our own presence status so consumers (e.g. the
+                // notification manager) can react to Do Not Disturb.
+                if (event.user.get().id.get() != account.id)
+                    return;
+                const QString status = event.status.get();
+                if (status.isEmpty() || status == currentPresenceStatus)
+                    return;
+                currentPresenceStatus = status;
+                emit presenceStatusChanged(currentPresenceStatus);
+            });
+
+#ifndef ACHERON_NO_VOICE
+    connect(client, &Discord::Client::voiceServerUpdated, this,
+            [this](const Discord::VoiceServerUpdate &event) {
+                qCInfo(LogVoice) << "VOICE_SERVER_UPDATE: guild" << event.guildId.get()
+                                 << "endpoint" << (event.endpoint.isNull() ? "null" : event.endpoint.get())
+                                 << "token" << event.token.get().left(8) + "...";
+
+                voiceManager->handleVoiceServerUpdate(event);
+            });
+#endif
+}
+
+bool ClientInstance::saveGuild(const Discord::GatewayGuild &guild, const QList<Discord::Member> *members, Snowflake myId, QSqlDatabase &db)
+{
+    Snowflake guildId = guild.properties->id.get();
+
+    const Discord::Member *me = nullptr;
+    if (members) {
+        for (const auto &member : *members) {
+            Snowflake memberId = member.userId.hasValue()
+                                         ? member.userId.get()
+                                         : (member.user.hasValue() ? member.user->id.get()
+                                                                   : Snowflake::Invalid);
+            if (!memberId.isValid())
+                continue;
+            if (member.user.hasValue())
+                userManager->saveUser(member.user.get());
+            if (!memberRepo.saveMember(guildId, memberId, member))
+                return false;
+            if (memberId == myId)
+                me = &member;
+        }
+    }
+
+    if (me && guild.roles.hasValue() && guild.channels.hasValue())
+        permissionManager->precomputeGuildPermissions(guild.asGuild(), *me, guild.roles.get(), guild.channels.get(), myId);
+
+    guildRepo.saveGuild(guild.asGuild(), db);
+
+    if (guild.roles.hasValue())
+        roleRepo.saveRoles(guildId, guild.roles.get(), db);
+
+    if (guild.channels.hasValue()) {
+        for (const auto &channel : guild.channels.get()) {
+            // we dont get a guild_id from the gateway here
+            Discord::Channel copy = channel;
+            copy.guildId = guildId;
+            channelRepo.saveChannel(copy, db);
+
+            if (copy.permissionOverwrites.hasValue()
+                && !channelRepo.savePermissionOverwrites(copy.id.get(),
+                                                        copy.permissionOverwrites.get(), db))
+                return false;
+        }
+    }
+
+    return true;
+}
+
+void ClientInstance::initGuildReadState(const Discord::GatewayGuild &guild)
+{
+    const Discord::Guild &props = guild.properties.get();
+    Snowflake guildId = props.id.get();
+
+    readStateManager->setGuildReadInfo(
+            guildId,
+            guild.joinedAt.hasValue() ? guild.joinedAt.get() : QDateTime(),
+            props.defaultMessageNotifications.hasValue()
+                    ? props.defaultMessageNotifications.get()
+                    : Discord::MessageNotificationLevel::ALL_MESSAGES);
+
+    if (guild.channels.hasValue()) {
+        for (const auto &channel : guild.channels.get()) {
+            readStateManager->registerChannelGuild(channel.id.get(), guildId);
+            if (channel.lastMessageId.hasValue())
+                readStateManager->updateChannelLastMessageId(channel.id.get(), channel.lastMessageId.get());
+        }
+    }
+
+    if (guild.threads.hasValue()) {
+        for (const auto &thread : guild.threads.get()) {
+            if (isForumParent(thread.parentId.hasValue() ? thread.parentId.get() : Snowflake()))
+                registerThreadReadState(thread, guildId);
+            else
+                ingestThread(thread, guildId);
+        }
+    }
+}
+
+void ClientInstance::onGuildCreated(const Discord::GatewayGuild &guild)
+{
+    if (!guild.properties.hasValue())
+        return;
+
+    QString connName = Storage::DatabaseManager::instance().getCacheConnectionName(account.id);
+    QSqlDatabase db = QSqlDatabase::database(connName);
+
+    db.transaction();
+    saveGuild(
+            guild,
+            guild.members.hasValue() ? &guild.members.get() : nullptr,
+            client->getMe().id.get(),
+            db);
+    db.commit();
+
+    initGuildReadState(guild);
+
+    registerGuildEmojis(guild);
+    emit customEmojisChanged();
+
+    if (guild.stickers.hasValue()) {
+        const auto gid = guild.properties->id.get();
+        stickerStore[gid] = guild.stickers.get();
+        emit stickerStoreChanged(gid);
+    }
+
+    emit guildCreated(guild);
+}
+
+void ClientInstance::onGuildDeleted(const Discord::GuildDelete &event)
+{
+    if (!event.id.hasValue() || !event.userRemoved())
+        return;
+
+    Snowflake guildId = event.id.get();
+
+    qCInfo(LogCore) << "Removed from guild:" << guildId;
+
+    QList<Discord::Channel> channels = channelRepo.getChannelsForGuild(guildId);
+
+    if (!runInCacheTransaction("guild deletion", [&](QSqlDatabase &db) {
+            for (const auto &channel : channels)
+                channelRepo.deleteChannel(channel.id.get(), db);
+            roleRepo.deleteRolesForGuild(guildId, db);
+            memberRepo.deleteMembersForGuild(guildId, db);
+            guildRepo.deleteGuild(guildId, db);
+        }))
+        return;
+
+    for (const auto &channel : channels) {
+        Snowflake channelId = channel.id.get();
+        permissionManager->invalidateChannelCache(channelId);
+        forumParentCache.remove(channelId);
+    }
+
+    readStateManager->removeGuild(guildId);
+    userManager->removeGuildMembers(guildId);
+    memberListManager->clearGuild(guildId);
+    permissionManager->invalidateUserGuildCache(account.id, guildId);
+    rolesCacheByGuild.remove(guildId);
+
+    emit guildRemoved(guildId);
+}
+
+void ClientInstance::onChannelCreated(const Discord::ChannelCreate &event)
+{
+    if (!event.channel.hasValue())
+        return;
+
+    const Discord::Channel &channel = event.channel.get();
+    Core::Snowflake channelId = channel.id.get();
+
+    QString connName = Storage::DatabaseManager::instance().getCacheConnectionName(account.id);
+    QSqlDatabase db = QSqlDatabase::database(connName);
+
+    db.transaction();
+
+    channelRepo.saveChannel(channel, db);
+
+    if (channel.permissionOverwrites.hasValue())
+        channelRepo.savePermissionOverwrites(channelId, channel.permissionOverwrites.get(), db);
+
+    if (channel.type == Discord::ChannelType::DM || channel.type == Discord::ChannelType::GROUP_DM) {
+        QList<Core::Snowflake> recipientIds;
+        if (channel.recipients.hasValue()) {
+            for (const auto &user : channel.recipients.get()) {
+                userManager->saveUser(user);
+                recipientIds.append(user.id.get());
+            }
+        } else if (channel.recipientIds.hasValue()) {
+            recipientIds = channel.recipientIds.get();
+        }
+
+        if (!recipientIds.isEmpty())
+            channelRepo.saveChannelRecipients(channelId, recipientIds, db);
+    }
+
+    db.commit();
+
+    if (channel.type == Discord::ChannelType::DM || channel.type == Discord::ChannelType::GROUP_DM) {
+        Snowflake lastMsg = channel.lastMessageId.hasValue()
+                                    ? channel.lastMessageId.get()
+                                    : channelId;
+        readStateManager->updateChannelLastMessageId(channelId, lastMsg);
+    } else {
+        if (channel.guildId.hasValue())
+            readStateManager->registerChannelGuild(channelId, channel.guildId.get());
+        if (channel.lastMessageId.hasValue())
+            readStateManager->updateChannelLastMessageId(channelId, channel.lastMessageId.get());
+    }
+
+    forumParentCache.remove(channelId);
+
+    emit channelCreated(event);
+}
+
+void ClientInstance::onChannelUpdated(const Discord::ChannelUpdate &event)
+{
+    if (!event.channel.hasValue())
+        return;
+
+    const Discord::Channel &channel = event.channel.get();
+    Core::Snowflake channelId = channel.id.get();
+
+    qCDebug(LogCore) << "Channel updated:" << channelId;
+
+    QString connName = Storage::DatabaseManager::instance().getCacheConnectionName(account.id);
+    QSqlDatabase db = QSqlDatabase::database(connName);
+
+    db.transaction();
+
+    channelRepo.saveChannel(channel, db);
+
+    if (channel.permissionOverwrites.hasValue())
+        channelRepo.savePermissionOverwrites(channelId, channel.permissionOverwrites.get(), db);
+
+    db.commit();
+
+    permissionManager->invalidateChannelCache(channelId);
+    forumParentCache.remove(channelId);
+
+    emit channelUpdated(event);
+}
+
+void ClientInstance::onChannelDeleted(const Discord::ChannelDelete &event)
+{
+    if (!event.id.hasValue())
+        return;
+
+    Core::Snowflake channelId = event.id.get();
+
+    qCDebug(LogCore) << "Channel deleted:" << channelId;
+
+    QString connName = Storage::DatabaseManager::instance().getCacheConnectionName(account.id);
+    QSqlDatabase db = QSqlDatabase::database(connName);
+
+    db.transaction();
+
+    channelRepo.deleteChannel(channelId, db);
+
+    db.commit();
+
+    permissionManager->invalidateChannelCache(channelId);
+    forumParentCache.remove(channelId);
+
+    emit channelDeleted(event);
+}
+
+bool ClientInstance::isForumParent(Snowflake parentId)
+{
+    if (!parentId.isValid())
+        return false;
+    auto it = forumParentCache.constFind(parentId);
+    if (it != forumParentCache.constEnd())
+        return it.value();
+    auto ch = channelRepo.getChannel(parentId);
+    bool isForum = ch && ch->type.hasValue() &&
+                   (ch->type.get() == Discord::ChannelType::GUILD_FORUM ||
+                    ch->type.get() == Discord::ChannelType::GUILD_MEDIA);
+    forumParentCache.insert(parentId, isForum);
+    return isForum;
+}
+
+void ClientInstance::registerThreadReadState(const Discord::Channel &thread, Snowflake guildId)
+{
+    if (guildId.isValid())
+        readStateManager->registerChannelGuild(thread.id.get(), guildId);
+    if (thread.lastMessageId.hasValue())
+        readStateManager->updateChannelLastMessageId(thread.id.get(), thread.lastMessageId.get());
+}
+
+void ClientInstance::cacheThread(const Discord::Channel &thread, Snowflake guildId)
+{
+    Discord::Channel copy = thread;
+    if (!copy.guildId.hasValue() && guildId.isValid())
+        copy.guildId = guildId;
+    threadCache.insert(copy.id.get(), copy);
+    registerThreadReadState(copy, copy.guildId.hasValue() ? copy.guildId.get() : guildId);
+}
+
+void ClientInstance::ingestThread(const Discord::Channel &thread, Snowflake guildId)
+{
+    cacheThread(thread, guildId);
+    if (thread.member.hasValue())
+        joinedThreads.insert(thread.id.get());
+}
+
+void ClientInstance::onThreadCreated(const Discord::ChannelCreate &event)
+{
+    if (!event.channel.hasValue())
+        return;
+    const Discord::Channel &thread = event.channel.get();
+    if (!thread.parentId.hasValue() || isForumParent(thread.parentId.get()))
+        return;
+
+    Snowflake threadId = thread.id.get();
+    Snowflake guildId = thread.guildId.hasValue() ? thread.guildId.get() : Snowflake::Invalid;
+    ingestThread(thread, guildId);
+
+    bool isMember = thread.member.hasValue() || (thread.ownerId.hasValue() && thread.ownerId.get() == account.id);
+    if (isMember) {
+        joinedThreads.insert(threadId);
+        emit threadCreated(thread);
+    }
+}
+
+void ClientInstance::onThreadUpdated(const Discord::ChannelUpdate &event)
+{
+    if (!event.channel.hasValue())
+        return;
+    const Discord::Channel &thread = event.channel.get();
+    if (!thread.parentId.hasValue() || isForumParent(thread.parentId.get()))
+        return;
+
+    Snowflake guildId = thread.guildId.hasValue() ? thread.guildId.get() : Snowflake::Invalid;
+    ingestThread(thread, guildId);
+
+    emit threadUpdated(thread);
+}
+
+void ClientInstance::onThreadDeleted(const Discord::ThreadDelete &event)
+{
+    if (!event.id.hasValue())
+        return;
+    Snowflake parentId = event.parentId.hasValue() ? event.parentId.get() : Snowflake::Invalid;
+    if (isForumParent(parentId))
+        return;
+
+    Snowflake threadId = event.id.get();
+    Snowflake guildId = event.guildId.hasValue() ? event.guildId.get() : Snowflake::Invalid;
+    threadCache.remove(threadId);
+    joinedThreads.remove(threadId);
+
+    emit threadDeleted(threadId, parentId, guildId);
+}
+
+void ClientInstance::onThreadListSync(const Discord::ThreadListSync &event)
+{
+    Snowflake guildId = event.guildId.get();
+
+    QList<Discord::Channel> textThreads;
+    QSet<Snowflake> textThreadIds;
+    if (event.threads.hasValue()) {
+        for (const auto &thread : event.threads.get()) {
+            if (!thread.parentId.hasValue() || isForumParent(thread.parentId.get()))
+                continue;
+            ingestThread(thread, guildId);
+            textThreadIds.insert(thread.id.get());
+            textThreads.append(thread);
+        }
+    }
+
+    if (event.members.hasValue())
+        for (const auto &member : event.members.get())
+            if (member.id.hasValue() && textThreadIds.contains(member.id.get()))
+                joinedThreads.insert(member.id.get());
+
+    QList<Snowflake> parentIds =
+            event.channelIds.hasValue() ? event.channelIds.get() : QList<Snowflake>{};
+    emit threadListSynced(guildId, parentIds, textThreads);
+}
+
+void ClientInstance::onThreadMemberUpdate(const Discord::ThreadMemberUpdate &event)
+{
+    if (event.userId.hasValue() && event.userId.get() != account.id)
+        return;
+    if (!event.member.id.hasValue())
+        return;
+    Snowflake threadId = event.member.id.get();
+
+    if (!threadCache.contains(threadId))
+        return;
+
+    joinedThreads.insert(threadId);
+    emit threadMembershipChanged(threadId);
+}
+
+void ClientInstance::onThreadMembersUpdate(const Discord::ThreadMembersUpdate &event)
+{
+    if (!event.id.hasValue())
+        return;
+    Snowflake threadId = event.id.get();
+    if (!threadCache.contains(threadId))
+        return;
+
+    bool changed = false;
+    if (event.addedMembers.hasValue()) {
+        for (const auto &member : event.addedMembers.get()) {
+            if (member.userId.hasValue() && member.userId.get() == account.id &&
+                !joinedThreads.contains(threadId)) {
+                joinedThreads.insert(threadId);
+                changed = true;
+            }
+        }
+    }
+    if (event.removedMemberIds.hasValue()) {
+        for (Snowflake userId : event.removedMemberIds.get())
+            if (userId == account.id && joinedThreads.remove(threadId))
+                changed = true;
+    }
+
+    if (changed)
+        emit threadMembershipChanged(threadId);
+}
+
+std::optional<Discord::Channel> ClientInstance::getChannel(Snowflake channelId)
+{
+    auto it = threadCache.constFind(channelId);
+    if (it != threadCache.constEnd())
+        return it.value();
+    return channelRepo.getChannel(channelId);
+}
+
+bool ClientInstance::isThreadJoined(Snowflake threadId) const
+{
+    return joinedThreads.contains(threadId);
+}
+
+void ClientInstance::fetchThreadList(Snowflake channelId, bool archived, int offset, ThreadListPageCallback callback)
+{
+    fetchThreadListAttempt(channelId, archived, offset, 0, std::move(callback));
+}
+
+void ClientInstance::fetchThreadListAttempt(Snowflake channelId, bool archived, int offset, int attempt, const ThreadListPageCallback &callback)
+{
+    static constexpr int kMaxRetries = 5;
+
+    client->searchThreads(
+            channelId, archived, offset,
+            [this, channelId, archived, offset, attempt,
+             callback](const Result<Discord::Client::ThreadListResult> &res) {
+                if (!res.success()) {
+                    callback(Result<ThreadListPage>::makeError(res.error));
+                    return;
+                }
+
+                const auto &data = *res.value;
+                if (data.indexNotReady) {
+                    if (attempt >= kMaxRetries) {
+                        qCWarning(LogCore)
+                                << "Thread search index not ready after retries for" << channelId;
+                        callback(Result<ThreadListPage>::makeError("Thread list is not ready yet"));
+                        return;
+                    }
+                    int delayMs = qMax(1, data.retryAfterSeconds) * 1000;
+                    QTimer::singleShot(delayMs, this,
+                                       [this, channelId, archived, offset, attempt, callback]() {
+                                           fetchThreadListAttempt(channelId, archived, offset, attempt + 1, callback);
+                                       });
+                    return;
+                }
+
+                Snowflake guildId = Snowflake::Invalid;
+                if (auto ch = getChannel(channelId); ch && ch->guildId.hasValue())
+                    guildId = ch->guildId.get();
+                for (const auto &thread : data.threads)
+                    ingestThread(thread, guildId);
+
+                for (const auto &member : data.members)
+                    if (member.id.hasValue())
+                        joinedThreads.insert(member.id.get());
+
+                ThreadListPage page;
+                page.threads = data.threads;
+                page.hasMore = data.hasMore;
+                callback(Result<ThreadListPage>::makeOk(page));
+            });
+}
+
+bool ClientInstance::runInCacheTransaction(const char *what,
+                                           const std::function<void(QSqlDatabase &)> &op)
+{
+    QString connName = Storage::DatabaseManager::instance().getCacheConnectionName(account.id);
+    QSqlDatabase db = QSqlDatabase::database(connName);
+
+    if (!db.transaction()) {
+        qCWarning(LogCore) << "Failed to start transaction for" << what;
+        return false;
+    }
+
+    op(db);
+
+    if (!db.commit()) {
+        qCWarning(LogCore) << "Failed to commit" << what << ":" << db.lastError().text();
+        db.rollback();
+        return false;
+    }
+    return true;
+}
+
+void ClientInstance::onGuildRoleCreated(const Discord::GuildRoleCreate &event)
+{
+    if (!event.guildId.hasValue() || !event.role.hasValue()) {
+        qCWarning(LogCore) << "Invalid GUILD_ROLE_CREATE event: missing guildId or role";
+        return;
+    }
+
+    Core::Snowflake guildId = event.guildId.get();
+    const Discord::Role &role = event.role.get();
+
+    if (!role.id.hasValue()) {
+        qCWarning(LogCore) << "Invalid role in GUILD_ROLE_CREATE: missing role ID";
+        return;
+    }
+
+    qCDebug(LogCore) << "Role created:" << role.id.get() << "in guild:" << guildId;
+
+    if (!runInCacheTransaction("role creation",
+                               [&](QSqlDatabase &db) { roleRepo.saveRole(guildId, role, db); }))
+        return;
+
+    rolesCacheByGuild.remove(guildId);
+    permissionManager->invalidateUserGuildCache(account.id, guildId);
+    memberListManager->handleRoleCreated(guildId, role);
+    emit guildRoleCreated(event);
+}
+
+void ClientInstance::onGuildRoleUpdated(const Discord::GuildRoleUpdate &event)
+{
+    if (!event.guildId.hasValue() || !event.role.hasValue()) {
+        qCWarning(LogCore) << "Invalid GUILD_ROLE_UPDATE event: missing guildId or role";
+        return;
+    }
+
+    Core::Snowflake guildId = event.guildId.get();
+    const Discord::Role &role = event.role.get();
+
+    if (!role.id.hasValue()) {
+        qCWarning(LogCore) << "Invalid role in GUILD_ROLE_UPDATE: missing role ID";
+        return;
+    }
+
+    qCDebug(LogCore) << "Role updated:" << role.id.get() << "in guild:" << guildId;
+
+    if (!runInCacheTransaction("role update",
+                               [&](QSqlDatabase &db) { roleRepo.saveRole(guildId, role, db); }))
+        return;
+
+    rolesCacheByGuild.remove(guildId);
+    permissionManager->invalidateUserGuildCache(account.id, guildId);
+    memberListManager->handleRoleUpdated(guildId, role);
+    emit guildRoleUpdated(event);
+}
+
+void ClientInstance::onGuildRoleDeleted(const Discord::GuildRoleDelete &event)
+{
+    if (!event.guildId.hasValue() || !event.roleId.hasValue()) {
+        qCWarning(LogCore) << "Invalid GUILD_ROLE_DELETE event: missing guildId or roleId";
+        return;
+    }
+
+    Core::Snowflake guildId = event.guildId.get();
+    Core::Snowflake roleId = event.roleId.get();
+
+    qCDebug(LogCore) << "Role deleted:" << roleId << "in guild:" << guildId;
+
+    if (!runInCacheTransaction("role deletion",
+                               [&](QSqlDatabase &db) { roleRepo.deleteRole(guildId, roleId, db); }))
+        return;
+
+    rolesCacheByGuild.remove(guildId);
+    permissionManager->invalidateUserGuildCache(account.id, guildId);
+    memberListManager->handleRoleDeleted(guildId, roleId);
+    emit guildRoleDeleted(event);
+}
+
+void ClientInstance::onGuildMembersChunk(const Discord::GuildMembersChunk &chunk)
+{
+    Snowflake guildId = chunk.guildId.get();
+    QList<Snowflake> updatedUserIds;
+
+    for (const auto &member : chunk.members.get()) {
+        Snowflake userId =
+                member.userId.hasValue()
+                        ? member.userId.get()
+                        : (member.user.hasValue() ? member.user->id.get() : Snowflake::Invalid);
+        if (!userId.isValid())
+            continue;
+
+        memberRepo.saveMember(guildId, userId, member);
+        if (member.user.hasValue())
+            userManager->saveUser(member.user.get());
+
+        pendingMemberRequests.remove(qMakePair(guildId, userId));
+        updatedUserIds.append(userId);
+    }
+
+    if (!updatedUserIds.isEmpty())
+        emit membersUpdated(guildId, updatedUserIds);
+}
+
+void ClientInstance::onGuildMemberUpdate(const Discord::GuildMemberUpdate &event)
+{
+    Snowflake guildId = event.guildId.get();
+    const auto &member = event.member.get();
+
+    Snowflake userId = member.user.hasValue() ? member.user->id.get() : Snowflake::Invalid;
+    if (!userId.isValid())
+        return;
+
+    if (member.user.hasValue())
+        userManager->saveUser(member.user.get());
+    userManager->saveMember(guildId, userId, member);
+
+    if (userId == account.id)
+        permissionManager->invalidateUserGuildCache(userId, guildId);
+
+    emit membersUpdated(guildId, { userId });
+}
+
+void ClientInstance::onGuildMemberListUpdate(const Discord::GuildMemberListUpdate &update)
+{
+    if (!update.guildId.hasValue() || !update.ops.hasValue())
+        return;
+
+    const Snowflake guildId = update.guildId.get();
+    QList<Discord::User> users;
+    QList<Discord::Member> members;
+
+    auto persist = [&](const Discord::Member &member) {
+        if (!member.user.hasValue() || !member.user->id.hasValue())
+            return;
+        users.append(member.user.get());
+        members.append(member);
+    };
+
+    for (const auto &op : update.ops.get()) {
+        if (op.items.hasValue()) {
+            for (const auto &item : op.items.get()) {
+                if (item.member.hasValue())
+                    persist(item.member.get());
+            }
+        }
+        if (op.item.hasValue() && op.item.get().member.hasValue())
+            persist(op.item.get().member.get());
+    }
+
+    if (!users.isEmpty())
+        userManager->saveUsers(users);
+    if (!members.isEmpty())
+        userManager->saveMembers(guildId, members);
+}
+
+void ClientInstance::onMessagesReceived(const MessageRequestResult &result)
+{
+    if (!result.success || result.messages.isEmpty())
+        return;
+
+    if (result.type != Discord::Client::MessageLoadType::Latest &&
+        result.type != Discord::Client::MessageLoadType::History)
+        return;
+
+    auto channelOpt = channelRepo.getChannel(result.channelId);
+    if (!channelOpt || !channelOpt->guildId.hasValue())
+        return;
+
+    Snowflake guildId = channelOpt->guildId.get();
+    QList<Snowflake> missingUserIds;
+    cleanupPendingMemberRequests();
+
+    for (const auto &msg : result.messages) {
+        if (!msg.author.hasValue())
+            continue;
+
+        Snowflake userId = msg.author->id.get();
+        const auto key = qMakePair(guildId, userId);
+
+        if (pendingMemberRequests.contains(key))
+            continue;
+
+        if (userManager->getMember(guildId, userId))
+            continue;
+
+        pendingMemberRequests.insert(key, QDateTime::currentDateTimeUtc());
+        missingUserIds.append(userId);
+    }
+
+    if (!missingUserIds.isEmpty())
+        client->requestGuildMembers(guildId, missingUserIds);
+}
+
+void ClientInstance::cleanupPendingMemberRequests()
+{
+    const QDateTime now = QDateTime::currentDateTimeUtc();
+    for (auto it = pendingMemberRequests.begin(); it != pendingMemberRequests.end();) {
+        if (!it.value().isValid() || it.value().msecsTo(now) >= kPendingMemberRequestTimeoutMs)
+            it = pendingMemberRequests.erase(it);
+        else
+            ++it;
+    }
+}
+
+void ClientInstance::onMessageCreated(const Discord::Message &msg)
+{
+    if (!msg.channelId.hasValue() || !msg.id.hasValue())
+        return;
+
+    Snowflake channelId = msg.channelId.get();
+    Snowflake messageId = msg.id.get();
+
+    // we can get a message in a thread without knowing the thread exists maybe
+    if (msg.guildId.hasValue())
+        readStateManager->registerChannelGuild(channelId, msg.guildId.get());
+
+    bool isMention = isMessageMentioningMe(msg);
+    readStateManager->handleMessageCreated(channelId, messageId, isMention);
+
+    emit channelLastMessageUpdated(channelId, messageId);
+}
+
+bool ClientInstance::isMessageMentioningMe(const Discord::Message &msg) const
+{
+    if (msg.mentions.hasValue()) {
+        for (const auto &user : msg.mentions.get())
+            if (user.id.get() == account.id)
+                return true;
+    }
+
+    if (msg.mentionRoles.hasValue() && msg.guildId.hasValue()) {
+        Snowflake guildId = msg.guildId.get();
+        auto myRoles = userManager->getMemberRoles(guildId, account.id);
+        if (myRoles) {
+            for (const auto &roleId : msg.mentionRoles.get())
+                if (myRoles->contains(roleId))
+                    return true;
+        }
+    }
+
+    return false;
+}
+
+void ClientInstance::handleAckRequest(Snowflake channelId, Snowflake messageId)
+{
+    auto channelOpt = channelRepo.getChannel(channelId);
+    bool isGuildChannel = channelOpt && channelOpt->guildId.hasValue();
+    if (!isGuildChannel)
+        isGuildChannel = client->getGuildIdForChannel(channelId).isValid();
+    int ackFlags = isGuildChannel
+                           ? static_cast<int>(Discord::ReadStateFlag::IS_GUILD_CHANNEL)
+                           : 0;
+    int lastViewed = ReadStateManager::daysSinceDiscordEpoch();
+    client->ackMessage(channelId, messageId, ackFlags, lastViewed);
+}
+
+void ClientInstance::handleBulkAckRequest(const QList<QPair<Snowflake, Snowflake>> &pairs)
+{
+    QList<Discord::Client::AckEntry> entries;
+    entries.reserve(pairs.size());
+    for (const auto &[channelId, messageId] : pairs)
+        entries.append({ channelId, messageId, 0 });
+
+    constexpr int maxPerRequest = 100;
+    int chunk = 0;
+    for (int i = 0; i < entries.size(); i += maxPerRequest) {
+        auto batch = entries.mid(i, maxPerRequest);
+        if (chunk == 0) {
+            client->ackBulk(batch);
+        } else {
+            QTimer::singleShot(chunk * 1000, this, [this, batch]() {
+                client->ackBulk(batch);
+            });
+        }
+        ++chunk;
+    }
+}
+
+ClientInstance::~ClientInstance()
+{
+    Storage::DatabaseManager::instance().closeCacheDatabase(account.id);
+}
+
+void ClientInstance::start()
+{
+    discord()->start();
+}
+
+void ClientInstance::stop()
+{
+    if (isInVoice()) {
+        discord()->sendVoiceStateUpdate(currentVoiceGuildId, Snowflake::Invalid, false, false);
+#ifndef ACHERON_NO_VOICE
+        voiceManager->disconnect();
+#endif
+    }
+    discord()->stop();
+}
+
+Discord::Client *ClientInstance::discord() const
+{
+    return client;
+}
+
+MessageManager *ClientInstance::messages() const
+{
+    return messageManager;
+}
+
+ForumManager *ClientInstance::forums() const
+{
+    return forumManager;
+}
+
+UserManager *ClientInstance::users() const
+{
+    return userManager;
+}
+
+PermissionManager *ClientInstance::permissions() const
+{
+    return permissionManager;
+}
+
+ReadStateManager *ClientInstance::readState() const
+{
+    return readStateManager;
+}
+
+RelationshipManager *ClientInstance::relationships() const
+{
+    return relationshipManager;
+}
+
+MemberListManager *ClientInstance::memberList() const
+{
+    return memberListManager;
+}
+
+#ifndef ACHERON_NO_VOICE
+AV::VoiceManager *ClientInstance::voice() const
+{
+    return voiceManager;
+}
+#endif
+
+QList<Discord::Role> ClientInstance::getRolesForGuild(Snowflake guildId)
+{
+    auto it = rolesCacheByGuild.constFind(guildId);
+    if (it != rolesCacheByGuild.constEnd())
+        return it.value();
+
+    auto roles = roleRepo.getRolesForGuild(guildId);
+    rolesCacheByGuild.insert(guildId, roles);
+    return roles;
+}
+
+QList<Discord::Role> ClientInstance::getMemberRolesSorted(Snowflake guildId, Snowflake userId)
+{
+    auto memberRoleIds = userManager->getMemberRoles(guildId, userId);
+    if (!memberRoleIds || memberRoleIds->isEmpty())
+        return {};
+
+    QSet<Snowflake> memberRoleSet(memberRoleIds->begin(), memberRoleIds->end());
+    QList<Discord::Role> result;
+    result.reserve(memberRoleIds->size());
+    for (const auto &role : getRolesForGuild(guildId)) {
+        if (memberRoleSet.contains(role.id.get()))
+            result.append(role);
+    }
+
+    std::sort(result.begin(), result.end(),
+              [](const Discord::Role &a, const Discord::Role &b) {
+                  return a.position.get() > b.position.get();
+              });
+    return result;
+}
+
+std::optional<Discord::Guild> ClientInstance::getGuild(Snowflake guildId)
+{
+    return guildRepo.getGuild(guildId);
+}
+
+std::optional<Snowflake> ClientInstance::findDmChannelWithUser(Snowflake userId)
+{
+    return channelRepo.findDmChannelWithUser(userId);
+}
+
+int ClientInstance::getChannelRateLimit(Snowflake channelId)
+{
+    auto channelOpt = getChannel(channelId);
+    if (!channelOpt || !channelOpt->rateLimitPerUser.hasValue())
+        return 0;
+    return channelOpt->rateLimitPerUser.get();
+}
+
+ConnectionState ClientInstance::state() const
+{
+    return client->getState();
+}
+
+Snowflake ClientInstance::accountId() const
+{
+    return account.id;
+}
+
+const AccountInfo &ClientInstance::accountInfo() const
+{
+    return account;
+}
+
+Snowflake ClientInstance::voiceChannelId() const
+{
+    return currentVoiceChannelId;
+}
+
+Snowflake ClientInstance::voiceGuildId() const
+{
+    return currentVoiceGuildId;
+}
+
+bool ClientInstance::isInVoice() const
+{
+    return currentVoiceChannelId.isValid();
+}
+
+QString ClientInstance::presenceStatus() const
+{
+    return currentPresenceStatus;
+}
+
+} // namespace Core
+} // namespace Acheron
