@@ -87,10 +87,15 @@ jobs:
         shell: pwsh
         run: |
           $curlRoot = Join-Path $env:GITHUB_WORKSPACE 'curl-impersonate'
-          if (-not $env:Qt6_DIR) { throw 'Qt6_DIR was not set by install-qt-action.' }
+          $qtRoot = $env:QT_ROOT_DIR
+          if (-not $qtRoot) { throw 'QT_ROOT_DIR was not set by install-qt-action.' }
+          $qt6Dir = Join-Path $qtRoot 'lib\cmake\Qt6'
+          if (-not (Test-Path (Join-Path $qt6Dir 'Qt6Config.cmake'))) {
+            throw "Qt6Config.cmake not found at $qt6Dir"
+          }
           cmake `
             --preset windows `
-            "-DCMAKE_PREFIX_PATH=$env:Qt6_DIR" `
+            "-DQt6_DIR=$qt6Dir" `
             "-DCURL_INCLUDE_DIR=$curlRoot\include" `
             "-DCURL_LIBRARY=$curlRoot\lib\libcurl-impersonate_imp.lib" `
             "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
