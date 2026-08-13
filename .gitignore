@@ -12,6 +12,8 @@ CTestTestfile.cmake
 cmake_install.cmake
 compile_commands.json
 *.cmake.in
+!vendor/qtkeychain/QtKeychainConfig.cmake.in
+!vendor/mlspp/cmake/config.cmake.in
 
 # === IDE / Editor ===
 .vs/
