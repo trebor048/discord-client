@@ -28,7 +28,7 @@ env:
 jobs:
   build-windows:
     name: Windows
-    runs-on: ${{ github.repository_owner == 'ouwou' && 'windows-latest' || 'self-hosted' }}
+    runs-on: windows-latest
     timeout-minutes: 120
 
     steps:
@@ -36,8 +36,6 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Initialize submodules
-        env:
-          HOME: C:\Users\me
         run: |
           git config --global core.longpaths true
           git submodule update --init --recursive
