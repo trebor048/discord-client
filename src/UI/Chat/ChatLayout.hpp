@@ -31,7 +31,7 @@ constexpr int separatorHeight() noexcept
 }
 constexpr int embedMaxWidth() noexcept
 {
-    return 400;
+    return 560;
 }
 constexpr int embedBorderWidth() noexcept
 {

@@ -1,5 +1,6 @@
 #include "ChatView.hpp"
 
+#include "Core/MessageManager.hpp"
 #include "Core/EmojiCatalog.hpp"
 #include "UI/Dialogs/EmojiPickerDialog.hpp"
 #include "Core/AnimationUtils.hpp"
@@ -136,7 +137,13 @@ ChatView::ChatView(QWidget *parent) : QListView(parent), hoveredRow(-1), hovered
     searchCountLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     searchLayout->addWidget(searchEdit, 1);
     searchLayout->addWidget(searchCountLabel);
-    connect(searchEdit, &QLineEdit::textChanged, this, &ChatView::updateSearchMatches);
+    // Debounce search input: rescanning the loaded history per keystroke is
+    // too expensive, so wait for a short pause before matching.
+    searchDebounceTimer = new QTimer(this);
+    searchDebounceTimer->setSingleShot(true);
+    searchDebounceTimer->setInterval(200);
+    connect(searchDebounceTimer, &QTimer::timeout, this, &ChatView::updateSearchMatches);
+    connect(searchEdit, &QLineEdit::textChanged, this, [this]() { searchDebounceTimer->start(); });
     connect(searchEdit, &QLineEdit::returnPressed, this, [this]() { moveToSearchMatch(1); });
 
     connect(verticalScrollBar(), &QScrollBar::valueChanged, this,
@@ -172,6 +179,14 @@ ChatView::ChatView(QWidget *parent) : QListView(parent), hoveredRow(-1), hovered
     scrollAnimation = new QPropertyAnimation(verticalScrollBar(), "value", this);
     scrollAnimation->setDuration(180);
     scrollAnimation->setEasingCurve(QEasingCurve::OutCubic);
+
+    // Empty/loading placeholder, centered over the viewport. Shown while a
+    // channel's history is being fetched and when a channel has no messages.
+    placeholderLabel = new QLabel(viewport());
+    placeholderLabel->setAlignment(Qt::AlignCenter);
+    placeholderLabel->setStyleSheet(
+            QStringLiteral("QLabel { color: palette(mid); font-size: 13px; }"));
+    placeholderLabel->setVisible(false);
 
     jumpToBottomButton->hide();
     connect(jumpToBottomButton, &QPushButton::clicked, this, [this]() {
@@ -215,19 +230,32 @@ void ChatView::setModel(QAbstractItemModel *model)
     modelConnections.append(connect(model, &QAbstractItemModel::modelReset, this, [this]() {
         isFetchingTop = false;
         anchorIndex = QPersistentModelIndex();
+        hoverLayoutRow = -1;
+        cancelPendingJump();
         QTimer::singleShot(0, this, &ChatView::scrollToBottom);
+        // A reset with no rows means a channel switch with a fetch in flight
+        // (requestLoadChannel runs right after); say so instead of showing a
+        // blank view that looks like an empty channel.
+        if (this->model() && this->model()->rowCount() == 0)
+            showLoadingPlaceholder();
     }));
 
+    modelConnections.append(connect(model, &QAbstractItemModel::rowsAboutToBeRemoved, this,
+                                    [this]() { hoverLayoutRow = -1; }));
     modelConnections.append(connect(model, &QAbstractItemModel::rowsAboutToBeInserted, this,
                                     &ChatView::onRowsAboutToBeInserted));
     modelConnections.append(connect(model, &QAbstractItemModel::rowsInserted, this,
                                     &ChatView::onRowsInserted));
+    modelConnections.append(connect(model, &QAbstractItemModel::rowsInserted, this,
+                                    [this]() { hidePlaceholder(); }));
 
     // Watch for image/embed loading completion to update the view
     modelConnections.append(connect(model, &QAbstractItemModel::dataChanged, this,
                                     [this](const QModelIndex &topLeft, const QModelIndex &bottomRight,
                                            const QVector<int> &roles) {
         Q_UNUSED(topLeft); Q_UNUSED(bottomRight);
+        // Content may have changed under the cursor — drop the hover cache.
+        hoverLayoutRow = -1;
         if (roles.contains(ChatModel::AttachmentsRole) ||
             roles.contains(ChatModel::EmbedsRole)) {
             viewport()->update();
@@ -268,7 +296,17 @@ void ChatView::mouseMoveEvent(QMouseEvent *event)
             idx = model()->index(currentRow, 0);
     }
 
-    ChatLayout::ResolvedLayout resolved = ChatLayout::resolveLayout(this, idx);
+    // Reuse the resolved layout while the hovered row and scroll offset are
+    // unchanged — resolveLayout deep-copies the row's role payloads, which is
+    // far too expensive to redo for every mouse-move event within one row.
+    const int hoverScrollValue = verticalScrollBar()->value();
+    const int hoverRow = idx.isValid() ? idx.row() : -1;
+    if (hoverRow != hoverLayoutRow || hoverScrollValue != hoverLayoutScroll) {
+        hoverLayoutCache = ChatLayout::resolveLayout(this, idx);
+        hoverLayoutRow = hoverRow;
+        hoverLayoutScroll = hoverScrollValue;
+    }
+    const ChatLayout::ResolvedLayout &resolved = hoverLayoutCache;
 
     if (inSelectionDrag) {
         const QRect &textRect = resolved.layout.textRect;
@@ -525,6 +563,7 @@ void ChatView::leaveEvent(QEvent *event)
     bool needsUpdate = (hoveredRow != -1);
     hoveredRow = -1;
     hoveredChar = -1;
+    hoverLayoutRow = -1;
 
     if (needsUpdate) {
         viewport()->update();
@@ -538,6 +577,7 @@ void ChatView::leaveEvent(QEvent *event)
 void ChatView::resizeEvent(QResizeEvent *event)
 {
     QListView::resizeEvent(event);
+    updatePlaceholderPosition();
     if (jumpToBottomButton) {
         int margin = 12;
         jumpToBottomButton->move(width() - jumpToBottomButton->width() - margin,
@@ -568,13 +608,43 @@ bool ChatView::viewportEvent(QEvent *event)
     return QListView::viewportEvent(event);
 }
 
+void ChatView::showLoadingPlaceholder(const QString &text)
+{
+    placeholderLabel->setText(text.isEmpty() ? tr("Loading messages…") : text);
+    updatePlaceholderPosition();
+    placeholderLabel->setVisible(true);
+}
+
+void ChatView::showEmptyPlaceholder(const QString &text)
+{
+    placeholderLabel->setText(text.isEmpty() ? tr("No messages here yet") : text);
+    updatePlaceholderPosition();
+    placeholderLabel->setVisible(true);
+}
+
+void ChatView::hidePlaceholder()
+{
+    placeholderLabel->setVisible(false);
+}
+
+void ChatView::updatePlaceholderPosition()
+{
+    if (placeholderLabel)
+        placeholderLabel->setGeometry(viewport()->rect());
+}
+
 void ChatView::onHistoryRequestFinished()
 {
     isFetchingTop = false;
+    if (model() && model()->rowCount() == 0)
+        showEmptyPlaceholder();
 }
 
 void ChatView::onRowsAboutToBeInserted(const QModelIndex &parent, int start, int end)
 {
+    // Row indices shift on insertion — the hover layout cache is stale.
+    hoverLayoutRow = -1;
+
     QScrollBar *vbar = verticalScrollBar();
     atBottom = (vbar->value() + vbar->pageStep() >= vbar->maximum());
 
@@ -587,6 +657,91 @@ void ChatView::onRowsAboutToBeInserted(const QModelIndex &parent, int start, int
             anchorDistanceFromBottom = visualRect(topVisible).bottom();
         }
     }
+}
+
+bool ChatView::scrollToMessage(Core::Snowflake messageId)
+{
+    auto *chatModel = qobject_cast<ChatModel *>(model());
+    if (!chatModel)
+        return false;
+
+    if (!messageId.isValid())
+        return false;
+
+    const int row = chatModel->rowForMessage(messageId);
+    if (row >= 0) {
+        cancelPendingJump();
+        atBottom = false;
+        const QModelIndex target = chatModel->index(row, 0);
+        scrollTo(target, QAbstractItemView::PositionAtCenter);
+        setCurrentIndex(target);
+        return true;
+    }
+
+    if (!messageManager)
+        return false;
+
+    if (pendingJumpMessageId == messageId)
+        return true; // already fetching
+
+    pendingJumpMessageId = messageId;
+    emit messageJumpLoadStarted();
+    showLoadingPlaceholder(tr("Loading message…"));
+    messageManager->requestMessage(chatModel->getActiveChannelId(), messageId);
+    return false;
+}
+
+void ChatView::cancelPendingJump()
+{
+    if (!pendingJumpMessageId.isValid())
+        return;
+
+    pendingJumpMessageId = Core::Snowflake::Invalid;
+    emit messageJumpLoadFinished(false);
+}
+
+void ChatView::onMessageJumpReady(Core::Snowflake channelId, Core::Snowflake messageId)
+{
+    Q_UNUSED(channelId);
+    if (pendingJumpMessageId != messageId)
+        return;
+
+    QTimer::singleShot(0, this, [this, messageId]() {
+        if (pendingJumpMessageId != messageId)
+            return;
+
+        auto *chatModel = qobject_cast<ChatModel *>(model());
+        if (!chatModel) {
+            pendingJumpMessageId = Core::Snowflake::Invalid;
+            emit messageJumpLoadFinished(false);
+            return;
+        }
+
+        const int row = chatModel->rowForMessage(messageId);
+        if (row >= 0) {
+            atBottom = false;
+            const QModelIndex target = chatModel->index(row, 0);
+            scrollTo(target, QAbstractItemView::PositionAtCenter);
+            setCurrentIndex(target);
+            hidePlaceholder();
+            emit messageJumpLoadFinished(true);
+        } else {
+            showEmptyPlaceholder(tr("Message not found"));
+            emit messageJumpLoadFinished(false);
+        }
+        pendingJumpMessageId = Core::Snowflake::Invalid;
+    });
+}
+
+void ChatView::onMessageJumpFailed(Core::Snowflake channelId, Core::Snowflake messageId)
+{
+    Q_UNUSED(channelId);
+    if (pendingJumpMessageId != messageId)
+        return;
+
+    pendingJumpMessageId = Core::Snowflake::Invalid;
+    showEmptyPlaceholder(tr("Message not found"));
+    emit messageJumpLoadFinished(false);
 }
 
 void ChatView::onRowsInserted(const QModelIndex &parent, int start, int end)
@@ -657,6 +812,8 @@ void ChatView::onScrollBarValueChanged(int value)
 void ChatView::onHistoryRequestFailed()
 {
     isFetchingTop = false;
+    if (model() && model()->rowCount() == 0)
+        showEmptyPlaceholder();
 }
 
 void ChatView::beginChannelCrossfade()
@@ -711,6 +868,24 @@ void ChatView::beginChannelCrossfade()
 void ChatView::setCurrentUserId(Core::Snowflake userId)
 {
     currentUserId = userId;
+}
+
+void ChatView::setMessageManager(Core::MessageManager *mgr)
+{
+    if (messageManager) {
+        disconnect(messageJumpReadyConnection);
+        disconnect(messageJumpFailedConnection);
+    }
+
+    cancelPendingJump();
+    messageManager = mgr;
+
+    if (messageManager) {
+        messageJumpReadyConnection = connect(messageManager, &Core::MessageManager::messageJumpReady,
+                                             this, &ChatView::onMessageJumpReady);
+        messageJumpFailedConnection = connect(messageManager, &Core::MessageManager::messageJumpFailed,
+                                              this, &ChatView::onMessageJumpFailed);
+    }
 }
 
 void ChatView::setCanPinMessages(bool canPin)
@@ -1171,7 +1346,9 @@ void ChatView::updateSearchMatches()
     activeSearchMatch = -1;
 
     const QString query = searchEdit ? searchEdit->text().trimmed() : QString();
-    if (!query.isEmpty() && model()) {
+    // Early-exit for trivially short queries — matching a single character
+    // against the whole history is expensive and never useful.
+    if (query.size() >= 2 && model()) {
         for (int row = 0; row < model()->rowCount(); ++row) {
             const QString content = model()->index(row, 0).data(ChatModel::ContentRole).toString();
             if (content.contains(query, Qt::CaseInsensitive))
@@ -1180,7 +1357,7 @@ void ChatView::updateSearchMatches()
     }
 
     if (searchCountLabel) {
-        if (query.isEmpty())
+        if (query.size() < 2)
             searchCountLabel->clear();
         else if (searchMatches.isEmpty())
             searchCountLabel->setText(tr("0"));

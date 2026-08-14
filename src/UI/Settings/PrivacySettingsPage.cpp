@@ -4,17 +4,30 @@
 #include <QComboBox>
 #include <QFormLayout>
 #include <QGroupBox>
+#include <QLabel>
 #include <QPointer>
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QVBoxLayout>
-#include <QVBoxLayout>
 
+#include "Core/Logging.hpp"
 #include "Core/Result.hpp"
 #include "Discord/Client.hpp"
 
 namespace Acheron {
 namespace UI {
+
+namespace {
+
+// Privacy settings are pushed to the account via PATCH /users/@me/privacy;
+// surface failures instead of swallowing them.
+void logPrivacyUpdateResult(const char *key, const Core::Result<QJsonObject> &result)
+{
+    if (!result.success())
+        qCWarning(LogUI) << "Failed to update privacy setting" << key << ":" << result.error;
+}
+
+} // namespace
 
 PrivacySettingsPage::PrivacySettingsPage(QWidget *parent)
     : QWidget(parent)
@@ -81,6 +94,14 @@ PrivacySettingsPage::PrivacySettingsPage(QWidget *parent)
         QSettings().value("privacy/explicit_filter", 1).toInt());
     safetyLayout->addRow(tr("Explicit Image Filter"), explicitImageFilterCombo);
 
+    // The filter value is pushed to the account, but this client performs no
+    // local image scanning — say so instead of implying local enforcement.
+    auto *explicitFilterNote = new QLabel(
+            tr("Sent to your account; Acheron does not scan images locally."), safetyGroup);
+    explicitFilterNote->setWordWrap(true);
+    explicitFilterNote->setStyleSheet(QStringLiteral("color: gray; font-size: 11px;"));
+    safetyLayout->addRow(explicitFilterNote);
+
     layout->addWidget(safetyGroup);
 
     layout->addStretch();
@@ -91,7 +112,9 @@ PrivacySettingsPage::PrivacySettingsPage(QWidget *parent)
         if (client) {
             QJsonObject payload;
             payload["default_scope_of_dms"] = index;
-            client->updatePrivacySettings(payload, [](const Core::Result<QJsonObject> &) {});
+            client->updatePrivacySettings(payload, [](const Core::Result<QJsonObject> &result) {
+                logPrivacyUpdateResult("default_scope_of_dms", result);
+            });
         }
         emit privacyChanged();
     });
@@ -100,7 +123,9 @@ PrivacySettingsPage::PrivacySettingsPage(QWidget *parent)
         if (client) {
             QJsonObject payload;
             payload["default_allow_dms_from_server_members"] = checked;
-            client->updatePrivacySettings(payload, [](const Core::Result<QJsonObject> &) {});
+            client->updatePrivacySettings(payload, [](const Core::Result<QJsonObject> &result) {
+                logPrivacyUpdateResult("default_allow_dms_from_server_members", result);
+            });
         }
         emit privacyChanged();
     });
@@ -110,7 +135,9 @@ PrivacySettingsPage::PrivacySettingsPage(QWidget *parent)
         if (client) {
             QJsonObject payload;
             payload["allow_friend_requests_from"] = index;
-            client->updatePrivacySettings(payload, [](const Core::Result<QJsonObject> &) {});
+            client->updatePrivacySettings(payload, [](const Core::Result<QJsonObject> &result) {
+                logPrivacyUpdateResult("allow_friend_requests_from", result);
+            });
         }
         emit privacyChanged();
     });
@@ -143,7 +170,9 @@ PrivacySettingsPage::PrivacySettingsPage(QWidget *parent)
         if (client) {
             QJsonObject payload;
             payload["explicit_image_filter"] = index;
-            client->updatePrivacySettings(payload, [](const Core::Result<QJsonObject> &) {});
+            client->updatePrivacySettings(payload, [](const Core::Result<QJsonObject> &result) {
+                logPrivacyUpdateResult("explicit_image_filter", result);
+            });
         }
         emit privacyChanged();
     });
@@ -167,8 +196,11 @@ void PrivacySettingsPage::fetchSettings()
     client->fetchPrivacySettings([guard](const Core::Result<QJsonObject> &result) {
         if (!guard)
             return;
-        if (!result.success() || !result.value)
+        if (!result.success() || !result.value) {
+            qCWarning(LogUI) << "Failed to fetch privacy settings:"
+                             << (result.success() ? QStringLiteral("empty response") : result.error);
             return;
+        }
 
         const QJsonObject obj = result.value.value();
 

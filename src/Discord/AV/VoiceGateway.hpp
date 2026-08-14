@@ -81,6 +81,8 @@ private:
     void identify();
     void resume();
     bool isFatalCloseCode(VoiceCloseCode code) const;
+    bool isInvalidSessionCloseCode(VoiceCloseCode code) const;
+    void interruptibleSleep(int milliseconds);
 
     void networkLoop();
     void heartbeatLoop();
@@ -106,6 +108,7 @@ private:
     std::atomic<int> heartbeatInterval{ 0 };
     std::mutex heartbeatMutex;
     std::condition_variable heartbeatCv;
+    std::mutex heartbeatThreadMutex;
     std::thread heartbeatThread;
 
     std::atomic<bool> heartbeatAckReceived{ true };

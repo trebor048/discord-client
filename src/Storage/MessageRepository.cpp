@@ -7,8 +7,15 @@
 
 #include "Core/Logging.hpp"
 
+#include <QSet>
+
 namespace Acheron {
 namespace Storage {
+
+namespace {
+// Retention cap: keep only the newest messages per channel
+constexpr int maxMessagesPerChannel = 500;
+} // namespace
 
 MessageRepository::MessageRepository(Core::Snowflake accountId)
     : BaseRepository(DatabaseManager::getCacheConnectionName(accountId)), userRepository(accountId)
@@ -48,6 +55,7 @@ void MessageRepository::saveMessages(const QList<Discord::Message> &messages, QS
 
     // Collect referenced messages to save as their own rows
     QList<Discord::Message> referencedMessages;
+    QSet<qint64> touchedChannels;
 
     for (const auto &message : messages) {
         qMsg.bindValue(":id", static_cast<qint64>(message.id.get()));
@@ -72,6 +80,8 @@ void MessageRepository::saveMessages(const QList<Discord::Message> &messages, QS
 
         if (!execLogged(qMsg, "MessageRepository: Save messages"))
             goto rollback;
+
+        touchedChannels.insert(static_cast<qint64>(message.channelId.get()));
 
         if (!userRepository.saveUser(message.author.get(), db))
             goto rollback;
@@ -123,6 +133,9 @@ void MessageRepository::saveMessages(const QList<Discord::Message> &messages, QS
         }
     }
 
+    for (qint64 channelId : touchedChannels)
+        pruneChannel(channelId, db);
+
     if (!db.commit()) {
         qCWarning(LogDB) << "MessageRepository: failed to commit transaction:";
         db.rollback();
@@ -131,6 +144,24 @@ void MessageRepository::saveMessages(const QList<Discord::Message> &messages, QS
 
 rollback:
     db.rollback();
+}
+
+void MessageRepository::pruneChannel(qint64 channelId, QSqlDatabase &db)
+{
+    QSqlQuery q(db);
+    q.prepare(R"(
+        DELETE FROM messages
+        WHERE channel_id = :channel_id AND id NOT IN (
+            SELECT id FROM messages
+            WHERE channel_id = :channel_id
+            ORDER BY id DESC
+            LIMIT :limit
+        )
+    )");
+    q.bindValue(":channel_id", channelId);
+    q.bindValue(":limit", maxMessagesPerChannel);
+
+    execLogged(q, "MessageRepository: Prune channel");
 }
 
 void MessageRepository::markMessageDeleted(Core::Snowflake messageId)

@@ -14,6 +14,9 @@
 #include "Core/Snowflake.hpp"
 
 namespace Acheron {
+namespace Core {
+class MessageManager;
+}
 namespace UI {
 
 class ImageViewer;
@@ -66,6 +69,12 @@ public:
     bool showTimestamps() const { return isShowTimestamps; }
     void setGuildOrder(const QStringList &orderedGuildIds);
     void setCurrentGuildId(const Core::Snowflake &guildId);
+    void setMessageManager(Core::MessageManager *mgr);
+
+    /// Empty/loading placeholder shown over an empty chat viewport.
+    void showLoadingPlaceholder(const QString &text = QString());
+    void showEmptyPlaceholder(const QString &text = QString());
+    void hidePlaceholder();
 
 protected:
     void mousePressEvent(QMouseEvent *event) override;
@@ -85,6 +94,8 @@ protected:
 signals:
     void historyRequested();
     void historyRequestFailed();
+    void messageJumpLoadStarted();
+    void messageJumpLoadFinished(bool success);
     void editMessageRequested(Core::Snowflake channelId, Core::Snowflake messageId, const QString &currentContent);
     void deleteMessageRequested(Core::Snowflake channelId, Core::Snowflake messageId);
     void pinMessageRequested(Core::Snowflake channelId, Core::Snowflake messageId);
@@ -108,14 +119,21 @@ public slots:
     /// the model's active channel changes.
     void beginChannelCrossfade();
 
+    /// Scrolls a loaded message into view, centered. Returns false when the
+    /// message isn't present in the current channel view.
+    bool scrollToMessage(Core::Snowflake messageId);
+
 private slots:
     void onScrollBarValueChanged(int value);
     void onRowsAboutToBeInserted(const QModelIndex &parent, int start, int end);
     void onRowsInserted(const QModelIndex &parent, int start, int end);
+    void onMessageJumpReady(Core::Snowflake channelId, Core::Snowflake messageId);
+    void onMessageJumpFailed(Core::Snowflake channelId, Core::Snowflake messageId);
 
 private:
     void copySelectedText();
     void copyMessageContent(const QModelIndex &index);
+    void cancelPendingJump();
     void startInlineEdit(const QModelIndex &index);
     void commitInlineEdit();
     void cancelInlineEdit();
@@ -124,6 +142,7 @@ private:
     void updateSearchMatches();
     void moveToSearchMatch(int delta);
     void positionSearchPanel();
+    void updatePlaceholderPosition();
     void openReactionPicker(Core::Snowflake channelId, Core::Snowflake messageId);
     bool handleQuickReactionClick(const QModelIndex &index,
                                   const ChatLayout::ResolvedLayout &resolved,
@@ -133,8 +152,15 @@ private:
     QWidget *searchPanel = nullptr;
     QLineEdit *searchEdit = nullptr;
     QLabel *searchCountLabel = nullptr;
+    QTimer *searchDebounceTimer = nullptr;
     QVector<int> searchMatches;
     int activeSearchMatch = -1;
+
+    // Hover-state layout cache: resolveLayout deep-copies role payloads, so
+    // mouseMoveEvent reuses it until the hovered row or scroll offset changes.
+    ChatLayout::ResolvedLayout hoverLayoutCache;
+    int hoverLayoutRow = -1;
+    int hoverLayoutScroll = -1;
 
     Core::Snowflake currentEditingMessageId = Core::Snowflake::Invalid;
     QPersistentModelIndex currentEditingIndex;
@@ -162,6 +188,12 @@ private:
     QStringList cachedGuildOrder;
     Core::Snowflake cachedGuildId;
 
+    Core::MessageManager *messageManager = nullptr;
+    QMetaObject::Connection messageJumpReadyConnection;
+    QMetaObject::Connection messageJumpFailedConnection;
+    Core::Snowflake pendingJumpMessageId = Core::Snowflake::Invalid;
+
+    QLabel *placeholderLabel = nullptr;
     QPushButton *jumpToBottomButton = nullptr;
     QPropertyAnimation *jumpToBottomAnimation = nullptr;
     QPropertyAnimation *scrollAnimation = nullptr;

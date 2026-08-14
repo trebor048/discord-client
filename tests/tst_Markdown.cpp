@@ -32,6 +32,10 @@ private slots:
     void testAutoUrl();
     void testUserMention();
     void testChannelMention();
+    void testBareAngleBracketsNotMention();
+    void testInlineCodeSingleSpace();
+    void testInlineCodeEmpty();
+    void testInlineCodeSpaceStripping();
     void testEmptyInput();
     void testPlainText();
     void testEscaped();
@@ -166,6 +170,64 @@ void TestMarkdown::testChannelMention()
     auto html = parser.toHtml(nodes);
 
     QVERIFY(html == "<a href=\"acheron://channel/456\" class=\"mention\">#456</a>");
+
+    return;
+}
+
+void TestMarkdown::testBareAngleBracketsNotMention()
+{
+    Parser parser;
+
+    ParseState state;
+    state.isInline = true;
+
+    // <123> is plain text; Discord only treats <#id> as a channel mention.
+    auto html = parser.toHtml(parser.parse("<123>", state));
+    QVERIFY(html == "&lt;123&gt;");
+
+    auto mentionHtml = parser.toHtml(parser.parse("<#123>", state));
+    QVERIFY(mentionHtml == "<a href=\"acheron://channel/123\" class=\"mention\">#123</a>");
+
+    return;
+}
+
+void TestMarkdown::testInlineCodeSingleSpace()
+{
+    Parser parser;
+
+    ParseState state;
+    state.isInline = true;
+    auto html = parser.toHtml(parser.parse("` `", state));
+
+    // All-spaces content is kept verbatim per CommonMark.
+    QVERIFY(html == "<code> </code>");
+
+    return;
+}
+
+void TestMarkdown::testInlineCodeEmpty()
+{
+    Parser parser;
+
+    ParseState state;
+    state.isInline = true;
+    auto html = parser.toHtml(parser.parse("``", state));
+
+    QVERIFY(html == "<code></code>");
+
+    return;
+}
+
+void TestMarkdown::testInlineCodeSpaceStripping()
+{
+    Parser parser;
+
+    ParseState state;
+    state.isInline = true;
+    auto html = parser.toHtml(parser.parse("`  x  `", state));
+
+    // Exactly one leading and one trailing space are stripped per CommonMark.
+    QVERIFY(html == "<code> x </code>");
 
     return;
 }

@@ -74,12 +74,21 @@ RequestWorker::~RequestWorker()
 
 void RequestWorker::submit(RequestDescriptor descriptor)
 {
-    std::lock_guard<std::mutex> lock(mutex);
-    if (!acceptingSubmissions)
-        return;
-    pending.push_back(std::move(descriptor));
-    // multi is always valid here by virtue of mutex w/ shutdown
-    curl_multi_wakeup(multi);
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (acceptingSubmissions) {
+            pending.push_back(std::move(descriptor));
+            // multi is always valid here by virtue of mutex w/ shutdown
+            curl_multi_wakeup(multi);
+            return;
+        }
+    }
+    // Rejected (shutting down) — fail the request instead of dropping the
+    // descriptor, so the caller's callback is never left hanging.
+    HttpResponse response;
+    response.success = false;
+    response.error = QStringLiteral("Request rejected: client is shutting down");
+    descriptor.callback(response);
 }
 
 void RequestWorker::shutdown()
@@ -304,13 +313,29 @@ void RequestWorker::handleCompletion(TransferContext *ctx, CURLcode result)
         ctx->response.statusCode = static_cast<int>(httpCode);
         ctx->response.success = (httpCode >= 200 && httpCode < 300);
 
-        // Check for 429 rate limit — read Retry-After from response headers
+        // Check for 429 rate limit — Discord's canonical retry_after (seconds,
+        // possibly fractional) lives in the JSON body; fall back to the
+        // Retry-After header.
         if (httpCode == 429 && !ctx->descriptor.external) {
-            curl_header *retryAfter = nullptr;
-            curl_easy_header(ctx->easy, "Retry-After", 0, CURLH_HEADER, -1, &retryAfter);
-            if (retryAfter && retryAfter->value)
-                ctx->response.retryAfterMs =
-                        static_cast<int>(QString::fromLatin1(retryAfter->value).toDouble() * 1000);
+            const QJsonObject root = QJsonDocument::fromJson(ctx->response.body).object();
+            const double retryAfterSec = root["retry_after"].toDouble(-1.0);
+            if (retryAfterSec >= 0.0)
+                ctx->response.retryAfterMs = static_cast<int>(retryAfterSec * 1000.0);
+
+            if (ctx->response.retryAfterMs <= 0) {
+                curl_header *retryAfter = nullptr;
+                curl_easy_header(ctx->easy, "Retry-After", 0, CURLH_HEADER, -1, &retryAfter);
+                if (retryAfter && retryAfter->value)
+                    ctx->response.retryAfterMs =
+                            static_cast<int>(QString::fromLatin1(retryAfter->value).toDouble() * 1000);
+            }
+
+            curl_header *scope = nullptr;
+            curl_easy_header(ctx->easy, "X-RateLimit-Scope", 0, CURLH_HEADER, -1, &scope);
+            if (scope && scope->value)
+                qCInfo(LogNetwork) << "Rate limited (scope:" << scope->value << ") on"
+                                   << ctx->descriptor.url.c_str() << "- retry in"
+                                   << ctx->response.retryAfterMs << "ms";
         }
     }
 
@@ -341,6 +366,11 @@ void RequestWorker::failTransfer(TransferContext *ctx, const char *error)
         curl_slist_free_all(ctx->headers);
     if (ctx->easy)
         curl_easy_cleanup(ctx->easy);
+    if (ctx->uploadFile) {
+        ctx->uploadFile->close();
+        delete ctx->uploadFile;
+        ctx->uploadFile = nullptr;
+    }
 
     ctx->response.success = false;
     ctx->response.statusCode = 0;
@@ -371,6 +401,11 @@ void RequestWorker::abortAllInFlight()
         if (ctx->mime)
             curl_mime_free(ctx->mime);
         curl_slist_free_all(ctx->headers);
+        if (ctx->uploadFile) {
+            ctx->uploadFile->close();
+            delete ctx->uploadFile;
+            ctx->uploadFile = nullptr;
+        }
         delete ctx; // no callback fired
     }
     active.clear();

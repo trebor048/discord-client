@@ -3,6 +3,7 @@
 #include "Core/AnimationUtils.hpp"
 #include "Core/AV/VoiceManager.hpp"
 #include "Core/ImageManager.hpp"
+#include "Core/Logging.hpp"
 
 #include <QContextMenuEvent>
 #include <QCoreApplication>
@@ -22,6 +23,8 @@
 #include <QHBoxLayout>
 #include <QLinearGradient>
 #include <QFrame>
+
+#include <algorithm>
 
 namespace Acheron {
 namespace UI {
@@ -299,7 +302,35 @@ VoiceWindow::VoiceWindow(QWidget *parent)
 {
     setWindowTitle(tr("Voice Settings"));
     setAttribute(Qt::WA_DeleteOnClose, false);
+    prunePersistedUserVolumes();
     setupUi();
+}
+
+// Per-user voice volumes are persisted under QSettings keys voice/volume/<userId>
+// and would otherwise grow the registry/plist without bound. Prune on startup:
+// keep at most MAX_PERSISTED_USER_VOLUMES entries and drop the rest. QSettings
+// does not track recency, so eviction order is deterministic (by user id) rather
+// than truly least-recently-used; a pruned user simply gets the default volume
+// next time they join a call.
+void VoiceWindow::prunePersistedUserVolumes()
+{
+    static constexpr int MAX_PERSISTED_USER_VOLUMES = 200;
+
+    QSettings settings;
+    settings.beginGroup("voice/volume");
+    QStringList userIds = settings.childKeys();
+    if (userIds.size() <= MAX_PERSISTED_USER_VOLUMES) {
+        settings.endGroup();
+        return;
+    }
+
+    std::sort(userIds.begin(), userIds.end());
+    const int excess = userIds.size() - MAX_PERSISTED_USER_VOLUMES;
+    for (int i = 0; i < excess; i++)
+        settings.remove(userIds[i]);
+    settings.endGroup();
+
+    qCInfo(LogVoice) << "Pruned" << excess << "persisted per-user voice volume entries";
 }
 
 void VoiceWindow::setupUi()

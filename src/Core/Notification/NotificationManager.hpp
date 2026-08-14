@@ -30,6 +30,8 @@
 namespace Acheron {
 namespace Core {
 
+class ImageManager;
+
 class NotificationManager : public QObject
 {
     Q_OBJECT
@@ -48,6 +50,9 @@ public:
 
     // Sound management
     SoundManager *soundManager() { return &m_soundManager; }
+
+    // Image provider for toast avatars and attachment thumbnails
+    void setImageManager(Core::ImageManager *imageManager) { m_imageManager = imageManager; }
 
     // Notification display
     void showNotification(const Notification::ToastNotificationData &data);
@@ -71,7 +76,7 @@ public:
     Notification::UserSoundMapping getUserSound(const QString &userId) const;
     void setUserSound(const QString &userId, const Notification::UserSoundMapping &sound);
 
-    // Test
+    // Test (bypasses the master enable switch so the preview always renders)
     void sendTestNotification();
     bool requestNativeNotificationPermission(QString *errorMessage = nullptr);
 
@@ -81,6 +86,7 @@ signals:
     void userSoundChanged(const QString &userId);
     void openUserProfileRequested(Core::Snowflake userId);
     void openChannelRequested(Core::Snowflake channelId);
+    void jumpToMessageRequested(Core::Snowflake channelId, Core::Snowflake messageId);
     void openDmWithUserRequested(Core::Snowflake userId);
     void openFriendsTabRequested();
 
@@ -92,6 +98,9 @@ private slots:
     void onReady(const Discord::Ready &ready);
 
     void checkStreamerMode();
+
+    void onReplySendSucceeded(const QString &nonce);
+    void onReplySendFailed(const QString &nonce);
 
 private:
     // Notification logic
@@ -127,7 +136,17 @@ private:
     bool ensureNativeNotificationTray(QString *errorMessage = nullptr);
     void showNativeNotification(const Notification::ToastNotificationData &data);
 
+    // In-app toast display, including grouping collapse
+    void displayToast(const Notification::ToastNotificationData &data);
+
+    // Sends an inline-reply composed inside a toast and reports the outcome
+    // back to that toast's busy/sent/failed indicator.
+    void sendToastReply(UI::ToastNotification *toast,
+                        const Notification::ToastNotificationData &data,
+                        const QString &text);
+
     Core::ClientInstance *m_instance = nullptr;
+    Core::ImageManager *m_imageManager = nullptr;
     Notification::NotificationSettings m_settings;
 
     SoundManager m_soundManager;
@@ -146,6 +165,7 @@ private:
     // Streamer mode tracking
     bool m_streamerModeEnabled = false;
     bool m_isStreaming = false;
+    QTimer *m_streamerTimer = nullptr;
 
     // Voice debounce
     QHash<Core::Snowflake, qint64> m_lastVoiceNotification;
@@ -161,6 +181,12 @@ private:
 
     // Active channel (don't notify for this channel)
     Core::Snowflake m_activeChannelId = Core::Snowflake::Invalid;
+
+    // Toast reply outcomes are tracked at manager level so the connection from
+    // MessageManager to the toast survives account switches (which recreate
+    // MessageManager) and is cleaned up reliably when this manager is destroyed.
+    QPointer<Core::MessageManager> m_replyMessages;
+    QHash<QString, QPointer<UI::ToastNotification>> m_pendingReplyToasts;
 
     // Current user cache
     mutable QMutex m_currentUserMutex;

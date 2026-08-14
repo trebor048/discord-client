@@ -12,6 +12,9 @@
 #include <QLineEdit>
 #include <QMessageBox>
 
+class QMediaPlayer;
+class QAudioOutput;
+
 class SoundOverrideWidget : public QWidget
 {
     Q_OBJECT
@@ -39,6 +42,11 @@ private:
     void setupUi();
     void updateCustomFileLabel();
     void onTestPlay();
+    void playTestSound(const QUrl &source);
+    void cleanupTestPlayer();
+
+    QMediaPlayer *m_testPlayer = nullptr;
+    QAudioOutput *m_testOutput = nullptr;
 
     QString m_soundId;
     QString m_displayName;

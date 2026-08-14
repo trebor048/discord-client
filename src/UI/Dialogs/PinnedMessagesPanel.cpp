@@ -2,6 +2,7 @@
 
 #include "Core/ClientInstance.hpp"
 #include "Core/ImageManager.hpp"
+#include "Core/Logging.hpp"
 #include "Core/Markdown/Parser.hpp"
 #include "Core/PermissionManager.hpp"
 #include "Core/TimeUtils.hpp"
@@ -200,9 +201,12 @@ void PinnedMessagesPanel::addMessageItem(const Discord::Message &msg)
     auto *header = new QHBoxLayout;
     header->setSpacing(10);
 
+    // webhook/system messages may lack a full author
+    const bool hasAuthor = msg.author.hasValue();
+
     auto *avatar = new QLabel(frame);
     avatar->setFixedSize(40, 40);
-    const QUrl avatarUrl = resolveAvatarUrl(msg.author.get());
+    const QUrl avatarUrl = hasAuthor ? resolveAvatarUrl(msg.author.get()) : QUrl();
     if (!avatarUrl.isEmpty())
         imageManager->assign(avatar, avatarUrl, QSize(40, 40));
     else
@@ -211,8 +215,9 @@ void PinnedMessagesPanel::addMessageItem(const Discord::Message &msg)
 
     auto *nameCol = new QVBoxLayout;
     nameCol->setSpacing(1);
-    nameCol->addWidget(makeAuthorLabel(resolveAuthorName(msg.author.get()), frame));
-    if (msg.timestamp.get().isValid())
+    nameCol->addWidget(makeAuthorLabel(
+            hasAuthor ? resolveAuthorName(msg.author.get()) : tr("Unknown"), frame));
+    if (msg.timestamp.hasValue() && msg.timestamp.get().isValid())
         nameCol->addWidget(makeMutedLabel(Core::TimeUtils::absoluteTime(msg.timestamp.get()), frame));
     header->addLayout(nameCol, 1);
     root->addLayout(header);
@@ -254,7 +259,7 @@ void PinnedMessagesPanel::addMessageItem(const Discord::Message &msg)
     }
 
     // Unpin affordance
-    if (canUnpin()) {
+    if (canUnpin() && msg.id.hasValue()) {
         auto *footer = new QHBoxLayout;
         footer->addStretch(1);
         auto *unpinButton = new QPushButton(tr("Unpin"), frame);
@@ -367,8 +372,18 @@ void PinnedMessagesPanel::onUnpinClicked(Core::Snowflake messageId)
     if (!instance || !channelId.isValid())
         return;
 
-    instance->discord()->unpinMessage(channelId, messageId);
-    refresh();
+    QPointer<PinnedMessagesPanel> self(this);
+    instance->discord()->unpinMessage(channelId, messageId, [this, self, messageId](bool success) {
+        if (!self)
+            return;
+        if (!success) {
+            // keep the entry; the user can retry
+            qCWarning(LogUI) << "Unpin failed for message" << messageId << "in channel"
+                             << channelId;
+            return;
+        }
+        refresh();
+    });
 }
 
 void PinnedMessagesPanel::onChannelPinsUpdated(const Discord::ChannelPinsUpdate &event)

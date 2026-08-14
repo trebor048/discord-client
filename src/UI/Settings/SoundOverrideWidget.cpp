@@ -8,6 +8,7 @@
 #include <QFileInfo>
 #include <QJsonObject>
 #include <QLineEdit>
+#include <QDebug>
 
 SoundOverrideWidget::SoundOverrideWidget(const QString &soundId, const QString &displayName, QWidget *parent)
     : QWidget(parent), m_soundId(soundId), m_displayName(displayName)
@@ -163,18 +164,7 @@ void SoundOverrideWidget::onTestPlay()
 {
     QString sound = m_soundCombo->currentData().toString();
     if (sound == "custom" && !m_customUrl.isEmpty()) {
-        auto *player = new QMediaPlayer(this);
-        auto *output = new QAudioOutput(this);
-        player->setAudioOutput(output);
-        output->setVolume(m_volumeSlider->value() / 100.0);
-        player->setSource(QUrl(m_customUrl));
-        player->play();
-        connect(player, &QMediaPlayer::mediaStatusChanged, player, [player, output](QMediaPlayer::MediaStatus status) {
-            if (status == QMediaPlayer::EndOfMedia || status == QMediaPlayer::InvalidMedia) {
-                player->deleteLater();
-                output->deleteLater();
-            }
-        });
+        playTestSound(QUrl(m_customUrl));
         return;
     }
     if (sound == "custom" && !m_customFilePath.isEmpty()) {
@@ -183,21 +173,47 @@ void SoundOverrideWidget::onTestPlay()
             QMessageBox::warning(this, tr("Test Play"), tr("Custom file not found: %1").arg(m_customFilePath));
             return;
         }
-        auto *player = new QMediaPlayer(this);
-        auto *output = new QAudioOutput(this);
-        player->setAudioOutput(output);
-        output->setVolume(m_volumeSlider->value() / 100.0);
-        player->setSource(QUrl::fromLocalFile(m_customFilePath));
-        player->play();
-        connect(player, &QMediaPlayer::mediaStatusChanged, player, [player, output](QMediaPlayer::MediaStatus status) {
-            if (status == QMediaPlayer::EndOfMedia || status == QMediaPlayer::InvalidMedia) {
-                player->deleteLater();
-                output->deleteLater();
-            }
-        });
+        playTestSound(QUrl::fromLocalFile(m_customFilePath));
     } else {
         QMessageBox::information(this, tr("Test Play"),
             tr("Connect a SoundManager to enable in-app preview. Sound: %1").arg(sound));
+    }
+}
+
+void SoundOverrideWidget::playTestSound(const QUrl &source)
+{
+    cleanupTestPlayer();
+
+    m_testPlayer = new QMediaPlayer(this);
+    m_testOutput = new QAudioOutput(this);
+    m_testPlayer->setAudioOutput(m_testOutput);
+    m_testOutput->setVolume(m_volumeSlider->value() / 100.0);
+    m_testPlayer->setSource(source);
+    m_testPlayer->play();
+
+    connect(m_testPlayer, &QMediaPlayer::mediaStatusChanged, this,
+            [this](QMediaPlayer::MediaStatus status) {
+                if (status == QMediaPlayer::EndOfMedia || status == QMediaPlayer::InvalidMedia)
+                    cleanupTestPlayer();
+            });
+    connect(m_testPlayer, &QMediaPlayer::errorOccurred, this,
+            [this](QMediaPlayer::Error error, const QString &errorString) {
+                Q_UNUSED(error);
+                qWarning() << "SoundOverrideWidget: test playback failed:" << errorString;
+                cleanupTestPlayer();
+            });
+}
+
+void SoundOverrideWidget::cleanupTestPlayer()
+{
+    if (!m_testPlayer)
+        return;
+    m_testPlayer->stop();
+    m_testPlayer->deleteLater();
+    m_testPlayer = nullptr;
+    if (m_testOutput) {
+        m_testOutput->deleteLater();
+        m_testOutput = nullptr;
     }
 }
 

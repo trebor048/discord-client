@@ -4,7 +4,10 @@
 
 #include "MainWindow.hpp"
 #include "Settings/SettingsWindow.hpp"
+#include "Settings/NotificationsPage.hpp"
 #include "Core/ClientInstance.hpp"
+#include "Core/Session.hpp"
+#include "Core/ImageManager.hpp"
 #include "Core/Notification/NotificationManager.hpp"
 
 namespace Acheron {
@@ -25,8 +28,19 @@ void NotificationController::teardown()
 
 void NotificationController::setupForInstance(Core::ClientInstance *instance)
 {
+    // Replace any existing manager so repeated setup calls don't leak or
+    // duplicate signal subscriptions.
+    if (notificationManager) {
+        disconnect(notificationManager, nullptr, nullptr, nullptr);
+        notificationManager->deleteLater();
+        notificationManager = nullptr;
+    }
+
     // Initialize notification manager for this instance
     notificationManager = new Core::NotificationManager(instance, m_window);
+    if (m_window->session) {
+        notificationManager->setImageManager(m_window->session->getImageManager());
+    }
     notificationManager->initialize();
 
     // Clear active channel when switching instances
@@ -38,6 +52,12 @@ void NotificationController::setupForInstance(Core::ClientInstance *instance)
         if (m_window->currentInstance) {
             // Find and switch to the channel
             m_window->selectChannelInTree(channelId);
+        }
+    });
+    connect(notificationManager, &Core::NotificationManager::jumpToMessageRequested,
+            m_window, [this](Core::Snowflake channelId, Core::Snowflake messageId) {
+        if (m_window->currentInstance) {
+            m_window->jumpToMessage(channelId, messageId);
         }
     });
     connect(notificationManager, &Core::NotificationManager::openUserProfileRequested,
@@ -87,6 +107,14 @@ void NotificationController::applyToSettingsWindow(SettingsWindow *settingsWindo
 {
     if (notificationManager) {
         settingsWindow->setNotificationManager(notificationManager);
+
+        // The settings page persists to QSettings on every change; reload the
+        // manager so edits take effect immediately.
+        if (auto *page = settingsWindow->findChild<NotificationsPage *>()) {
+            connect(page, &NotificationsPage::settingsChanged,
+                    notificationManager, &Core::NotificationManager::loadSettings,
+                    Qt::UniqueConnection);
+        }
     }
 }
 

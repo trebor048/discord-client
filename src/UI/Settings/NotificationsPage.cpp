@@ -87,6 +87,26 @@ void NotificationsPage::setupAppearanceTab(QWidget *tab)
     scroll->setWidget(content);
     layout->addWidget(scroll);
 
+    // General
+    auto *generalGroup = new QGroupBox(tr("General"), content);
+    auto *generalLayout = new QFormLayout(generalGroup);
+
+    m_enabledCheck = new QCheckBox(tr("Enable notifications"), generalGroup);
+    m_enabledCheck->setChecked(true);
+    generalLayout->addRow(m_enabledCheck);
+
+    m_deliveryCombo = new QComboBox(generalGroup);
+    m_deliveryCombo->addItem(tr("In-app toasts"), "in-app");
+    m_deliveryCombo->addItem(tr("OS native notifications"), "native");
+    m_deliveryCombo->addItem(tr("Both"), "both");
+    generalLayout->addRow(tr("Notification Style:"), m_deliveryCombo);
+
+    m_groupingCheck = new QCheckBox(tr("Group multiple messages from the same conversation into one toast"), generalGroup);
+    m_groupingCheck->setChecked(true);
+    generalLayout->addRow(m_groupingCheck);
+
+    contentLayout->addWidget(generalGroup);
+
     // Position
     auto *positionGroup = new QGroupBox(tr("Position & Layout"), content);
     auto *positionLayout = new QFormLayout(positionGroup);
@@ -135,10 +155,25 @@ void NotificationsPage::setupAppearanceTab(QWidget *tab)
     m_renderImagesCheck->setChecked(true);
     positionLayout->addRow(m_renderImagesCheck);
 
+    m_animationsCheck = new QCheckBox(tr("Animate toast entry, exit, and expansion"), positionGroup);
+    m_animationsCheck->setChecked(true);
+    positionLayout->addRow(m_animationsCheck);
+
+    m_progressBarCheck = new QCheckBox(tr("Show countdown progress bar on toasts"), positionGroup);
+    m_progressBarCheck->setChecked(true);
+    positionLayout->addRow(m_progressBarCheck);
+
+    m_coloredAccentsCheck = new QCheckBox(tr("Colored toasts (author and channel accents)"), positionGroup);
+    m_coloredAccentsCheck->setChecked(true);
+    positionLayout->addRow(m_coloredAccentsCheck);
+
     contentLayout->addWidget(positionGroup);
     contentLayout->addStretch();
 
     // Connect signals
+    connect(m_enabledCheck, &QCheckBox::toggled, this, &NotificationsPage::onSettingChanged);
+    connect(m_deliveryCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &NotificationsPage::onSettingChanged);
+    connect(m_groupingCheck, &QCheckBox::toggled, this, &NotificationsPage::onSettingChanged);
     connect(m_positionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &NotificationsPage::onSettingChanged);
     connect(m_maxNotificationsSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, &NotificationsPage::onSettingChanged);
     connect(m_timeoutSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, &NotificationsPage::onSettingChanged);
@@ -147,6 +182,9 @@ void NotificationsPage::setupAppearanceTab(QWidget *tab)
     connect(m_scaleSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &NotificationsPage::onSettingChanged);
     connect(m_pauseOnHoverCheck, &QCheckBox::toggled, this, &NotificationsPage::onSettingChanged);
     connect(m_renderImagesCheck, &QCheckBox::toggled, this, &NotificationsPage::onSettingChanged);
+    connect(m_animationsCheck, &QCheckBox::toggled, this, &NotificationsPage::onSettingChanged);
+    connect(m_progressBarCheck, &QCheckBox::toggled, this, &NotificationsPage::onSettingChanged);
+    connect(m_coloredAccentsCheck, &QCheckBox::toggled, this, &NotificationsPage::onSettingChanged);
 }
 
 void NotificationsPage::setupNotificationTypesTab(QWidget *tab)
@@ -470,7 +508,7 @@ void NotificationsPage::setupNativeTab(QWidget *tab)
     m_requestPermissionBtn = new QPushButton(tr("Request Permission"), group);
     groupLayout->addRow(tr("Permission:"), m_requestPermissionBtn);
 
-    auto *noteLabel = new QLabel(tr("Native notifications use your operating system notification tray. Click the button above to send the permission/test notification."), group);
+    auto *noteLabel = new QLabel(tr("Native notifications use your operating system notification tray. This policy applies when the notification style (Appearance tab) is set to 'Both'. Click the button above to send the permission/test notification."), group);
     noteLabel->setWordWrap(true);
     noteLabel->setStyleSheet("color: #72767d; font-size: 12px;");
     groupLayout->addRow(noteLabel);
@@ -519,7 +557,14 @@ void NotificationsPage::setupTestTab(QWidget *tab)
 
 void NotificationsPage::loadSettings()
 {
+    m_loadingSettings = true;
     QSettings settings;
+
+    // General
+    m_enabledCheck->setChecked(settings.value("notifications/enabled", true).toBool());
+    int deliveryIdx = m_deliveryCombo->findData(settings.value("notifications/delivery", "in-app").toString());
+    if (deliveryIdx >= 0) m_deliveryCombo->setCurrentIndex(deliveryIdx);
+    m_groupingCheck->setChecked(settings.value("notifications/grouping", true).toBool());
 
     // Appearance
     QString pos = settings.value("notifications/position", "bottom-left").toString();
@@ -533,6 +578,9 @@ void NotificationsPage::loadSettings()
     m_scaleSpin->setValue(settings.value("notifications/scale", 1.0).toDouble());
     m_pauseOnHoverCheck->setChecked(settings.value("notifications/pause_on_hover", true).toBool());
     m_renderImagesCheck->setChecked(settings.value("notifications/render_images", true).toBool());
+    m_animationsCheck->setChecked(settings.value("notifications/animations", true).toBool());
+    m_progressBarCheck->setChecked(settings.value("notifications/progress_bar", true).toBool());
+    m_coloredAccentsCheck->setChecked(settings.value("notifications/colored_accents", true).toBool());
 
     // Notification Types
     m_mentionsCheck->setChecked(settings.value("notifications/mentions", true).toBool());
@@ -603,11 +651,18 @@ void NotificationsPage::loadSettings()
     QString nativeMode = settings.value("notifications/native_mode", "not-focused").toString();
     int nativeIdx = m_nativeModeCombo->findData(nativeMode);
     if (nativeIdx >= 0) m_nativeModeCombo->setCurrentIndex(nativeIdx);
+
+    m_loadingSettings = false;
 }
 
 void NotificationsPage::saveSettings()
 {
     QSettings settings;
+
+    // General
+    settings.setValue("notifications/enabled", m_enabledCheck->isChecked());
+    settings.setValue("notifications/delivery", m_deliveryCombo->currentData());
+    settings.setValue("notifications/grouping", m_groupingCheck->isChecked());
 
     // Appearance
     settings.setValue("notifications/position", m_positionCombo->currentData());
@@ -618,6 +673,9 @@ void NotificationsPage::saveSettings()
     settings.setValue("notifications/scale", m_scaleSpin->value());
     settings.setValue("notifications/pause_on_hover", m_pauseOnHoverCheck->isChecked());
     settings.setValue("notifications/render_images", m_renderImagesCheck->isChecked());
+    settings.setValue("notifications/animations", m_animationsCheck->isChecked());
+    settings.setValue("notifications/progress_bar", m_progressBarCheck->isChecked());
+    settings.setValue("notifications/colored_accents", m_coloredAccentsCheck->isChecked());
 
     // Notification Types
     settings.setValue("notifications/mentions", m_mentionsCheck->isChecked());
@@ -651,6 +709,7 @@ void NotificationsPage::saveSettings()
         auto *widget = qobject_cast<SoundOverrideWidget *>(m_soundOverridesList->itemWidget(item));
         if (widget) {
             QJsonObject o = widget->toJson();
+            item->setData(Qt::UserRole + 1, o);
             overridesObj[soundId] = o;
         }
     }
@@ -674,6 +733,8 @@ void NotificationsPage::saveSettings()
 
 void NotificationsPage::onSettingChanged()
 {
+    if (m_loadingSettings)
+        return;
     saveSettings();
     emit settingsChanged();
 }
@@ -829,13 +890,14 @@ void NotificationsPage::onExportSettings()
     QJsonArray overridesArr;
     for (int i = 0; i < m_soundOverridesList->count(); ++i) {
         auto *item = m_soundOverridesList->item(i);
-        QJsonObject o = item->data(Qt::UserRole + 1).toJsonObject();
-        if (o.isEmpty()) {
-            o["enabled"] = item->checkState() == Qt::Checked;
-            o["selected_sound"] = "default";
-            o["volume"] = 100;
-            o["custom_file_id"] = "";
+        QJsonObject o;
+        auto *widget = qobject_cast<SoundOverrideWidget *>(m_soundOverridesList->itemWidget(item));
+        if (widget) {
+            o = widget->toJson();
+        } else {
+            o = item->data(Qt::UserRole + 1).toJsonObject();
         }
+        o["enabled"] = o.value("enabled").toBool(item->checkState() == Qt::Checked);
         o["id"] = item->data(Qt::UserRole).toString();
         overridesArr.append(o);
     }

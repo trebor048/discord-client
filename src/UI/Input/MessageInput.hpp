@@ -13,6 +13,7 @@
 #include <QMovie>
 
 #include "Core/EmojiCatalog.hpp"
+#include "Core/Markdown/Parser.hpp"
 #include "Core/PendingAttachment.hpp"
 #include "Core/Snowflake.hpp"
 #include "Discord/Entities.hpp"
@@ -22,6 +23,7 @@ class QNetworkAccessManager;
 class QPropertyAnimation;
 class QSplitter;
 class QTextBrowser;
+class QTimer;
 class QToolButton;
 
 namespace Acheron {
@@ -95,13 +97,15 @@ private:
     QWidget *replyBar;
     QLabel *replyLabel;
     QToolButton *replyCancelButton;
-    QToolButton *emojiPickerButton;
     QToolButton *stickerPickerButton;
     QToolButton *gifPickerButton = nullptr;
     AttachmentPreviewPanel *attachmentPanel;
     QSplitter *previewSplitter;
     QTextBrowser *markdownPreview;
     QToolButton *markdownPreviewToggle;
+    QTimer *markdownPreviewDebounceTimer = nullptr;
+    Core::Markdown::Parser markdownParser;
+    std::optional<QString> lastMarkdownPreviewText;
     EmojiAutocompletePopup *emojiPopup = nullptr;
     QGraphicsOpacityEffect *replyBarOpacity = nullptr;
     QPropertyAnimation *replyBarFadeAnimation = nullptr;
@@ -144,6 +148,7 @@ private:
     void hideEmojiPopup();
     [[nodiscard]] QString currentEmojiPrefix(int *startPosition = nullptr) const;
     void updateMarkdownPreview();
+    void renderMarkdownPreview();
     void setMarkdownPreviewVisible(bool visible);
     void insertEmojiInline(const Core::EmojiCatalogItem &item);
     [[nodiscard]] int emojiInlineSize() const;

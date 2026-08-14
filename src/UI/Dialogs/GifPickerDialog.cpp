@@ -159,6 +159,20 @@ GifPickerDialog::GifPickerDialog(QWidget *parent)
             QStringLiteral("color: #80848e; padding: 4px 8px; font-size: 11px;"));
     outer->addWidget(m_statusLabel);
 
+    // Shown when infinite scroll pauses at kAutoLoadGifLimit; clicking resumes.
+    m_loadMoreButton = new QPushButton(tr("Load more GIFs"), this);
+    m_loadMoreButton->setVisible(false);
+    m_loadMoreButton->setStyleSheet(
+            QStringLiteral("QPushButton { background: #4e5058; color: #dbdee1; border: none; "
+                           "padding: 6px 12px; border-radius: 4px; }"
+                           "QPushButton:hover { background: #6d6f78; }"));
+    connect(m_loadMoreButton, &QPushButton::clicked, this, [this]() {
+        m_autoLoadPaused = false;
+        m_loadMoreButton->setVisible(false);
+        loadMore();
+    });
+    outer->addWidget(m_loadMoreButton);
+
     // Connect search — debounce to avoid firing a network request on every keystroke
     connect(m_searchEdit, &QLineEdit::textChanged, this, [this](const QString &text) {
         if (text.trimmed().isEmpty()) {
@@ -342,8 +356,16 @@ void GifPickerDialog::appendGifs(const QList<Discord::GifItem> &items, bool hasM
 
     // Advance the pagination offset so loadMore() fetches the next page
     m_offset = m_provider->nextOffset();
+    m_loadedCount += items.size();
 
-    if (m_statusLabel->text().isEmpty() && !items.isEmpty()) {
+    // Pause infinite scroll past the cap so the grid (one real QToolButton
+    // per result) cannot grow without bound on long sessions.
+    if (m_loadedCount >= kAutoLoadGifLimit && m_hasMore) {
+        m_autoLoadPaused = true;
+        m_loadMoreButton->setVisible(true);
+        m_statusLabel->setText(tr("Showing %1 GIFs. Scroll paused — click below to load more.")
+                                       .arg(m_loadedCount));
+    } else if (m_statusLabel->text().isEmpty() && !items.isEmpty()) {
         m_statusLabel->clear();
     }
 }
@@ -390,6 +412,9 @@ void GifPickerDialog::clearGrid()
     m_offset = 0;
     m_hasMore = false;
     m_loading = false;
+    m_autoLoadPaused = false;
+    m_loadedCount = 0;
+    m_loadMoreButton->setVisible(false);
     m_statusLabel->clear();
 
     // Reset scroll position to top so user sees results immediately
@@ -549,7 +574,7 @@ void GifPickerDialog::selectGif(const Discord::GifItem &item)
 void GifPickerDialog::onScrollChanged(int value)
 {
     auto *bar = m_scrollArea->verticalScrollBar();
-    if (value >= bar->maximum() - kGridCellHeight * 2) {
+    if (value >= bar->maximum() - kGridCellHeight * 2 && !m_autoLoadPaused) {
         loadMore();
     }
 }

@@ -121,6 +121,8 @@ void WindowManager::openSettingsWindow()
         settingsWindow->setClient(m_window->currentInstance->discord());
     }
 
+    settingsWindow->setImageManager(m_window->session->getImageManager());
+
     if (m_window->currentInstance) {
         settingsWindow->setVoiceManager(m_window->currentInstance->voice());
     }

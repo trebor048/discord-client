@@ -2,7 +2,6 @@
 
 #include <QMutexLocker>
 #include <QSettings>
-#include <QFile>
 #include <QDir>
 
 #include "Core/Logging.hpp"
@@ -22,6 +21,20 @@ bool columnExists(QSqlDatabase &db, const QString &table, const QString &column)
             return true;
     }
     return false;
+}
+
+int schemaVersion(QSqlDatabase &db)
+{
+    QSqlQuery query(db);
+    if (!query.exec("PRAGMA user_version") || !query.next())
+        return 0;
+    return query.value(0).toInt();
+}
+
+void setSchemaVersion(QSqlDatabase &db, int version)
+{
+    QSqlQuery query(db);
+    query.exec(QString("PRAGMA user_version = %1").arg(version));
 }
 } // namespace
 
@@ -83,12 +96,6 @@ QString DatabaseManager::openCacheDatabase(Core::Snowflake accountId)
         QString dirPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
         QString dbPath = QDir(dirPath).filePath(QString("cache_%1.sqlite").arg(accountId.toString()));
 
-        // A stale cache DB file may exist on disk. No connection is live here
-        // (QSqlDatabase::contains() above returned false), so we can remove the
-        // stale file directly without locking dbMutex again.
-        if (QFile::exists(dbPath))
-            QFile::remove(dbPath);
-
         db.setDatabaseName(dbPath);
     }
 
@@ -97,11 +104,13 @@ QString DatabaseManager::openCacheDatabase(Core::Snowflake accountId)
         return "";
     }
 
-    if (!inMemory) {
+    {
         QSqlQuery config(db);
         config.exec("PRAGMA foreign_keys = ON");
-        config.exec("PRAGMA journal_mode = WAL");
-        config.exec("PRAGMA synchronous = OFF");
+        if (!inMemory) {
+            config.exec("PRAGMA journal_mode = WAL");
+            config.exec("PRAGMA synchronous = OFF");
+        }
     }
 
     setupCacheTables(connName);
@@ -148,8 +157,23 @@ void DatabaseManager::setupPersistentTables()
         )
     )");
 
-    if (!columnExists(db, "accounts", "auto_connect"))
+    applyPersistentMigrations(db);
+}
+
+void DatabaseManager::applyPersistentMigrations(QSqlDatabase &db)
+{
+    constexpr int latestSchemaVersion = 1;
+    int version = schemaVersion(db);
+    if (version >= latestSchemaVersion)
+        return;
+
+    QSqlQuery query(db);
+
+    // Migration 1: accounts.auto_connect
+    if (version < 1 && !columnExists(db, "accounts", "auto_connect"))
         query.exec("ALTER TABLE accounts ADD COLUMN auto_connect INTEGER NOT NULL DEFAULT 0");
+
+    setSchemaVersion(db, latestSchemaVersion);
 }
 
 void DatabaseManager::setupCacheTables(const QString &connName)

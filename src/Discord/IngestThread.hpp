@@ -46,6 +46,11 @@ private:
     std::mutex mutex;
     std::condition_variable cv;
     std::deque<TaggedData> queue;
+    size_t queuedBytes = 0;
+    // Backpressure cap: if the consumer falls this far behind, drop oldest
+    // chunks rather than grow memory unboundedly.
+    static constexpr size_t maxQueuedBytes = 4 * 1024 * 1024;
+    static constexpr size_t maxQueuedMessages = 1000;
     QByteArray decompressedBuffer;
 
     z_stream stream;

@@ -141,6 +141,9 @@ void ChannelSelectionController::applyChannelChrome(Core::ClientInstance *instan
     }
     bool isThread = threadParentId.isValid();
 
+    m_window->setChannelName(isDm ? QStringLiteral("@") + name
+                                  : (isThread ? name : QStringLiteral("#") + name));
+
     setThreadBrowserTarget(isDm ? Snowflake::Invalid : (isThread ? threadParentId : channelId));
 
     if (isDm) {
@@ -190,6 +193,18 @@ void ChannelSelectionController::applyChannelChrome(Core::ClientInstance *instan
 void ChannelSelectionController::switchChatChannel(Core::Snowflake channelId,
                                                    Core::Snowflake guildId)
 {
+    // Keep the emoji picker in sync with the composing context: the current
+    // guild floats to the top of its Server tab and the remaining guilds
+    // follow the guild-sidebar order.
+    if (m_window->currentInstance) {
+        const QStringList order =
+                m_window->channelTreeModel->orderedGuildIds(m_window->currentInstance->accountId());
+        m_window->messageInput->setGuildOrder(order);
+        m_window->chatView->setGuildOrder(order);
+    }
+    m_window->messageInput->setCurrentGuildId(guildId);
+    m_window->chatView->setCurrentGuildId(guildId);
+
     if (channelId == m_window->chatModel->getActiveChannelId())
         return;
 
@@ -275,6 +290,11 @@ void ChannelSelectionController::openForumChannel(Core::ClientInstance *instance
 {
     instance->readState()->setActiveChannel(forumId);
 
+    QString forumName;
+    if (auto ch = instance->getChannel(forumId); ch && ch->name.hasValue())
+        forumName = ch->name.get();
+    m_window->setChannelName(forumName.isEmpty() ? QString() : QStringLiteral("#") + forumName);
+
     currentForumId = forumId;
     currentForumGuildId = guildId;
     m_window->forumBrowser->setSortMode(static_cast<int>(instance->forums()->sortMode(forumId)));
@@ -293,6 +313,12 @@ void ChannelSelectionController::openForumPost(Core::Snowflake threadId, Core::S
         return;
 
     setViewMode(ViewMode::ForumSplit);
+
+    QString postName;
+    if (auto ch = m_window->currentInstance->getChannel(threadId); ch && ch->name.hasValue())
+        postName = ch->name.get();
+    if (!postName.isEmpty())
+        m_window->setChannelName(postName);
 
     Core::Snowflake userId = m_window->currentInstance->accountId();
     bool canSend = m_window->currentInstance->permissions()->hasChannelPermission(userId, currentForumId, Discord::Permission::SEND_MESSAGES_IN_THREADS);
@@ -771,7 +797,14 @@ void ChannelSelectionController::selectChannelInTree(Snowflake channelId)
 void ChannelSelectionController::setThreadBrowserTarget(Core::Snowflake channelId)
 {
     threadBrowserChannelId = channelId;
-    m_window->channelToolbar->setVisible(channelId.isValid());
+    m_window->threadBrowserButton->setVisible(channelId.isValid());
+    updateChannelToolbarVisibility();
+}
+
+void ChannelSelectionController::updateChannelToolbarVisibility()
+{
+    m_window->channelToolbar->setVisible(threadBrowserChannelId.isValid() ||
+                                         !m_window->channelFullName.isEmpty());
 }
 
 void ChannelSelectionController::openThreadBrowser()

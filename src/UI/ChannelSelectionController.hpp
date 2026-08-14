@@ -80,6 +80,7 @@ public:
     void setThreadBrowserTarget(Core::Snowflake channelId);
     void openThreadBrowser();
     void openPinnedMessages();
+    void updateChannelToolbarVisibility();
 
 private:
     MainWindow *m_window = nullptr;

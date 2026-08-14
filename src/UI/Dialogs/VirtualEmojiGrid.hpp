@@ -72,6 +72,8 @@ protected:
 private:
     void rebuildLayoutModel();
     void relayout();
+    QToolButton *createPoolButton();
+    void ensureButtonPoolSize(int viewportHeight);
     int cellTopY(const QString &value) const;
     void ensureVisible(int y, int height);
 

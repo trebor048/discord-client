@@ -9,6 +9,9 @@ class QListWidgetItem;
 class QPushButton;
 
 namespace Acheron {
+namespace Core {
+class ImageManager;
+}
 namespace Discord {
 class Client;
 }
@@ -21,6 +24,7 @@ public:
     explicit AuthorizedAppsPage(QWidget *parent = nullptr);
 
     void setClient(Discord::Client *client);
+    void setImageManager(Core::ImageManager *imageManager);
 
 private:
     void refreshApps();
@@ -28,6 +32,8 @@ private:
     void onRevokeApp(quint64 appId);
 
     Discord::Client *client = nullptr;
+    Core::ImageManager *imageManager = nullptr;
+    bool pendingRefresh = false;
 
     QListWidget *appsList;
     QPushButton *refreshButton;

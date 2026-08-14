@@ -10,7 +10,10 @@ constexpr static QSize AvatarRequestSize = QSize(32, 32);
 MemberListModel::MemberListModel(Core::ImageManager *imageManager, QObject *parent)
     : QAbstractListModel(parent), imageManager(imageManager)
 {
-    connect(imageManager, &Core::ImageManager::imageFetched, this, &MemberListModel::onImageFetched);
+    if (imageManager) {
+        connect(imageManager, &Core::ImageManager::imageFetched, this,
+                &MemberListModel::onImageFetched);
+    }
 }
 
 void MemberListModel::setManager(Core::MemberListManager *newManager)
@@ -67,10 +70,10 @@ QVariant MemberListModel::data(const QModelIndex &index, int role) const
                        ? item->displayName
                        : QString();
     case AvatarRole: {
-        if (item->type != Core::MemberListItem::Type::Member)
+        if (item->type != Core::MemberListItem::Type::Member || !imageManager)
             return QVariant();
 
-        if (!item->member.user->avatar.hasValue())
+        if (!item->member.user.hasValue() || !item->member.user->avatar.hasValue())
             return QVariant();
 
         Core::Snowflake userId = item->userId;

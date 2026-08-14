@@ -35,6 +35,9 @@ public:
     /// Returns true if this object owns an active transaction.
     bool ownsTransaction() const { return owns; }
 
+    /// Returns true if a Transaction currently owns a transaction on this connection.
+    static bool isActive(const QString &connName);
+
 private:
     QSqlDatabase db;
     QString connName;

@@ -37,6 +37,7 @@ public:
         Future,
         Jump,
         Created,
+        Updated,
     };
     Q_ENUM(MessageLoadType)
 
@@ -52,6 +53,8 @@ public:
     using MessagesCallback = std::function<void(const Core::Result<QList<Message>> &)>;
     void fetchLatestMessages(Core::Snowflake channelId, int limit, MessagesCallback callback);
     void fetchHistory(Core::Snowflake channelId, Core::Snowflake beforeId, int limit,
+                      MessagesCallback callback);
+    void fetchMessage(Core::Snowflake channelId, Core::Snowflake messageId,
                       MessagesCallback callback);
 
     using ProfileCallback = std::function<void(const Core::Result<UserProfile> &)>;
@@ -132,7 +135,8 @@ public:
     void editMessage(Core::Snowflake channelId, Core::Snowflake messageId, const QString &content);
     void deleteMessage(Core::Snowflake channelId, Core::Snowflake messageId);
     void pinMessage(Core::Snowflake channelId, Core::Snowflake messageId);
-    void unpinMessage(Core::Snowflake channelId, Core::Snowflake messageId);
+    void unpinMessage(Core::Snowflake channelId, Core::Snowflake messageId,
+                      std::function<void(bool success)> completion = nullptr);
     void getPinnedMessages(Core::Snowflake channelId,
                            const MessagesCallback &callback);
 
@@ -230,6 +234,7 @@ signals:
     void messageCreated(const Message &msg);
     void messageUpdated(const Message &msg);
     void messageDeleted(const MessageDelete &event);
+    void messagesDeletedBulk(const MessageDeleteBulk &event);
     void typingStart(const TypingStart &event);
     void channelCreated(const ChannelCreate &event);
     void channelUpdated(const ChannelUpdate &event);
@@ -245,6 +250,9 @@ signals:
     void guildDeleted(const GuildDelete &event);
     void guildMembersChunk(const GuildMembersChunk &chunk);
     void guildMemberUpdated(const GuildMemberUpdate &event);
+    void guildMemberAdded(const GuildMemberUpdate &event);
+    void guildMemberRemoved(const GuildMemberRemove &event);
+    void ownUserUpdated(const User &user);
     void guildRoleCreated(const GuildRoleCreate &event);
     void guildRoleUpdated(const GuildRoleUpdate &event);
     void guildRoleDeleted(const GuildRoleDelete &event);
@@ -308,6 +316,7 @@ private slots:
     void onGatewayMessageCreate(const Message &msg);
     void onGatewayMessageUpdate(const Message &msg);
     void onGatewayMessageDelete(const MessageDelete &event);
+    void onGatewayUserUpdate(const User &user);
     void onGatewayChannelCreate(const ChannelCreate &event);
     void onGatewayChannelUpdate(const ChannelUpdate &event);
     void onGatewayChannelDelete(const ChannelDelete &event);

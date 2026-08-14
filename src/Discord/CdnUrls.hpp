@@ -62,6 +62,15 @@ inline QUrl channelIcon(Core::Snowflake channelId, const QString &hash, int size
                         .arg(QString::number(quint64(channelId)), hash, QString::number(size)));
 }
 
+inline QUrl applicationIcon(Core::Snowflake appId, const QString &hash, int size = 64)
+{
+    if (hash.isEmpty())
+        return {};
+    return QUrl(QStringLiteral("https://cdn.discordapp.com/app-icons/%1/%2.%3?size=%4")
+                        .arg(QString::number(quint64(appId)), hash, assetExtension(hash),
+                             QString::number(size)));
+}
+
 inline QUrl badgeIcon(const QString &hash, int size = 64)
 {
     if (hash.isEmpty())

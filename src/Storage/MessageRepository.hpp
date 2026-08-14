@@ -33,6 +33,7 @@ public:
 
 private:
     void loadAttachmentsForMessages(QList<Discord::Message> &messages, QSqlDatabase &db);
+    void pruneChannel(qint64 channelId, QSqlDatabase &db);
     Discord::Message readMessageFromQuery(const QSqlQuery &q);
 
     UserRepository userRepository;

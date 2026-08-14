@@ -57,6 +57,12 @@ void SettingsWindow::setClient(Discord::Client *c)
     }
 }
 
+void SettingsWindow::setImageManager(Core::ImageManager *mgr)
+{
+    if (auto *page = findChild<AuthorizedAppsPage *>())
+        page->setImageManager(mgr);
+}
+
 void SettingsWindow::setNotificationManager(Core::NotificationManager *mgr)
 {
     if (auto *page = findChild<NotificationsPage *>())

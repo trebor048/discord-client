@@ -241,6 +241,14 @@ void VoiceManager::setVadThreshold(float threshold)
         QMetaObject::invokeMethod(audioPipeline, [p = audioPipeline, threshold]() { p->setVadThreshold(threshold); });
 }
 
+void VoiceManager::setVadSensitivity(float percent)
+{
+    cachedVadSensitivity = percent;
+
+    if (audioPipeline)
+        QMetaObject::invokeMethod(audioPipeline, [p = audioPipeline, percent]() { p->setVadSensitivity(percent); });
+}
+
 void VoiceManager::setOpusApplication(int application)
 {
     cachedOpusApplication = application;
@@ -683,9 +691,11 @@ void VoiceManager::onVoiceClientConnected()
     bool nsVad = cachedUseRnnoiseVad;
     bool pttEnabled = cachedPushToTalk;
     bool pttHeld = pushToTalkKeyHeld;
+    float vadSensitivity = cachedVadSensitivity;
     QMetaObject::invokeMethod(audioPipeline, [p = audioPipeline, backend, capturing, inputId, outputId,
                                               application, bitrate, complexity, signalType, fec, plp, ns, nsVad,
-                                              pttEnabled, pttHeld]() {
+                                              pttEnabled, pttHeld, vadSensitivity]() {
+        p->setVadSensitivity(vadSensitivity);
         p->setOpusApplication(application);
         p->setOpusBitrate(bitrate);
         p->setOpusComplexity(complexity);

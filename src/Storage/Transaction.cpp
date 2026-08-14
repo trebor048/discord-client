@@ -37,6 +37,11 @@ Transaction::~Transaction()
     activeTransactions.remove(connName);
 }
 
+bool Transaction::isActive(const QString &connName)
+{
+    return activeTransactions.contains(connName);
+}
+
 bool Transaction::commit()
 {
     if (!owns || finished)

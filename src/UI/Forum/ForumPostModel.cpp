@@ -145,8 +145,10 @@ void ForumPostModel::syncRowsFromManager()
     rows.clear();
     if (!manager)
         return;
-    for (const auto &post : manager->posts(currentForumId))
+    for (const auto &post : manager->posts(currentForumId)) {
         rows.append(post.id.get());
+        manager->ensureUnreadCount(currentForumId, post.id.get());
+    }
 }
 
 int ForumPostModel::rowCount(const QModelIndex &parent) const
@@ -205,7 +207,8 @@ QVariant ForumPostModel::data(const QModelIndex &index, int role) const
     case IsNewRole:
         return manager->postReadState(threadId).isNew;
     case UnreadTextRole: {
-        manager->ensureUnreadCount(currentForumId, threadId);
+        // read-only: ensureUnreadCount is triggered from row-insertion paths,
+        // never from paint
         const auto marker = manager->unreadMarker(threadId);
         if (!marker.show)
             return QString();
@@ -226,8 +229,10 @@ QVariant ForumPostModel::data(const QModelIndex &index, int role) const
     }
     case ReactionCountRole: {
         const Discord::Message *msg = starterOf(threadId);
-        if (msg && msg->reactions.hasValue() && !msg->reactions.get().isEmpty())
-            return msg->reactions.get().first().count.get();
+        if (msg && msg->reactions.hasValue() && !msg->reactions.get().isEmpty()) {
+            const auto &reaction = msg->reactions.get().first();
+            return reaction.count.hasValue() ? reaction.count.get() : 0;
+        }
         return 0;
     }
     case TimestampRole:
@@ -401,9 +406,22 @@ void ForumPostModel::onPostsAppended(Snowflake forumId, int startRow, int count)
     if (forumId != currentForumId || count <= 0)
         return;
     const auto &posts = manager->posts(currentForumId);
-    beginInsertRows({}, startRow, startRow + count - 1);
-    for (int i = startRow; i < startRow + count && i < posts.size(); i++)
-        rows.append(posts[i].id.get());
+
+    QList<Snowflake> newIds;
+    const int end = qMin(startRow + count, posts.size());
+    for (int i = startRow; i < end; i++) {
+        const Snowflake id = posts[i].id.get();
+        if (!rows.contains(id) && !newIds.contains(id))
+            newIds.append(id);
+    }
+    if (newIds.isEmpty())
+        return;
+
+    beginInsertRows({}, rows.size(), rows.size() + newIds.size() - 1);
+    for (const Snowflake id : newIds) {
+        rows.append(id);
+        manager->ensureUnreadCount(currentForumId, id);
+    }
     endInsertRows();
 }
 
@@ -415,6 +433,7 @@ void ForumPostModel::onPostInserted(Snowflake forumId, Snowflake threadId, int r
         row = rows.size();
     beginInsertRows({}, row, row);
     rows.insert(row, threadId);
+    manager->ensureUnreadCount(currentForumId, threadId);
     endInsertRows();
 }
 

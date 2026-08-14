@@ -399,6 +399,22 @@ if(BUILD_TESTS)
     target_include_directories(TestEmojiSegmenter PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/vendor/emoji-segmenter)
     add_test(NAME EmojiSegmenterTests COMMAND TestEmojiSegmenter)
 
+    qt_add_executable(TestMemberList
+        tests/tst_MemberList.cpp
+        src/Core/MemberListManager.cpp
+        src/Core/Snowflake.cpp
+        src/Core/MurmurHash3.cpp
+        src/Core/Logging.cpp
+        src/Storage/BaseRepository.cpp
+        src/Storage/ChannelRepository.cpp
+        src/Storage/RoleRepository.cpp
+        src/Storage/DatabaseManager.cpp
+        src/Storage/Transaction.cpp
+    )
+    target_link_libraries(TestMemberList PRIVATE Qt::Core Qt::Gui Qt::Sql Qt::Test)
+    target_include_directories(TestMemberList PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME MemberListTests COMMAND TestMemberList)
+
     add_test(NAME RuntimeSmoke COMMAND $<TARGET_FILE:${PROJECT_NAME}> --runtime-smoke)
     set_tests_properties(RuntimeSmoke PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"

@@ -29,6 +29,7 @@ private:
     void onSaveClicked();
     void onAvatarUpload();
     void onBannerUpload();
+    bool loadImageFile(const QString &path, QByteArray &outData, QString &outMimeType);
 
     Discord::Client *client = nullptr;
 
@@ -36,11 +37,13 @@ private:
     QLabel *avatarPreview;
     QPushButton *avatarUploadBtn;
     QByteArray avatarData;
+    QString avatarMimeType;
 
     // Banner
     QLabel *bannerPreview;
     QPushButton *bannerUploadBtn;
     QByteArray bannerData;
+    QString bannerMimeType;
 
     // Display name / global name
     QLineEdit *displayNameEdit;

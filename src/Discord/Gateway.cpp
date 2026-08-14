@@ -14,6 +14,7 @@
 
 #include <QUrl>
 
+#include <algorithm>
 #include <random>
 
 namespace Acheron {
@@ -141,6 +142,7 @@ void Gateway::onPayloadReceived(const QJsonObject &root)
         qCInfo(LogDiscord) << "Invalid session, resumable:" << resumable;
         if (!resumable) {
             canResume = false;
+            std::lock_guard lock(sessionMutex);
             sessionId.clear();
         }
         shouldReconnect = true;
@@ -173,6 +175,9 @@ void Gateway::handleDispatch(const Inbound &data)
         break;
     case GatewayEvent::MESSAGE_DELETE:
         handleMessageDelete(data);
+        break;
+    case GatewayEvent::MESSAGE_DELETE_BULK:
+        handleMessageDeleteBulk(data);
         break;
     case GatewayEvent::TYPING_START:
         handleTypingStart(data);
@@ -218,6 +223,15 @@ void Gateway::handleDispatch(const Inbound &data)
         break;
     case GatewayEvent::GUILD_MEMBER_UPDATE:
         handleGuildMemberUpdate(data);
+        break;
+    case GatewayEvent::GUILD_MEMBER_ADD:
+        handleGuildMemberAdd(data);
+        break;
+    case GatewayEvent::GUILD_MEMBER_REMOVE:
+        handleGuildMemberRemove(data);
+        break;
+    case GatewayEvent::USER_UPDATE:
+        handleUserUpdate(data);
         break;
     case GatewayEvent::GUILD_ROLE_CREATE:
         handleGuildRoleCreate(data);
@@ -344,11 +358,17 @@ void Gateway::handleReady(const Inbound &data)
 
     Ready msg = data.getData<Ready>();
 
-    if (msg.sessionId.hasValue())
-        sessionId = msg.sessionId.get();
-    if (msg.resumeGatewayUrl.hasValue())
-        resumeGatewayUrl = msg.resumeGatewayUrl.get();
-    canResume = !sessionId.isEmpty();
+    {
+        std::lock_guard lock(sessionMutex);
+        if (msg.sessionId.hasValue())
+            sessionId = msg.sessionId.get();
+        if (msg.resumeGatewayUrl.hasValue())
+            resumeGatewayUrl = msg.resumeGatewayUrl.get();
+        canResume = !sessionId.isEmpty();
+    }
+    // Only a successful READY proves the connection is healthy — resetting
+    // attempts here (and not in handleHello) ensures reconnectAttempts can
+    // reach maxReconnectAttempts for connections that die before READY.
     reconnectAttempts = 0;
 
     emit gatewayReady(msg);
@@ -382,6 +402,13 @@ void Gateway::handleMessageDelete(const Inbound &data)
     MessageDelete event = data.getData<MessageDelete>();
 
     emit gatewayMessageDelete(event);
+}
+
+void Gateway::handleMessageDeleteBulk(const Inbound &data)
+{
+    MessageDeleteBulk event = data.getData<MessageDeleteBulk>();
+
+    emit gatewayMessageDeleteBulk(event);
 }
 
 void Gateway::handleTypingStart(const Inbound &data)
@@ -491,6 +518,27 @@ void Gateway::handleGuildMemberUpdate(const Inbound &data)
     GuildMemberUpdate event = data.getData<GuildMemberUpdate>();
 
     emit gatewayGuildMemberUpdate(event);
+}
+
+void Gateway::handleGuildMemberAdd(const Inbound &data)
+{
+    GuildMemberUpdate event = data.getData<GuildMemberUpdate>();
+
+    emit gatewayGuildMemberAdd(event);
+}
+
+void Gateway::handleGuildMemberRemove(const Inbound &data)
+{
+    GuildMemberRemove event = data.getData<GuildMemberRemove>();
+
+    emit gatewayGuildMemberRemove(event);
+}
+
+void Gateway::handleUserUpdate(const Inbound &data)
+{
+    User user = data.getData<User>();
+
+    emit gatewayUserUpdate(user);
 }
 
 void Gateway::handleGuildRoleCreate(const Inbound &data)
@@ -663,7 +711,6 @@ void Gateway::handleHello(const Inbound &data)
     else
         identify();
 
-    reconnectAttempts = 0;
     isResuming = false;
 
     if (msg.heartbeatInterval <= 0) {
@@ -680,12 +727,14 @@ void Gateway::handleHello(const Inbound &data)
         }
     }
 
-    // Wait briefly for the heartbeat loop to confirm it's actually running
-    // before notifying client code via gatewayHello().
-    for (int retries = 0; retries < 500; ++retries) {
-        if (heartbeatStarted)
-            break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    // Wait (with timeout, woken by the heartbeat thread itself) for the
+    // heartbeat loop to confirm it's running before notifying client code.
+    // A condition variable avoids the previous 1s busy-wait on this thread,
+    // which is effectively the UI thread via the queued payloadReceived signal.
+    {
+        std::unique_lock lock(heartbeatStartMutex);
+        heartbeatStartCv.wait_for(lock, std::chrono::seconds(1),
+                                  [this] { return heartbeatStarted.load(); });
     }
 
     emit gatewayHello();
@@ -735,11 +784,14 @@ void Gateway::networkLoop()
         // resumeGatewayUrl from READY is a bare host (e.g. wss://gateway-us-east1-b.discord.gg)
         // without query parameters — append them from the original gatewayUrl.
         QString connectUrl = gatewayUrl;
-        if (isResuming && canResume && !resumeGatewayUrl.isEmpty()) {
-            QUrl resumeUrl(resumeGatewayUrl);
-            QUrl originalUrl(gatewayUrl);
-            resumeUrl.setQuery(originalUrl.query());
-            connectUrl = resumeUrl.toString();
+        {
+            std::lock_guard lock(sessionMutex);
+            if (isResuming && canResume && !resumeGatewayUrl.isEmpty()) {
+                QUrl resumeUrl(resumeGatewayUrl);
+                QUrl originalUrl(gatewayUrl);
+                resumeUrl.setQuery(originalUrl.query());
+                connectUrl = resumeUrl.toString();
+            }
         }
 
         curl = curl_easy_init();
@@ -765,19 +817,19 @@ void Gateway::networkLoop()
         if (res != CURLE_OK) {
             qWarning() << "Failed to connect to gateway:" << curl_easy_strerror(res);
 
-            // On connect failure during reconnect, retry with backoff
-            if (isResuming && reconnectAttempts < maxReconnectAttempts) {
+            // Retry any connect failure (initial or reconnect) with backoff
+            if (reconnectAttempts < maxReconnectAttempts) {
                 std::lock_guard lock(curlMutex);
                 curl_easy_cleanup(curl);
                 curl = nullptr;
 
                 reconnectAttempts++;
-                thread_local std::mt19937 rng(std::random_device{}());
-                std::uniform_int_distribution<int> dist(0, 3999);
-                int delay = 1000 + dist(rng);
-                qCInfo(LogDiscord) << "Reconnect attempt" << reconnectAttempts
-                                   << "in" << delay << "ms";
-                std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+                int delay = reconnectBackoffMs(reconnectAttempts);
+                qCInfo(LogDiscord) << "Connect attempt" << reconnectAttempts
+                                   << "failed, retrying in" << delay << "ms";
+                emit reconnecting(reconnectAttempts, maxReconnectAttempts);
+                if (!waitInterruptible(std::chrono::milliseconds(delay)))
+                    break;
                 shouldReconnect = true;
                 continue;
             }
@@ -907,13 +959,14 @@ void Gateway::networkLoop()
             // zlib context, so the old stream state would corrupt decompression
             ingest->reset();
 
-            thread_local std::mt19937 rng(std::random_device{}());
-            std::uniform_int_distribution<int> dist(0, 3999);
-            int delay = 1000 + dist(rng);
+            int delay = reconnectBackoffMs(reconnectAttempts);
             qCInfo(LogDiscord) << "Reconnecting in" << delay << "ms (attempt"
                                << reconnectAttempts << ")";
             emit reconnecting(reconnectAttempts, maxReconnectAttempts);
-            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+            if (!waitInterruptible(std::chrono::milliseconds(delay))) {
+                shouldReconnect = false;
+                break;
+            }
         }
 
     } while (shouldReconnect && running && reconnectAttempts <= maxReconnectAttempts);
@@ -933,14 +986,26 @@ void Gateway::networkLoop()
 
 void Gateway::heartbeatLoop()
 {
-    heartbeatStarted = true;
+    {
+        std::lock_guard lock(heartbeatStartMutex);
+        heartbeatStarted = true;
+    }
+    heartbeatStartCv.notify_all();
     qCDebug(LogDiscord) << "Heartbeat loop started, interval:" << heartbeatInterval;
 
     while (running) {
         if (!heartbeatAckReceived) {
-            qCWarning(LogDiscord) << "No heartbeat ACK received — zombie connection detected";
-            shouldReconnect = true;
-            break;
+            int missed = ++missedHeartbeatAcks;
+            if (missed >= maxMissedHeartbeatAcks) {
+                qCWarning(LogDiscord) << "No heartbeat ACK after" << missed
+                                      << "heartbeats — zombie connection detected";
+                shouldReconnect = true;
+                break;
+            }
+            qCWarning(LogDiscord) << "Missed heartbeat ACK (" << missed << "of"
+                                  << maxMissedHeartbeatAcks << ") — tolerating";
+        } else {
+            missedHeartbeatAcks = 0;
         }
         heartbeatAckReceived = false;
 
@@ -976,7 +1041,10 @@ void Gateway::resume()
     qCInfo(LogDiscord) << "Sending RESUME";
     Resume resumeMsg;
     resumeMsg.token = token;
-    resumeMsg.sessionId = sessionId;
+    {
+        std::lock_guard lock(sessionMutex);
+        resumeMsg.sessionId = sessionId;
+    }
     resumeMsg.seq = lastReceivedSequence.load();
     sendPayload(resumeMsg.toJson());
 }
@@ -1093,6 +1161,31 @@ void Gateway::handleChannelPinsUpdate(const Inbound &data)
 {
     ChannelPinsUpdate event = data.getData<ChannelPinsUpdate>();
     emit gatewayChannelPinsUpdate(event);
+}
+
+int Gateway::reconnectBackoffMs(int attempt) const
+{
+    // Exponential backoff: 1s, 2s, 4s, ... capped at 30s, plus up to 1s jitter
+    // to avoid thundering-herd reconnects.
+    int base = std::min(1000 << (attempt - 1), 30000);
+    thread_local std::mt19937 rng(std::random_device{}());
+    std::uniform_int_distribution<int> jitter(0, 999);
+    return base + jitter(rng);
+}
+
+bool Gateway::waitInterruptible(std::chrono::milliseconds delay) const
+{
+    // Sleep in small slices so hardStop() (which clears `running` and joins
+    // this thread) is never blocked by a long backoff wait.
+    const auto deadline = std::chrono::steady_clock::now() + delay;
+    while (running) {
+        const auto remaining =
+                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+        if (remaining <= std::chrono::milliseconds(0))
+            return true;
+        std::this_thread::sleep_for(std::min(remaining, std::chrono::milliseconds(50)));
+    }
+    return false;
 }
 
 bool Gateway::isFatalCloseCode(CloseCode code) const

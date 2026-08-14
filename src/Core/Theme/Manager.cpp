@@ -11,6 +11,7 @@
 #include <QJsonObject>
 #include <QStandardPaths>
 #include <QStyle>
+#include <QTimer>
 
 namespace Acheron {
 namespace Core {
@@ -43,26 +44,50 @@ bool Manager::hasOverride(Token token) const
     return overrides.contains(token);
 }
 
+void Manager::scheduleApply(bool colors, bool fonts)
+{
+    pendingColorApply = pendingColorApply || colors;
+    pendingFontApply = pendingFontApply || fonts;
+    if (applyScheduled)
+        return;
+    applyScheduled = true;
+    QTimer::singleShot(0, this, [this]() {
+        applyScheduled = false;
+        const bool doColors = pendingColorApply;
+        const bool doFonts = pendingFontApply;
+        pendingColorApply = pendingFontApply = false;
+        if (doColors)
+            apply();
+        if (doFonts)
+            applyFonts();
+    });
+}
+
 void Manager::setOverride(Token token, const QColor &color)
 {
-    if (color.isValid())
-        overrides.insert(token, color);
+    if (!color.isValid())
+        return;
+    overrides.insert(token, color);
+    scheduleApply(true, false);
 }
 
 void Manager::clearOverride(Token token)
 {
-    overrides.remove(token);
+    if (overrides.remove(token) > 0)
+        scheduleApply(true, false);
 }
 
 void Manager::resetAll()
 {
     overrides.clear();
     fontOverrides.clear();
+    scheduleApply(true, true);
 }
 
 void Manager::setOverrides(const QHash<Token, QColor> &overrides)
 {
     this->overrides = overrides;
+    scheduleApply(true, false);
 }
 
 bool Manager::hasFontOverride(FontRole role) const
@@ -73,11 +98,13 @@ bool Manager::hasFontOverride(FontRole role) const
 void Manager::setFontOverride(FontRole role, const QFont &font)
 {
     fontOverrides.insert(role, font);
+    scheduleApply(false, true);
 }
 
 void Manager::clearFontOverride(FontRole role)
 {
-    fontOverrides.remove(role);
+    if (fontOverrides.remove(role) > 0)
+        scheduleApply(false, true);
 }
 
 QPalette Manager::buildPalette() const
@@ -160,6 +187,7 @@ void Manager::loadFromObject(const QJsonObject &obj)
                 fontOverrides.insert(fd->role, parsed);
         }
     }
+    scheduleApply(true, true);
 }
 
 bool Manager::load()

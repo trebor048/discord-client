@@ -252,18 +252,26 @@ void AccountsWindow::onContextMenuRequested(const QPoint &pos)
     if (state != ConnectionState::Disconnected)
         actSetToken->setEnabled(false);
 
+    // The model may change while the modal menu is open; a persistent index
+    // tracks row shifts and is invalidated if the account is removed.
+    QPersistentModelIndex persistentIndex(index);
+
     QAction *selected = menu.exec(listView->viewport()->mapToGlobal(pos));
 
+    if (!persistentIndex.isValid())
+        return;
+    const int row = persistentIndex.row();
+
     if (selected == actConnect)
-        performConnect(index.row());
+        performConnect(row);
     else if (selected == actDisconnect)
-        performDisconnect(index.row());
+        performDisconnect(row);
     else if (selected == actAutoConnect)
-        model->setAutoConnect(index.row(), actAutoConnect->isChecked());
+        model->setAutoConnect(row, actAutoConnect->isChecked());
     else if (selected == actSetToken)
-        onSetTokenRequested(index.row());
+        onSetTokenRequested(row);
     else if (selected == actRemove)
-        model->removeAccount(index.row());
+        model->removeAccount(row);
 }
 
 void AccountsWindow::onSetTokenRequested(int row)

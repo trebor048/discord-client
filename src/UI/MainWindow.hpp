@@ -94,6 +94,9 @@ private slots:
 private:
     void switchActiveInstance(Core::ClientInstance *instance);
     void setupPermanentConnections(Core::ClientInstance *instance);
+    void trackInstanceConnection(Core::ClientInstance *instance,
+                                 const QMetaObject::Connection &connection);
+    void disconnectInstanceConnections(Core::ClientInstance *instance);
     void switchToTabEntry(const TabEntry &entry);
     void activateChannel(const TabEntry &entry);
     void refreshTabReadStates();
@@ -114,6 +117,7 @@ private:
     void openGuildSettings(Core::Snowflake accountId, Core::Snowflake guildId);
     void showUserContextMenu(Core::Snowflake userId, Core::Snowflake guildId, QPoint globalPos);
     void selectChannelInTree(Core::Snowflake channelId);
+    void jumpToMessage(Core::Snowflake channelId, Core::Snowflake messageId);
     void showUserProfile(Core::Snowflake userId, Core::Snowflake guildId = Core::Snowflake::Invalid);
     void openFriendsWindow();
     void applyCustomStatus(const QString &status);
@@ -167,6 +171,8 @@ private:
     void navigateToChannel(Core::Snowflake channelId);
     void setThreadBrowserTarget(Core::Snowflake channelId);
     void openPinnedMessages();
+    void setChannelName(const QString &name);
+    void updateChannelNameElide();
 
     ChatView *chatView;
     ChatModel *chatModel;
@@ -195,6 +201,8 @@ private:
 
     TabBar *tabBar;
     QWidget *channelToolbar = nullptr;
+    QLabel *channelNameLabel = nullptr;
+    QString channelFullName;
     QToolButton *threadBrowserButton = nullptr;
     QToolButton *pinnedMessagesButton = nullptr;
     ThreadBrowserPopup *threadBrowser = nullptr;
@@ -220,6 +228,7 @@ private:
     Core::ClientInstance *currentInstance = nullptr;
 
     QSet<Core::Snowflake> instancesSignalsConnected;
+    QHash<Core::Snowflake, QList<QMetaObject::Connection>> instanceConnections;
     QSplitter *mainSplitter = nullptr;
     QMenu *windowMenu = nullptr;
     bool notificationSoundsEnabled = true;

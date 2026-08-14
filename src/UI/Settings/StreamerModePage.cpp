@@ -5,7 +5,9 @@
 #include <QLabel>
 #include <QProcess>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSettings>
+#include <QDebug>
 #include <QVBoxLayout>
 
 #ifdef Q_OS_WIN
@@ -125,17 +127,33 @@ void StreamerModePage::checkForStreamingSoftware()
         detectionLabel->setStyleSheet("color: gray;");
     }
 #else
-    // On non-Windows platforms, use QProcess to check for OBS
-    QProcess process;
-    process.start("pgrep", QStringList{"-x", "obs"});
-    process.waitForFinished(3000);
-    if (process.exitCode() == 0) {
-        detectionLabel->setText(tr("OBS detected!"));
-        detectionLabel->setStyleSheet("color: green;");
-    } else {
+    // On non-Windows platforms, check for OBS asynchronously so the UI never blocks.
+    // pgrep is unavailable on stock macOS, so list processes via ps and match locally.
+    auto *process = new QProcess(this);
+    connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError error) {
+        qDebug() << "StreamerModePage: process check failed to start:" << error;
         detectionLabel->setText(tr("No streaming software detected"));
         detectionLabel->setStyleSheet("color: gray;");
-    }
+        process->deleteLater();
+    });
+    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [this, process](int exitCode, QProcess::ExitStatus status) {
+                bool found = false;
+                if (status == QProcess::NormalExit && exitCode == 0) {
+                    const QString output = QString::fromLocal8Bit(process->readAllStandardOutput()).toLower();
+                    static const QRegularExpression pattern(QStringLiteral("\\b(obs|xsplit)"));
+                    found = pattern.match(output).hasMatch();
+                }
+                if (found) {
+                    detectionLabel->setText(tr("OBS/XSplit detected!"));
+                    detectionLabel->setStyleSheet("color: green;");
+                } else {
+                    detectionLabel->setText(tr("No streaming software detected"));
+                    detectionLabel->setStyleSheet("color: gray;");
+                }
+                process->deleteLater();
+            });
+    process->start("ps", QStringList{"-axco", "comm"});
 #endif
 }
 

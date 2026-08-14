@@ -43,6 +43,7 @@ struct ListData
 {
     QHash<int, MemberListItem> items;
     QList<Discord::GuildMemberListUpdate::Group> groups;
+    qint64 lastUsed = 0; // ms since epoch, for LRU eviction
 };
 
 struct GuildListState
@@ -67,13 +68,16 @@ public:
 
     void handleMemberListUpdate(const Discord::GuildMemberListUpdate &update);
 
+    void handleMemberAdded(Snowflake guildId, const Discord::Member &member);
+    void handleMemberRemoved(Snowflake guildId, Snowflake userId);
+
     void handleRoleCreated(Snowflake guildId, const Discord::Role &role);
     void handleRoleUpdated(Snowflake guildId, const Discord::Role &role);
     void handleRoleDeleted(Snowflake guildId, Snowflake roleId);
 
     void updateSubscriptionRange(int firstVisible, int lastVisible);
 
-    // virtual row count
+    // virtual row count (cached; invalidated only on list reset/update)
     [[nodiscard]] int totalItemCount() const;
 
     // virtual index
@@ -107,18 +111,21 @@ private:
     void resolveMemberInfo(MemberListItem &item, const GuildListState &guildState);
     void processSync(const Discord::GuildMemberListUpdate::ListOp &op, ListData &listData,
                      const GuildListState &guildState);
-    void processInsert(const Discord::GuildMemberListUpdate::ListOp &op, ListData &listData,
-                       const GuildListState &guildState);
+    void processBatchInserts(const QList<Discord::GuildMemberListUpdate::ListOp> &ops,
+                             ListData &listData, const GuildListState &guildState);
     void processUpdate(const Discord::GuildMemberListUpdate::ListOp &op, ListData &listData,
                        const GuildListState &guildState);
-    void processDelete(const Discord::GuildMemberListUpdate::ListOp &op, ListData &listData);
+    void processBatchDeletes(const QList<int> &indices, ListData &listData);
     void processInvalidate(const Discord::GuildMemberListUpdate::ListOp &op, ListData &listData);
 
     void evictUnsubscribedItems(const QList<QPair<int, int>> &oldRanges,
                                 const QList<QPair<int, int>> &newRanges);
+    void evictStaleLists(GuildListState &gs, Snowflake guildId);
     void applyAndSendRanges(const QList<QPair<int, int>> &newRanges);
     void flushPendingRanges();
     static bool indexInRanges(int index, const QList<QPair<int, int>> &ranges);
+
+    void updateTotalItemCountCache();
 
     Storage::ChannelRepository &channelRepo;
     Storage::RoleRepository &roleRepo;
@@ -136,6 +143,8 @@ private:
     bool awaitingResponse = false;
     bool hasPendingRanges = false;
     QList<QPair<int, int>> pendingRanges;
+
+    int totalItemCountCache = 0;
 };
 
 } // namespace Core

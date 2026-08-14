@@ -396,12 +396,20 @@ void ChannelTreeModel::populateFromReady(const Discord::Ready &ready)
     }
 
     // READY is a full snapshot that Discord can resend on resume/reconnect.
-    // Skip guilds that are already present so we don't append duplicates.
+    // Skip guilds/folders that are already present so we don't append
+    // duplicates. findChannelTreeNode deliberately never matches Server
+    // nodes, so guild/folder lookups must use the dedicated finders.
     std::vector<std::unique_ptr<ChannelNode>> freshNodes;
     freshNodes.reserve(topLevelNodes.size());
-    for (auto &node : topLevelNodes)
-        if (!findChannelTreeNode(node->id, accNode))
+    for (auto &node : topLevelNodes) {
+        bool alreadyPresent = node->type == ChannelNode::Type::Server
+                                      ? findGuildNodeById(node->id, accNode) != nullptr
+                              : node->type == ChannelNode::Type::Folder
+                                      ? findFolderNodeById(accNode, node->id) != nullptr
+                                      : findChannelTreeNode(node->id, accNode) != nullptr;
+        if (!alreadyPresent)
             freshNodes.push_back(std::move(node));
+    }
     topLevelNodes = std::move(freshNodes);
 
     if (topLevelNodes.empty())
@@ -443,8 +451,10 @@ void ChannelTreeModel::populateFromReady(const Discord::Ready &ready)
             return;
 
         QModelIndex dmHeaderIndex = indexForNode(dmHeader);
-        int dmStartRow = 0;
-        int dmEndRow = newDms.size() - 1;
+        // New DM nodes are appended after the existing children, so the
+        // announced rows must start at the current child count.
+        int dmStartRow = static_cast<int>(dmHeader->children.size());
+        int dmEndRow = dmStartRow + newDms.size() - 1;
 
         beginInsertRows(dmHeaderIndex, dmStartRow, dmEndRow);
         for (const auto *channel : newDms) {
@@ -557,7 +567,10 @@ std::unique_ptr<ChannelNode> ChannelTreeModel::createGuildNode(const Discord::Ga
                 categoryMap[channel.parentId.get()]->addChild(std::move(node));
                 placed = true;
             }
-        } else {
+        }
+        if (!placed) {
+            // No parent, or the parent category is missing from the payload —
+            // never drop the channel; show it at the guild root instead.
             orphanChannels.push_back(std::move(node));
             placed = true;
         }
@@ -956,6 +969,26 @@ ChannelNode *ChannelTreeModel::findCategoryNode(Snowflake categoryId, ChannelNod
             return child.get();
 
     return nullptr;
+}
+
+QStringList ChannelTreeModel::orderedGuildIds(Snowflake accountId) const
+{
+    QStringList ids;
+
+    const ChannelNode *accNode = accountNodes.value(accountId, nullptr);
+    if (!accNode)
+        return ids;
+
+    for (const auto &child : accNode->children) {
+        if (child->type == ChannelNode::Type::Server) {
+            ids.append(child->id.toString());
+        } else if (child->type == ChannelNode::Type::Folder) {
+            for (const auto &guildNode : child->children)
+                if (guildNode->type == ChannelNode::Type::Server)
+                    ids.append(guildNode->id.toString());
+        }
+    }
+    return ids;
 }
 
 QModelIndex ChannelTreeModel::serverIndex(Snowflake accountId, Snowflake guildId)
@@ -1913,7 +1946,16 @@ void ChannelTreeModel::setCollapsed(const QModelIndex &index, bool collapsed)
         return;
 
     node->collapsed = collapsed;
+
     emit dataChanged(index, index, { CollapsedRole });
+
+    int childCount = rowCount(index);
+    if (childCount > 0) {
+        QModelIndex firstChild = this->index(0, 0, index);
+        QModelIndex lastChild = this->index(childCount - 1, 0, index);
+        if (firstChild.isValid() && lastChild.isValid())
+            emit dataChanged(firstChild, lastChild, { CollapsedRole });
+    }
 }
 
 void ChannelTreeModel::setFolderColor(const QModelIndex &sourceIndex, uint64_t color)

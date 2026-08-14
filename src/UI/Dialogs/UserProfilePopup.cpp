@@ -466,10 +466,44 @@ bool UserProfilePopup::eventFilter(QObject *obj, QEvent *ev)
     return QDialog::eventFilter(obj, ev);
 }
 
+void UserProfilePopup::showAt(const QPoint &globalPos)
+{
+    requestedPos = globalPos;
+    hasRequestedPos = true;
+    show();
+}
+
 void UserProfilePopup::showEvent(QShowEvent *event)
 {
     QDialog::showEvent(event);
-    positionOverParent();
+    if (hasRequestedPos)
+        positionNear(requestedPos);
+    else
+        positionOverParent();
+}
+
+void UserProfilePopup::positionNear(const QPoint &globalPos)
+{
+    QScreen *screen = QGuiApplication::screenAt(globalPos);
+    if (!screen)
+        screen = QGuiApplication::primaryScreen();
+    if (!screen) {
+        positionOverParent();
+        return;
+    }
+
+    QRect avail = screen->availableGeometry();
+
+    // Prefer opening to the left of the anchor (the member list sits on the
+    // right edge of the window); fall back to the right if there is no room.
+    int x = globalPos.x() - width() - 8;
+    if (x < avail.left())
+        x = globalPos.x() + 8;
+    x = std::clamp(x, avail.left(), avail.right() - width() + 1);
+
+    int y = std::clamp(globalPos.y() - height() / 2, avail.top(), avail.bottom() - height() + 1);
+
+    move(x, y);
 }
 
 void UserProfilePopup::positionOverParent()
@@ -660,10 +694,14 @@ void UserProfilePopup::renderConnections()
         QString typePretty = prettifyConnectionType(c.type.get()).toHtmlEscaped();
         QString name = c.name.get().toHtmlEscaped();
         if (link.isValid()) {
+            // The URL is built from server-supplied, user-controlled name/id —
+            // percent-encode and HTML-escape it so a crafted connection name
+            // cannot break out of the href attribute and inject markup.
+            QString href = link.toString(QUrl::FullyEncoded).toHtmlEscaped();
             label->setText(QStringLiteral(
                                    "<a href=\"%1\" style=\"color:%2; text-decoration:none;\">%3</a> "
                                    "<span style=\"color:%4;\">· %5</span>")
-                                   .arg(link.toString(), linkColor, name, mutedColor,
+                                   .arg(href, linkColor, name, mutedColor,
                                         typePretty));
             connect(label, &QLabel::linkActivated, this,
                     [](const QString &url) { QDesktopServices::openUrl(QUrl(url)); });

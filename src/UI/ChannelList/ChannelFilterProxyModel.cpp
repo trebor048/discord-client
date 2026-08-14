@@ -130,7 +130,8 @@ bool ChannelFilterProxyModel::filterAcceptsRow(int sourceRow, const QModelIndex 
     // hide read channels under collapsed categories, but keep selected channel visible
     if (nodeType == ChannelNode::Type::Channel || nodeType == ChannelNode::Type::Forum) {
         ChannelNode *parentNode = static_cast<ChannelNode *>(sourceParent.internalPointer());
-        if (parentNode && parentNode->type == ChannelNode::Type::Category && parentNode->collapsed) {
+        if (parentNode && parentNode->type == ChannelNode::Type::Category &&
+            sourceModel()->data(sourceParent, ChannelTreeModel::CollapsedRole).toBool()) {
             Core::Snowflake channelId =
                     Core::Snowflake(index.data(ChannelTreeModel::IdRole).toULongLong());
             if (channelId == selectedChannelId && userId == selectedAccountId)
@@ -145,7 +146,8 @@ bool ChannelFilterProxyModel::filterAcceptsRow(int sourceRow, const QModelIndex 
     // hide voice channels under collapsed categories
     if (nodeType == ChannelNode::Type::VoiceChannel) {
         ChannelNode *parentNode = static_cast<ChannelNode *>(sourceParent.internalPointer());
-        if (parentNode && parentNode->type == ChannelNode::Type::Category && parentNode->collapsed)
+        if (parentNode && parentNode->type == ChannelNode::Type::Category &&
+            sourceModel()->data(sourceParent, ChannelTreeModel::CollapsedRole).toBool())
             return false;
     }
 

@@ -87,6 +87,10 @@ public:
 
     static std::optional<EmojiSelectionValue> selectionForRaw(const QString &value);
 
+    // O(1) indexed lookups; return nullptr when the value is not in the catalog.
+    static const EmojiCatalogItem *itemForUnicode(const QString &unicodeEmoji);
+    static std::optional<EmojiCatalogItem> itemForCustomId(const QString &customId);
+
 private:
     static std::optional<EmojiSelectionValue> parseCustomEmoji(const QString &value);
 };

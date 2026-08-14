@@ -192,16 +192,22 @@ void TabBar::pinTabInternal(int index, bool pinned)
 
     tabs.insert(insertAt, tab);
 
-    if (currentTabIndex == index)
+    if (currentTabIndex == index) {
+        // the current tab itself moved; follow it
         currentTabIndex = insertAt;
-    else if (index < currentTabIndex && insertAt <= currentTabIndex)
-        currentTabIndex++;
-    else if (index > currentTabIndex && insertAt > currentTabIndex)
-        currentTabIndex--;
+    } else {
+        // removing at `index` shifts later tabs down by one
+        if (index < currentTabIndex)
+            currentTabIndex--;
+        // inserting at `insertAt` shifts tabs at/after it up by one
+        if (insertAt <= currentTabIndex)
+            currentTabIndex++;
+    }
 
     layoutDirty = true;
     update();
-    emit tabChanged(tabs[currentTabIndex].current());
+    if (currentTabIndex >= 0 && currentTabIndex < tabs.size())
+        emit tabChanged(tabs[currentTabIndex].current());
 }
 
 int TabBar::lastPinnedIndex() const

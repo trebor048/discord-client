@@ -24,12 +24,10 @@ ServerRailView::ServerRailView(QWidget *parent)
 
 void ServerRailView::setModel(QAbstractItemModel *model)
 {
+    // Note: deliberately no dataChanged -> fade hook here. Fading the whole
+    // viewport on every data change (unread badges, mention counts, voice
+    // counts, icon fetches) made the entire rail flash on every event.
     QListView::setModel(model);
-    if (model) {
-        connect(model, &QAbstractItemModel::dataChanged, this, [this]() {
-            Core::AnimationUtils::fadeIn(viewport(), 120);
-        });
-    }
 }
 
 void ServerRailView::mousePressEvent(QMouseEvent *event)

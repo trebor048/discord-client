@@ -307,6 +307,39 @@ struct MessageDelete : Core::JsonUtils::JsonObject
     }
 };
 
+struct MessageDeleteBulk : Core::JsonUtils::JsonObject
+{
+    Field<QList<Core::Snowflake>> ids;
+    Field<Core::Snowflake> channelId;
+    Field<Core::Snowflake, true> guildId;
+
+    static MessageDeleteBulk fromJson(const QJsonObject &obj)
+    {
+        MessageDeleteBulk event;
+        get(obj, "ids", event.ids);
+        get(obj, "channel_id", event.channelId);
+        get(obj, "guild_id", event.guildId);
+        return event;
+    }
+};
+
+// GUILD_MEMBER_ADD has the same payload shape as GUILD_MEMBER_UPDATE
+// (member object plus guild_id), so it reuses the GuildMemberUpdate struct.
+
+struct GuildMemberRemove : Core::JsonUtils::JsonObject
+{
+    Field<Core::Snowflake> guildId;
+    Field<User> user;
+
+    static GuildMemberRemove fromJson(const QJsonObject &obj)
+    {
+        GuildMemberRemove event;
+        get(obj, "guild_id", event.guildId);
+        get(obj, "user", event.user);
+        return event;
+    }
+};
+
 struct GuildRoleCreate : Core::JsonUtils::JsonObject
 {
     Field<Core::Snowflake> guildId;

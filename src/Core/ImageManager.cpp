@@ -1,5 +1,7 @@
 #include "ImageManager.hpp"
 
+#include <QThreadPool>
+
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
 #include <QNetworkReply>
@@ -8,6 +10,8 @@
 #include <QUrlQuery>
 #include <QApplication>
 #include <QImageReader>
+#include <QDir>
+#include <QFileInfo>
 
 #include "Logging.hpp"
 
@@ -45,8 +49,10 @@ void GifAnimation::load(const QUrl &url, int containerWidth)
 
     QNetworkRequest request(url);
     request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("Acheron/1.0"));
+    request.setTransferTimeout(kTransferTimeoutMs);
     QNetworkReply *reply = m_nam->get(request);
     m_activeReply = reply;
+    ImageManager::guardReply(reply);
 
     connect(reply, &QNetworkReply::downloadProgress, this,
             [this](qint64 received, qint64 total) {
@@ -77,30 +83,33 @@ void GifAnimation::load(const QUrl &url, int containerWidth)
 
         m_movie = new QMovie(this);
         m_movie->setDevice(m_buffer);
-        m_movie->setFormat(QByteArrayLiteral("gif"));
+        // Deliberately no setFormat(): sniff the actual container so animated
+        // webp (and any other supported format) isn't rejected as "not gif".
+        // Klipy/media-proxy thumbnails are frequently served as webp.
 
         if (!m_movie->isValid() || m_movie->frameCount() == 0) {
-            qWarning() << "Invalid GIF data from" << m_url;
+            // Not an animation QMovie understands — it may still be a static
+            // poster image (e.g. a static webp thumbnail for a gifv embed).
+            // Show that instead of failing into a gray box.
+            QImage staticImage = QImage::fromData(data);
             m_movie->deleteLater();
             m_movie = nullptr;
             m_buffer->deleteLater();
             m_buffer = nullptr;
-            emit failed();
+
+            if (staticImage.isNull()) {
+                qCWarning(LogCore) << "Undecodable GIF/image data from" << m_url;
+                emit failed();
+                return;
+            }
+
+            m_staticImage = staticImage;
+            m_displaySize = computeDisplaySize(staticImage.size());
+            emit ready();
             return;
         }
 
-        // Determine display size: downscale to container width
-        QSize originalSize = m_movie->currentImage().size();
-        if (originalSize.isEmpty())
-            originalSize = QSize(kGifMaxWidth, kGifMaxWidth);
-
-        if (originalSize.width() > m_containerWidth) {
-            int newHeight = originalSize.height() * m_containerWidth / originalSize.width();
-            m_displaySize = QSize(m_containerWidth, newHeight);
-        } else {
-            m_displaySize = originalSize;
-        }
-
+        m_displaySize = computeDisplaySize(m_movie->currentImage().size());
         m_movie->setScaledSize(m_displaySize);
 
         // Pre-cache only the first frame; remaining frames decoded on demand
@@ -117,6 +126,14 @@ void GifAnimation::load(const QUrl &url, int containerWidth)
     });
 }
 
+QSize GifAnimation::computeDisplaySize(const QSize &originalSize) const
+{
+    QSize size = originalSize.isEmpty() ? QSize(kGifMaxWidth, kGifMaxWidth) : originalSize;
+    if (size.width() <= m_containerWidth)
+        return size;
+    return QSize(m_containerWidth, size.height() * m_containerWidth / size.width());
+}
+
 void GifAnimation::ensureFrameCached(int frameNum) const
 {
     if (!m_movie || frameNum < 0)
@@ -127,6 +144,25 @@ void GifAnimation::ensureFrameCached(int frameNum) const
         return;
 
     if (m_frameCache.contains(frameNum))
+        return;
+
+    if (m_decodePending)
+        return;
+
+    m_decodePending = true;
+    QTimer::singleShot(0, this, [this, frameNum]() {
+        m_decodePending = false;
+        decodeFrameWindow(frameNum);
+    });
+}
+
+void GifAnimation::decodeFrameWindow(int frameNum) const
+{
+    if (!m_movie || frameNum < 0)
+        return;
+
+    int totalFrames = m_movie->frameCount();
+    if (frameNum >= totalFrames)
         return;
 
     // Decode a sliding window of frames around the requested frame
@@ -169,6 +205,17 @@ void GifAnimation::evictDistantFrames(int currentFrame) const
 
 QPixmap GifAnimation::currentFrame() const
 {
+    if (!m_staticImage.isNull()) {
+        if (m_staticScaled.isNull()) {
+            const QImage scaled = m_staticImage.size() == m_displaySize
+                    ? m_staticImage
+                    : m_staticImage.scaled(m_displaySize, Qt::KeepAspectRatio,
+                                           Qt::SmoothTransformation);
+            m_staticScaled = QPixmap::fromImage(scaled);
+        }
+        return m_staticScaled;
+    }
+
     if (m_movie) {
         int frame = m_movie->currentFrameNumber();
 
@@ -192,14 +239,49 @@ QPixmap GifAnimation::currentFrame() const
 
 int GifAnimation::frameCount() const
 {
+    if (!m_staticImage.isNull())
+        return 1;
     if (!m_movie)
         return 0;
     return m_movie->frameCount();
 }
 
+qint64 GifAnimation::memoryCost() const
+{
+    qint64 cost = m_buffer ? m_buffer->size() : 0;
+    if (!m_staticImage.isNull())
+        cost += qint64(m_staticImage.width()) * m_staticImage.height() * 4;
+    for (const auto &frame : m_frameCache)
+        cost += qint64(frame.width()) * frame.height() * 4;
+    return cost;
+}
+
+void GifAnimation::unload()
+{
+    // Free the heavy buffers but keep the object alive so external raw
+    // pointers (e.g. ChatModel's per-URL map) stay valid; play() reloads.
+    pause();
+    if (m_movie) {
+        m_movie->deleteLater();
+        m_movie = nullptr;
+    }
+    if (m_buffer) {
+        m_buffer->deleteLater();
+        m_buffer = nullptr;
+    }
+    m_frameCache.clear();
+    m_staticImage = QImage();
+    m_staticScaled = QPixmap();
+}
+
 void GifAnimation::play()
 {
     m_playing = true;
+    if (!m_movie && m_staticImage.isNull() && !m_loading && m_url.isValid()) {
+        // Previously unloaded by the ImageManager LRU — fetch again.
+        load(m_url, m_containerWidth);
+        return;
+    }
     if (m_movie)
         m_movie->start();
 }
@@ -222,6 +304,16 @@ void GifAnimation::toggle()
 void GifAnimation::setContainerWidth(int width)
 {
     m_containerWidth = qBound(32, width, kGifMaxWidth);
+
+    if (!m_staticImage.isNull()) {
+        QSize newSize = computeDisplaySize(m_staticImage.size());
+        if (newSize != m_displaySize) {
+            m_displaySize = newSize;
+            m_staticScaled = QPixmap();
+        }
+        return;
+    }
+
     if (!m_movie)
         return;
 
@@ -229,13 +321,7 @@ void GifAnimation::setContainerWidth(int width)
     if (originalSize.isEmpty())
         return;
 
-    QSize newSize;
-    if (originalSize.width() > m_containerWidth) {
-        int newHeight = originalSize.height() * m_containerWidth / originalSize.width();
-        newSize = QSize(m_containerWidth, newHeight);
-    } else {
-        newSize = originalSize;
-    }
+    QSize newSize = computeDisplaySize(originalSize);
 
     if (newSize != m_displaySize) {
         m_displaySize = newSize;
@@ -262,8 +348,10 @@ void GifAnimation::onMovieFrameChanged(int frameNum)
 GifAnimation *ImageManager::createGifAnimation(const QUrl &url, int containerWidth)
 {
     auto it = gifAnimations.constFind(url);
-    if (it != gifAnimations.constEnd())
+    if (it != gifAnimations.constEnd()) {
+        touchGifAnimation(url);
         return it.value();
+    }
 
     auto *anim = new GifAnimation(this);
     anim->load(url, containerWidth);
@@ -272,14 +360,30 @@ GifAnimation *ImageManager::createGifAnimation(const QUrl &url, int containerWid
     // Auto-cleanup when the animation is destroyed externally
     connect(anim, &QObject::destroyed, this, [this, url](QObject *) {
         gifAnimations.remove(url);
+        auto lit = gifLruMap.find(url);
+        if (lit != gifLruMap.end()) {
+            gifLruOrder.erase(lit.value());
+            gifLruMap.erase(lit);
+        }
+        recalcGifMemoryTotal();
     });
+
+    // Keep the running memory total in sync when the load finishes or fails.
+    connect(anim, &GifAnimation::ready, this, &ImageManager::recalcGifMemoryTotal);
+    connect(anim, &GifAnimation::failed, this, &ImageManager::recalcGifMemoryTotal);
+
+    touchGifAnimation(url);
+    enforceGifCacheLimits(url);
 
     return anim;
 }
 
 GifAnimation *ImageManager::gifAnimation(const QUrl &url) const
 {
-    return gifAnimations.value(url, nullptr);
+    auto *anim = gifAnimations.value(url, nullptr);
+    if (anim)
+        touchGifAnimation(url);
+    return anim;
 }
 
 void ImageManager::releaseGifAnimation(const QUrl &url)
@@ -288,6 +392,72 @@ void ImageManager::releaseGifAnimation(const QUrl &url)
     if (it != gifAnimations.end()) {
         it.value()->deleteLater();
         gifAnimations.erase(it);
+        auto lit = gifLruMap.find(url);
+        if (lit != gifLruMap.end()) {
+            gifLruOrder.erase(lit.value());
+            gifLruMap.erase(lit);
+        }
+        recalcGifMemoryTotal();
+    }
+}
+
+void ImageManager::touchGifAnimation(const QUrl &url) const
+{
+    auto it = gifLruMap.find(url);
+    if (it != gifLruMap.end()) {
+        // Move to back (most recently used).
+        gifLruOrder.splice(gifLruOrder.end(), gifLruOrder, it.value());
+    } else {
+        gifLruOrder.push_back(url);
+        gifLruMap.insert(url, std::prev(gifLruOrder.end()));
+    }
+}
+
+void ImageManager::recalcGifMemoryTotal()
+{
+    qint64 total = 0;
+    for (auto *anim : gifAnimations)
+        total += anim->memoryCost();
+    gifMemoryTotal = total;
+}
+
+void ImageManager::enforceGifCacheLimits(const QUrl &mostRecent)
+{
+    recalcGifMemoryTotal();
+
+    // Unload least-recently-used animations until back under budget. Unloading
+    // frees the buffers but keeps the GifAnimation alive (play() reloads on
+    // demand), so holders of raw pointers never dangle.
+    while (gifLruOrder.size() > 1
+           && (gifAnimations.size() > kGifCacheMaxEntries
+               || gifMemoryTotal > kGifCacheBudgetBytes)) {
+        const QUrl victim = gifLruOrder.front();
+        auto lit = gifLruMap.find(victim);
+        if (lit == gifLruMap.end()) {
+            gifLruOrder.pop_front();
+            continue;
+        }
+        if (victim == mostRecent) {
+            gifLruOrder.splice(gifLruOrder.end(), gifLruOrder, lit.value());
+            break;
+        }
+        auto *anim = gifAnimations.value(victim, nullptr);
+        if (!anim) {
+            gifLruMap.erase(lit);
+            gifLruOrder.pop_front();
+            continue;
+        }
+        const qint64 cost = anim->memoryCost();
+        if (cost == 0) {
+            // Already an empty shell; unloading again won't shrink anything.
+            gifLruOrder.splice(gifLruOrder.end(), gifLruOrder, lit.value());
+            if (gifMemoryTotal <= kGifCacheBudgetBytes)
+                break;
+            continue;
+        }
+        anim->unload();
+        gifMemoryTotal -= cost;
+        gifLruOrder.splice(gifLruOrder.end(), gifLruOrder, lit.value());
     }
 }
 
@@ -298,7 +468,8 @@ void ImageManager::releaseGifAnimation(const QUrl &url)
 ImageManager::ImageManager(QObject *parent) : QObject(parent)
 {
     networkManager = new QNetworkAccessManager(this);
-    cache.setMaxCost(600);
+    // QCache cost is per-entry; we budget in decoded bytes (32bpp).
+    cache.setMaxCost(kRamCacheBudgetBytes);
 
     if (!tempDir.isValid())
         qCWarning(LogCore) << "Failed to create temp directory for image cache";
@@ -307,11 +478,10 @@ ImageManager::ImageManager(QObject *parent) : QObject(parent)
 bool ImageManager::isCached(const QUrl &url, const QSize &size)
 {
     ImageRequestKey k{ url, size };
-    if (pinnedImages.contains(k) || cache.contains(k))
+    if (pinnedImages.contains(k) || cache.contains(k) || diskCacheKeys.contains(k))
         return true;
 
-    QString path = getCachePath(url, size);
-    return QFile::exists(path);
+    return false;
 }
 
 void ImageManager::assign(QLabel *label, const QUrl &url, const QSize &size)
@@ -350,8 +520,10 @@ QPixmap ImageManager::getImpl(const QUrl &url, const QSize &size, PinGroup pin, 
 
     auto pinnedIt = pinnedImages.constFind(k);
     if (pinnedIt != pinnedImages.constEnd()) {
-        if (pin != PinGroup::None && !pinGroupKeys.contains(pin, k))
+        if (pin != PinGroup::None && !pinGroupKeys.contains(pin, k)) {
             pinGroupKeys.insert(pin, k);
+            ++pinRefCounts[k];
+        }
         return pinnedIt.value();
     }
 
@@ -360,14 +532,15 @@ QPixmap ImageManager::getImpl(const QUrl &url, const QSize &size, PinGroup pin, 
         if (pin != PinGroup::None) {
             pinnedImages.insert(k, pixmap);
             pinGroupKeys.insert(pin, k);
+            ++pinRefCounts[k];
             cache.remove(k);
         }
         return pixmap;
     }
 
     // check disk cache
-    QString path = getCachePath(url, size);
-    if (QFile::exists(path)) {
+    if (diskCacheKeys.contains(k)) {
+        QString path = getCachePath(url, size);
         QPixmap pixmap;
         if (pixmap.load(path)) {
             qreal dpr = qApp->devicePixelRatio();
@@ -387,11 +560,16 @@ QPixmap ImageManager::getImpl(const QUrl &url, const QSize &size, PinGroup pin, 
             if (pin != PinGroup::None) {
                 pinnedImages.insert(k, pixmap);
                 pinGroupKeys.insert(pin, k);
+                ++pinRefCounts[k];
             } else {
-                cache.insert(k, new QPixmap(pixmap));
+                cache.insert(k, new QPixmap(pixmap), pixmapCost(pixmap));
             }
             return pixmap;
         }
+
+        // The file was removed or corrupted; drop the stale key.
+        diskCacheKeys.remove(k);
+        diskCachePathToKey.remove(path);
     }
 
     if (fetchIfNeeded) {
@@ -411,9 +589,35 @@ QPixmap ImageManager::placeholder(const QSize &size)
     return pixmap;
 }
 
+bool ImageManager::hasFailed(const QUrl &url, const QSize &size) const
+{
+    return failedRequests.contains(ImageRequestKey{ url, size });
+}
+
+void ImageManager::clearFailedRequests()
+{
+    failedRequests.clear();
+}
+
+void ImageManager::failRequest(const ImageRequestKey &k, const QUrl &url, const QSize &size,
+                               const QString &reason)
+{
+    qCWarning(LogCore) << "Failed to fetch image:" << url << "-" << reason;
+    requests.remove(k);
+    pendingPins.remove(k);
+    failedRequests.insert(k);
+    emit imageFailed(url, size);
+}
+
 void ImageManager::request(const QUrl &url, const QSize &size, PinGroup pin)
 {
     ImageRequestKey k{ url, size };
+
+    // A failed request stays failed (the delegate paints an error state)
+    // instead of being re-issued on every repaint until explicitly cleared.
+    if (failedRequests.contains(k))
+        return;
+
     if (requests.contains(k)) {
         // promote
         if (pin != PinGroup::None) {
@@ -438,17 +642,27 @@ void ImageManager::fetchFromNetwork(const QUrl &url, const QSize &size, PinGroup
 
     QUrl fetchUrl = proxy ? buildOptimizedUrl(url, size, dpr) : url;
     QNetworkRequest request(fetchUrl);
+    request.setTransferTimeout(kTransferTimeoutMs);
     QNetworkReply *reply = networkManager->get(request);
+    guardReply(reply);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply, url, size, proxy, dpr]() {
         ImageRequestKey k{ url, size };
         PinGroup pin = pendingPins.value(k, PinGroup::None);
-        pendingPins.remove(k);
+        // Keep pendingPins until the fallback chain is fully resolved so that
+        // overlapping requests don't lose their pin promotion.
 
         if (reply->error() != QNetworkReply::NoError) {
-            qCWarning(LogCore) << "Failed to fetch image:" << reply->errorString();
-            requests.remove(k);
+            const QString reason = reply->errorString();
             reply->deleteLater();
+
+            // The optimized URL (extra query params) may be rejected by the
+            // proxy; retry the raw signed proxy URL before giving up.
+            if (proxy) {
+                fetchRawProxyUrl(k, url, size, dpr);
+                return;
+            }
+            failRequest(k, url, size, reason);
             return;
         }
 
@@ -465,29 +679,89 @@ void ImageManager::fetchFromNetwork(const QUrl &url, const QSize &size, PinGroup
         // Fall back to the raw proxy URL, which Discord serves without resize
         // params (this is what the full-image viewer uses successfully).
         if (proxy) {
-            QNetworkReply *rawReply = networkManager->get(QNetworkRequest(url));
-            connect(rawReply, &QNetworkReply::finished, this,
-                    [this, rawReply, url, size, dpr]() {
-                ImageRequestKey k{ url, size };
-                PinGroup pin = pendingPins.value(k, PinGroup::None);
-                pendingPins.remove(k);
-                QByteArray rawData = rawReply->readAll();
-                rawReply->deleteLater();
-                QPixmap raw;
-                if (raw.loadFromData(rawData)) {
-                    storeFetchedPixmap(k, url, size, rawData, raw, pin, true, dpr);
-                } else {
-                    qCWarning(LogCore) << "Failed to decode fallback image:" << url;
-                    requests.remove(k);
-                }
-            });
-        } else {
-            qCWarning(LogCore) << "Failed to decode image:" << url;
-            requests.remove(k);
+            fetchRawProxyUrl(k, url, size, dpr);
+            return;
         }
+        failRequest(k, url, size, QStringLiteral("undecodable image data"));
     });
 }
 
+void ImageManager::fetchRawProxyUrl(const ImageRequestKey &k, const QUrl &url,
+                                    const QSize &size, qreal dpr)
+{
+    QNetworkRequest rawRequest(url);
+    rawRequest.setTransferTimeout(kTransferTimeoutMs);
+    QNetworkReply *rawReply = networkManager->get(rawRequest);
+    guardReply(rawReply);
+    connect(rawReply, &QNetworkReply::finished, this,
+            [this, rawReply, k, url, size, dpr]() {
+        // Read the latest pin promotion (it may have been upgraded by an
+        // overlapping request while the fallback fetch was in flight).
+        PinGroup pin = pendingPins.value(k, PinGroup::None);
+
+        if (rawReply->error() != QNetworkReply::NoError) {
+            const QString reason = rawReply->errorString();
+            rawReply->deleteLater();
+            failRequest(k, url, size, reason);
+            return;
+        }
+        QByteArray rawData = rawReply->readAll();
+        rawReply->deleteLater();
+        QPixmap raw;
+        if (raw.loadFromData(rawData)) {
+            storeFetchedPixmap(k, url, size, rawData, raw, pin, true, dpr);
+            return;
+        }
+        failRequest(k, url, size, QStringLiteral("undecodable image data"));
+    });
+}
+
+void ImageManager::guardReply(QNetworkReply *reply)
+{
+    // Abort oversized downloads instead of buffering them unboundedly: check
+    // the advertised Content-Length as soon as headers arrive, then the
+    // accumulated bytes on every read.
+    QObject::connect(reply, &QNetworkReply::metaDataChanged, reply, [reply]() {
+        const QVariant len = reply->header(QNetworkRequest::ContentLengthHeader);
+        if (len.isValid() && len.toLongLong() > kMaxDownloadBytes)
+            reply->abort();
+    });
+    QObject::connect(reply, &QNetworkReply::readyRead, reply, [reply]() {
+        if (reply->size() > kMaxDownloadBytes)
+            reply->abort();
+    });
+}
+
+void ImageManager::pruneDiskCache()
+{
+    if (!tempDir.isValid())
+        return;
+
+    // Bound the session disk cache: delete oldest files until back under the
+    // byte and file-count budgets.
+    const QDir dir(tempDir.path());
+    const QFileInfoList files = dir.entryInfoList(QDir::Files, QDir::Time); // oldest first
+
+    qint64 totalBytes = 0;
+    for (const QFileInfo &fi : files)
+        totalBytes += fi.size();
+
+    int count = files.size();
+    for (const QFileInfo &fi : files) {
+        if (totalBytes <= kDiskCacheBudgetBytes && count <= kDiskCacheMaxFiles)
+            break;
+        const QString path = fi.absoluteFilePath();
+        if (QFile::remove(path)) {
+            totalBytes -= fi.size();
+            --count;
+            auto it = diskCachePathToKey.find(path);
+            if (it != diskCachePathToKey.end()) {
+                diskCacheKeys.remove(it.value());
+                diskCachePathToKey.erase(it);
+            }
+        }
+    }
+}
 void ImageManager::storeFetchedPixmap(const ImageRequestKey &k, const QUrl &url, const QSize &size,
                                       const QByteArray &data, QPixmap pixmap, PinGroup pin, bool proxy,
                                       qreal dpr)
@@ -495,29 +769,58 @@ void ImageManager::storeFetchedPixmap(const ImageRequestKey &k, const QUrl &url,
     if (proxy) {
         QSize physicalSize(qRound(size.width() * dpr), qRound(size.height() * dpr));
         if (pixmap.size() != physicalSize)
-            pixmap = pixmap.scaled(physicalSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            pixmap = pixmap.scaled(physicalSize, Qt::KeepAspectRatio,
+                                   Qt::SmoothTransformation);
         pixmap.setDevicePixelRatio(dpr);
     } else {
         pixmap = pixmap.scaled(size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
     }
 
-    // Persist to disk only after a successful decode so we never poison the
-    // cache with undecodable bytes.
-    QFile file(getCachePath(url, size));
-    if (file.open(QIODevice::WriteOnly)) {
-        file.write(data);
-        file.close();
-    }
-
     if (pin != PinGroup::None) {
         pinnedImages.insert(k, pixmap);
         pinGroupKeys.insert(pin, k);
+        ++pinRefCounts[k];
     } else {
-        cache.insert(k, new QPixmap(pixmap));
+        cache.insert(k, new QPixmap(pixmap), pixmapCost(pixmap));
     }
 
     requests.remove(k);
+    pendingPins.remove(k);
+    failedRequests.remove(k);
     emit imageFetched(url, size, pixmap);
+
+    // Persist to disk asynchronously so the network/UI thread isn't blocked by
+    // large writes. The in-memory cache is already live.
+    const QString cachePath = getCachePath(url, size);
+    QPointer<ImageManager> guard(this);
+    QThreadPool::globalInstance()->start([guard, k, cachePath, data]() {
+        QFile file(cachePath);
+        bool ok = false;
+        if (file.open(QIODevice::WriteOnly)) {
+            ok = file.write(data) == data.size();
+            file.close();
+        }
+        if (guard) {
+            QMetaObject::invokeMethod(guard, [guard, k, cachePath, ok]() {
+                guard->onDiskCacheWritten(k, cachePath, ok);
+            }, Qt::QueuedConnection);
+        }
+    });
+}
+
+void ImageManager::onDiskCacheWritten(const ImageRequestKey &k, const QString &path, bool ok)
+{
+    if (!ok)
+        return;
+
+    diskCacheKeys.insert(k);
+    diskCachePathToKey.insert(path, k);
+
+    // Pruning scans the whole temp dir, so only do it periodically.
+    if (++storesSincePrune >= 64) {
+        storesSincePrune = 0;
+        pruneDiskCache();
+    }
 }
 
 void ImageManager::unpinGroup(PinGroup group)
@@ -529,22 +832,19 @@ void ImageManager::unpinGroup(PinGroup group)
     pinGroupKeys.remove(group);
 
     for (const auto &k : keys) {
-        // the same url could be pinned by multiple groups
-        bool stillPinned = false;
-        for (auto it = pinGroupKeys.cbegin(); it != pinGroupKeys.cend(); ++it) {
-            if (it.value() == k) {
-                stillPinned = true;
-                break;
-            }
-        }
+        auto refIt = pinRefCounts.find(k);
+        if (refIt == pinRefCounts.end())
+            continue;
 
-        if (!stillPinned) {
-            auto it = pinnedImages.find(k);
-            if (it != pinnedImages.end()) {
-                // send it back to the lru
-                cache.insert(k, new QPixmap(it.value()));
-                pinnedImages.erase(it);
-            }
+        if (--refIt.value() > 0)
+            continue;
+
+        // No remaining groups reference this key; move it back to the LRU.
+        pinRefCounts.erase(refIt);
+        auto it = pinnedImages.find(k);
+        if (it != pinnedImages.end()) {
+            cache.insert(k, new QPixmap(it.value()), pixmapCost(it.value()));
+            pinnedImages.erase(it);
         }
     }
 }
@@ -580,17 +880,21 @@ QUrl ImageManager::buildOptimizedUrl(const QUrl &proxyUrl, const QSize &displayS
     QUrl optimized = proxyUrl;
     QUrlQuery query(optimized);
 
+    // Avoid stacking duplicate keys if the caller already supplied them.
+    query.removeQueryItem(QStringLiteral("quality"));
+    query.removeQueryItem(QStringLiteral("width"));
+
     // Request the media proxy's original format instead of forcing webp. Hard
     // coding format=webp broke animated GIFs (and any content the deployed
     // runtime cannot decode as webp). The proxy serves the source format, and
     // fetchFromNetwork() still falls back to the raw proxy URL if decoding
     // fails, so both static images and animated GIFs render.
     // Lossy quality still keeps thumbnails small.
-    query.addQueryItem("quality", "80");
+    query.addQueryItem(QStringLiteral("quality"), QStringLiteral("80"));
 
     if (displaySize.isValid() && !displaySize.isEmpty()) {
         int physicalWidth = qRound(displaySize.width() * dpr);
-        query.addQueryItem("width", QString::number(physicalWidth));
+        query.addQueryItem(QStringLiteral("width"), QString::number(physicalWidth));
     }
 
     optimized.setQuery(query);

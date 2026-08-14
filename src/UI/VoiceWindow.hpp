@@ -144,6 +144,7 @@ private:
     void loadCodecSettings();
     void applyCodecSettingsToManager();
     void installResetOnDoubleClick(QWidget *widget, const QVariant &defaultValue);
+    void prunePersistedUserVolumes();
 
     void onParticipantJoined(Core::Snowflake userId);
     void onParticipantLeft(Core::Snowflake userId);

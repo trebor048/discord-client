@@ -58,8 +58,11 @@ void VoiceGateway::hardStop()
     heartbeatCv.notify_all();
     if (networkThread.joinable())
         networkThread.join();
-    if (heartbeatThread.joinable())
-        heartbeatThread.join();
+    {
+        std::lock_guard lock(heartbeatThreadMutex);
+        if (heartbeatThread.joinable())
+            heartbeatThread.join();
+    }
 }
 
 void VoiceGateway::sendSelectProtocol(const QString &address, int port, const QString &mode)
@@ -217,8 +220,11 @@ void VoiceGateway::handleHello(const QJsonObject &data)
     }
 
 
-    if (!heartbeatThread.joinable())
-        heartbeatThread = std::thread(&VoiceGateway::heartbeatLoop, this);
+    {
+        std::lock_guard lock(heartbeatThreadMutex);
+        if (!heartbeatThread.joinable())
+            heartbeatThread = std::thread(&VoiceGateway::heartbeatLoop, this);
+    }
 
     emit helloReceived(hello.heartbeatInterval);
 }
@@ -249,6 +255,12 @@ void VoiceGateway::handleSpeaking(const QJsonObject &data)
 
 void VoiceGateway::handleHeartbeatAck(quint64 nonce)
 {
+    if (nonce != lastSentNonce.load()) {
+        qCWarning(LogVoice) << "Voice heartbeat ACK with unexpected nonce" << nonce
+                            << "expected" << lastSentNonce.load();
+        return;
+    }
+
     heartbeatAckReceived = true;
 
     qCDebug(LogVoice) << "Voice heartbeat ACK, nonce:" << nonce;
@@ -352,6 +364,25 @@ bool VoiceGateway::isFatalCloseCode(VoiceCloseCode code) const
     }
 }
 
+bool VoiceGateway::isInvalidSessionCloseCode(VoiceCloseCode code) const
+{
+    switch (code) {
+    case VoiceCloseCode::SESSION_NO_LONGER_VALID:
+    case VoiceCloseCode::SESSION_TIMEOUT:
+        return true;
+    default:
+        return false;
+    }
+}
+
+void VoiceGateway::interruptibleSleep(int milliseconds)
+{
+    // poll the running flag so hardStop() can join the network thread promptly
+    static constexpr int stepMs = 50;
+    for (int elapsed = 0; elapsed < milliseconds && running; elapsed += stepMs)
+        std::this_thread::sleep_for(std::chrono::milliseconds(stepMs));
+}
+
 void VoiceGateway::networkLoop()
 {
     do {
@@ -387,8 +418,8 @@ void VoiceGateway::networkLoop()
                 int delay = 1000 + dist(rng);
                 qCInfo(LogVoice) << "Voice reconnect attempt" << reconnectAttempts
                                  << "in" << delay << "ms";
-                std::this_thread::sleep_for(std::chrono::milliseconds(delay));
-                shouldReconnect = true;
+                interruptibleSleep(delay);
+                shouldReconnect = running.load();
                 continue;
             }
 
@@ -460,10 +491,23 @@ void VoiceGateway::networkLoop()
                                  << "reason:" << closeReason;
 
                 VoiceCloseCode cc = static_cast<VoiceCloseCode>(closeCode);
-                emit disconnected(cc, closeReason);
 
-                if (!wantToClose && !isFatalCloseCode(cc) && canResume)
+                // a dead session cannot be resumed - fall back to a fresh Identify
+                if (isInvalidSessionCloseCode(cc)) {
+                    qCInfo(LogVoice) << "Voice session invalidated by server, will re-identify";
+                    canResume = false;
+                    isResuming = false;
+                }
+
+                // only report terminal disconnects - a resumable reconnect must not
+                // make the client tear down its transport/session state
+                bool recoverable = !wantToClose && !isFatalCloseCode(cc);
+                bool willReconnect = recoverable && (canResume || isInvalidSessionCloseCode(cc));
+
+                if (willReconnect)
                     shouldReconnect = true;
+                else
+                    emit disconnected(cc, closeReason);
                 break;
             }
 
@@ -511,13 +555,23 @@ void VoiceGateway::networkLoop()
             curl = nullptr;
         }
 
+        if (shouldReconnect && running && reconnectAttempts >= maxReconnectAttempts) {
+            shouldReconnect = false;
+            emit disconnected(VoiceCloseCode::INTERNAL,
+                              QStringLiteral("Voice gateway reconnect attempts exhausted"));
+            break;
+        }
+
         if (shouldReconnect && running && reconnectAttempts < maxReconnectAttempts) {
             reconnectAttempts++;
             isResuming = canResume.load();
 
-            if (heartbeatThread.joinable()) {
-                heartbeatCv.notify_all();
-                heartbeatThread.join();
+            {
+                std::lock_guard lock(heartbeatThreadMutex);
+                if (heartbeatThread.joinable()) {
+                    heartbeatCv.notify_all();
+                    heartbeatThread.join();
+                }
             }
 
             thread_local std::mt19937 rng(std::random_device{}());
@@ -526,15 +580,18 @@ void VoiceGateway::networkLoop()
             qCInfo(LogVoice) << "Voice reconnecting in" << delay << "ms (attempt"
                              << reconnectAttempts << ")";
             emit reconnecting(reconnectAttempts, maxReconnectAttempts);
-            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+            interruptibleSleep(delay);
         }
 
     } while (shouldReconnect && running && reconnectAttempts <= maxReconnectAttempts);
 
     running = false;
     heartbeatCv.notify_all();
-    if (heartbeatThread.joinable())
-        heartbeatThread.join();
+    {
+        std::lock_guard lock(heartbeatThreadMutex);
+        if (heartbeatThread.joinable())
+            heartbeatThread.join();
+    }
 }
 
 void VoiceGateway::heartbeatLoop()

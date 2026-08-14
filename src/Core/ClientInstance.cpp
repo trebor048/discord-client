@@ -159,50 +159,63 @@ ClientInstance::ClientInstance(const AccountInfo &info,
             }
         }
 
-        // Emit ready BEFORE attempting DB persistence — the UI depends on this
-        // signal to populate the channel tree and show content to the user.
-        emit this->ready(ready);
-
         // Cache persistence is best-effort; failures are logged but do not
-        // prevent the UI from working.
+        // prevent the UI from working. It must run BEFORE the ready signal:
+        // the channel tree's permission filter resolves channel visibility
+        // synchronously against these repositories (and the permission cache
+        // precomputed in saveGuild) the moment the tree is populated.
+        // Emitting ready first hid channels whose rows were filtered before
+        // their guild/channel/member rows existed, and the filter was never
+        // re-evaluated afterwards.
         {
             QString connName = Storage::DatabaseManager::instance().getCacheConnectionName(account.id);
             QSqlDatabase db = QSqlDatabase::database(connName);
             if (!db.isValid()) {
                 qCWarning(LogCore) << "Skipping READY cache persistence — DB unavailable";
-                return;
-            }
+            } else {
+                Storage::Transaction txn(db);
+                if (!txn.ownsTransaction()) {
+                    qCWarning(LogCore) << "Skipping READY cache persistence — transaction failed";
+                } else {
+                    const size_t guildCount = ready.guilds->size();
+                    const size_t memberGroupCount =
+                            ready.mergedMembers.hasValue() ? ready.mergedMembers->size() : 0;
+                    if (ready.mergedMembers.hasValue() && memberGroupCount != guildCount)
+                        qCWarning(LogCore) << "READY payload guild/member array size mismatch:"
+                                           << guildCount << "guilds vs" << memberGroupCount
+                                           << "member groups";
 
-            Storage::Transaction txn(db);
-            if (!txn.ownsTransaction()) {
-                qCWarning(LogCore) << "Skipping READY cache persistence — transaction failed";
-                return;
-            }
-
-            for (size_t i = 0; i < ready.guilds->size(); i++) {
-                const auto &guild = ready.guilds->at(i);
-                const QList<Discord::Member> *members = ready.mergedMembers.hasValue()
-                    ? &ready.mergedMembers->at(i) : nullptr;
-                saveGuild(guild, members, ready.user->id.get(), db);
-            }
-
-            if (ready.privateChannels.hasValue()) {
-                for (const auto &channel : ready.privateChannels.get()) {
-                    channelRepo.saveChannel(channel, db);
-                    QList<Core::Snowflake> recipientIds;
-                    if (channel.recipients.hasValue()) {
-                        for (const auto &user : channel.recipients.get())
-                            recipientIds.append(user.id.get());
-                    } else if (channel.recipientIds.hasValue()) {
-                        recipientIds = channel.recipientIds.get();
+                    const size_t pairedCount = std::min(guildCount, memberGroupCount);
+                    for (size_t i = 0; i < guildCount; i++) {
+                        const auto &guild = ready.guilds->at(i);
+                        const QList<Discord::Member> *members =
+                                i < pairedCount ? &ready.mergedMembers->at(i) : nullptr;
+                        saveGuild(guild, members, ready.user->id.get(), db);
                     }
-                    if (!recipientIds.isEmpty())
-                        channelRepo.saveChannelRecipients(channel.id.get(), recipientIds, db);
+
+                    if (ready.privateChannels.hasValue()) {
+                        for (const auto &channel : ready.privateChannels.get()) {
+                            channelRepo.saveChannel(channel, db);
+                            QList<Core::Snowflake> recipientIds;
+                            if (channel.recipients.hasValue()) {
+                                for (const auto &user : channel.recipients.get())
+                                    recipientIds.append(user.id.get());
+                            } else if (channel.recipientIds.hasValue()) {
+                                recipientIds = channel.recipientIds.get();
+                            }
+                            if (!recipientIds.isEmpty())
+                                channelRepo.saveChannelRecipients(channel.id.get(), recipientIds, db);
+                        }
+                    }
+
+                    txn.commit();
                 }
             }
-
-            txn.commit();
         }
+
+        // Emit ready AFTER cache persistence — the UI depends on this signal
+        // to populate the channel tree and show content to the user.
+        emit this->ready(ready);
     });
 
     connect(client, &Discord::Client::readySupplemental, this,
@@ -267,6 +280,7 @@ rollback:
     connect(client, &Discord::Client::messageCreated, messageManager, &MessageManager::onMessageCreated);
     connect(client, &Discord::Client::messageUpdated, messageManager, &MessageManager::onMessageUpdated);
     connect(client, &Discord::Client::messageDeleted, messageManager, &MessageManager::onMessageDeleted);
+    connect(client, &Discord::Client::messagesDeletedBulk, messageManager, &MessageManager::onMessagesDeletedBulk);
     connect(client, &Discord::Client::messageSendFailed, messageManager, &MessageManager::onMessageSendFailed);
     connect(client, &Discord::Client::attachmentUploadProgress, messageManager, &MessageManager::attachmentUploadProgress);
     connect(client, &Discord::Client::messageReactionAdd, messageManager, &MessageManager::onReactionAdd);
@@ -305,6 +319,8 @@ rollback:
     connect(client, &Discord::Client::guildRoleDeleted, this, &ClientInstance::onGuildRoleDeleted);
     connect(client, &Discord::Client::guildMembersChunk, this, &ClientInstance::onGuildMembersChunk);
     connect(client, &Discord::Client::guildMemberUpdated, this, &ClientInstance::onGuildMemberUpdate);
+    connect(client, &Discord::Client::guildMemberAdded, this, &ClientInstance::onGuildMemberAdd);
+    connect(client, &Discord::Client::guildMemberRemoved, this, &ClientInstance::onGuildMemberRemove);
     connect(client, &Discord::Client::guildMemberListUpdate, memberListManager, &MemberListManager::handleMemberListUpdate);
     connect(client, &Discord::Client::guildMemberListUpdate, this, &ClientInstance::onGuildMemberListUpdate);
     connect(memberListManager, &MemberListManager::subscriptionRequested, client, &Discord::Client::subscribeToGuildChannel);
@@ -609,6 +625,7 @@ void ClientInstance::onChannelUpdated(const Discord::ChannelUpdate &event)
     forumParentCache.remove(channelId);
 
     emit channelUpdated(event);
+    emit permissionsChanged(channel.guildId.hasValue() ? channel.guildId.get() : Snowflake::Invalid);
 }
 
 void ClientInstance::onChannelDeleted(const Discord::ChannelDelete &event)
@@ -902,6 +919,7 @@ void ClientInstance::onGuildRoleCreated(const Discord::GuildRoleCreate &event)
     permissionManager->invalidateUserGuildCache(account.id, guildId);
     memberListManager->handleRoleCreated(guildId, role);
     emit guildRoleCreated(event);
+    emit permissionsChanged(guildId);
 }
 
 void ClientInstance::onGuildRoleUpdated(const Discord::GuildRoleUpdate &event)
@@ -929,6 +947,7 @@ void ClientInstance::onGuildRoleUpdated(const Discord::GuildRoleUpdate &event)
     permissionManager->invalidateUserGuildCache(account.id, guildId);
     memberListManager->handleRoleUpdated(guildId, role);
     emit guildRoleUpdated(event);
+    emit permissionsChanged(guildId);
 }
 
 void ClientInstance::onGuildRoleDeleted(const Discord::GuildRoleDelete &event)
@@ -951,6 +970,7 @@ void ClientInstance::onGuildRoleDeleted(const Discord::GuildRoleDelete &event)
     permissionManager->invalidateUserGuildCache(account.id, guildId);
     memberListManager->handleRoleDeleted(guildId, roleId);
     emit guildRoleDeleted(event);
+    emit permissionsChanged(guildId);
 }
 
 void ClientInstance::onGuildMembersChunk(const Discord::GuildMembersChunk &chunk)
@@ -991,8 +1011,41 @@ void ClientInstance::onGuildMemberUpdate(const Discord::GuildMemberUpdate &event
         userManager->saveUser(member.user.get());
     userManager->saveMember(guildId, userId, member);
 
-    if (userId == account.id)
+    if (userId == account.id) {
         permissionManager->invalidateUserGuildCache(userId, guildId);
+        emit permissionsChanged(guildId);
+    }
+
+    emit membersUpdated(guildId, { userId });
+}
+
+void ClientInstance::onGuildMemberAdd(const Discord::GuildMemberUpdate &event)
+{
+    Snowflake guildId = event.guildId.get();
+    const auto &member = event.member.get();
+
+    Snowflake userId = member.user.hasValue() ? member.user->id.get() : Snowflake::Invalid;
+    if (!userId.isValid())
+        return;
+
+    if (member.user.hasValue())
+        userManager->saveUser(member.user.get());
+    userManager->saveMember(guildId, userId, member);
+    memberRepo.saveMember(guildId, userId, member);
+    memberListManager->handleMemberAdded(guildId, member);
+
+    emit membersUpdated(guildId, { userId });
+}
+
+void ClientInstance::onGuildMemberRemove(const Discord::GuildMemberRemove &event)
+{
+    if (!event.guildId.hasValue() || !event.user.hasValue() || !event.user->id.hasValue())
+        return;
+
+    Snowflake guildId = event.guildId.get();
+    Snowflake userId = event.user->id.get();
+
+    memberListManager->handleMemberRemoved(guildId, userId);
 
     emit membersUpdated(guildId, { userId });
 }

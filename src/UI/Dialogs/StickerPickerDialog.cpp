@@ -133,6 +133,53 @@ void StickerPickerDialog::buildPackTabs()
     }
     pendingRequests.clear();
 
+    // Purge hover animations whose buttons live in the old pack tabs.
+    // hoveredMovies keys shared QMovie pointers by raw QToolButton*, so these
+    // entries must be dropped before the tabs (and their buttons) are deleted,
+    // otherwise stopHoverAnimation()/the destructor disconnect() on a dangling
+    // receiver.
+    for (auto it = hoveredMovies.begin(); it != hoveredMovies.end();) {
+        QToolButton *button = it.key();
+        bool inOldTab = false;
+        for (int i = 1; i < packTabs->count(); ++i) {
+            if (packTabs->widget(i)->isAncestorOf(button)) {
+                inOldTab = true;
+                break;
+            }
+        }
+        if (!inOldTab) {
+            ++it;
+            continue;
+        }
+
+        QMovie *movie = it.value();
+        disconnect(movie, &QMovie::frameChanged, button, nullptr);
+        it = hoveredMovies.erase(it);
+
+        // Mirror stopHoverAnimation(): release the shared movie when no
+        // remaining button references it.
+        bool hasOtherUsers = false;
+        for (auto other = hoveredMovies.constBegin(); other != hoveredMovies.constEnd(); ++other) {
+            if (other.value() == movie) {
+                hasOtherUsers = true;
+                break;
+            }
+        }
+        if (!hasOtherUsers) {
+            movie->stop();
+            QString movieKey;
+            for (auto sharedIt = sharedMovies.begin(); sharedIt != sharedMovies.end(); ++sharedIt) {
+                if (sharedIt.value() == movie) {
+                    movieKey = sharedIt.key();
+                    break;
+                }
+            }
+            if (!movieKey.isEmpty())
+                sharedMovies.remove(movieKey);
+            movie->deleteLater();
+        }
+    }
+
     // Remove and delete old pack tabs (keep "All" at index 0)
     while (packTabs->count() > 1) {
         QWidget *tab = packTabs->widget(1);

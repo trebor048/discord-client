@@ -56,6 +56,7 @@ signals:
     void gatewayMessageCreate(const Message &data);
     void gatewayMessageUpdate(const Message &data);
     void gatewayMessageDelete(const MessageDelete &data);
+    void gatewayMessageDeleteBulk(const MessageDeleteBulk &data);
     void gatewayTypingStart(const TypingStart &data);
     void gatewayChannelCreate(const ChannelCreate &data);
     void gatewayChannelUpdate(const ChannelUpdate &data);
@@ -71,6 +72,9 @@ signals:
     void gatewayGuildDelete(const GuildDelete &data);
     void gatewayGuildMembersChunk(const GuildMembersChunk &data);
     void gatewayGuildMemberUpdate(const GuildMemberUpdate &data);
+    void gatewayGuildMemberAdd(const GuildMemberUpdate &data);
+    void gatewayGuildMemberRemove(const GuildMemberRemove &data);
+    void gatewayUserUpdate(const User &data);
     void gatewayGuildRoleCreate(const GuildRoleCreate &data);
     void gatewayGuildRoleUpdate(const GuildRoleUpdate &data);
     void gatewayGuildRoleDelete(const GuildRoleDelete &data);
@@ -134,6 +138,7 @@ private:
     void handleMessageCreate(const Inbound &data);
     void handleMessageUpdate(const Inbound &data);
     void handleMessageDelete(const Inbound &data);
+    void handleMessageDeleteBulk(const Inbound &data);
     void handleTypingStart(const Inbound &data);
     void handleChannelCreate(const Inbound &data);
     void handleChannelUpdate(const Inbound &data);
@@ -149,6 +154,9 @@ private:
     void handleGuildDelete(const Inbound &data);
     void handleGuildMembersChunk(const Inbound &data);
     void handleGuildMemberUpdate(const Inbound &data);
+    void handleGuildMemberAdd(const Inbound &data);
+    void handleGuildMemberRemove(const Inbound &data);
+    void handleUserUpdate(const Inbound &data);
     void handleGuildRoleCreate(const Inbound &data);
     void handleGuildRoleUpdate(const Inbound &data);
     void handleGuildRoleDelete(const Inbound &data);
@@ -191,6 +199,9 @@ private:
     void resume();
     bool isFatalCloseCode(CloseCode code) const;
 
+    int reconnectBackoffMs(int attempt) const;
+    bool waitInterruptible(std::chrono::milliseconds delay) const;
+
     void networkLoop();
     void heartbeatLoop();
 
@@ -220,11 +231,18 @@ private:
     std::condition_variable heartbeatCv;
     std::thread heartbeatThread;
 
+    // sessionId and resumeGatewayUrl are written on the payload-processing
+    // (UI) thread and read on the network thread — both are guarded by this mutex.
+    mutable std::mutex sessionMutex;
     QString sessionId;
     QString resumeGatewayUrl;
 
     std::atomic<bool> heartbeatAckReceived{ true };
     std::atomic<bool> heartbeatStarted{ false };
+    std::atomic<int> missedHeartbeatAcks{ 0 };
+    static constexpr int maxMissedHeartbeatAcks = 2;
+    std::mutex heartbeatStartMutex;
+    std::condition_variable heartbeatStartCv;
     std::atomic<bool> shouldReconnect{ false };
     std::atomic<bool> canResume{ false };
     std::atomic<bool> isResuming{ false };

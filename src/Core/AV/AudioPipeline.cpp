@@ -8,6 +8,7 @@
 
 #include "Core/Logging.hpp"
 
+#include <QDateTime>
 #include <QTimer>
 
 #include <algorithm>
@@ -113,6 +114,19 @@ void AudioPipeline::onAudioReceived(quint32 ssrc, uint16_t sequence, uint32_t /*
 {
     auto it = speakers.find(ssrc);
     if (it == speakers.end()) {
+        // Bound unmapped speakers before creating yet another one: drop idle
+        // stragglers first, then evict the least recently used unmapped speaker
+        // if the table is still full. Mapped speakers are never evicted here;
+        // they are owned by removeUser().
+        if (speakers.size() >= MAX_SPEAKERS) {
+            evictIdleUnmappedSpeakers();
+            if (speakers.size() >= MAX_SPEAKERS && !evictLeastRecentlyUsedUnmappedSpeaker()) {
+                qCWarning(LogVoice) << "Speaker table full with only mapped speakers;"
+                                    << "dropping packet from unknown SSRC" << ssrc;
+                return;
+            }
+        }
+
         SpeakerState state;
         state.decoder = std::make_unique<OpusDecoder>();
         if (!state.decoder->init(AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)) {
@@ -125,7 +139,41 @@ void AudioPipeline::onAudioReceived(quint32 ssrc, uint16_t sequence, uint32_t /*
         it = inserted;
     }
 
+    it->second.lastActivityMs = QDateTime::currentMSecsSinceEpoch();
     it->second.jitterBuffer->push(sequence, opusData);
+}
+
+void AudioPipeline::evictIdleUnmappedSpeakers()
+{
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    for (auto it = speakers.begin(); it != speakers.end();) {
+        const quint32 ssrc = it->first;
+        const bool unmapped = !ssrcToUser.contains(ssrc);
+        if (unmapped && now - it->second.lastActivityMs > UNMAPPED_SPEAKER_IDLE_TIMEOUT_MS) {
+            qCInfo(LogVoice) << "Evicting idle unmapped speaker with SSRC" << ssrc;
+            it = speakers.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+bool AudioPipeline::evictLeastRecentlyUsedUnmappedSpeaker()
+{
+    auto oldest = speakers.end();
+    for (auto it = speakers.begin(); it != speakers.end(); ++it) {
+        if (ssrcToUser.contains(it->first))
+            continue;
+        if (oldest == speakers.end() || it->second.lastActivityMs < oldest->second.lastActivityMs)
+            oldest = it;
+    }
+
+    if (oldest == speakers.end())
+        return false;
+
+    qCInfo(LogVoice) << "Evicting least recently used unmapped speaker with SSRC" << oldest->first;
+    speakers.erase(oldest);
+    return true;
 }
 
 void AudioPipeline::setDeafened(bool deafened)
@@ -196,6 +244,11 @@ void AudioPipeline::setOutputVolume(float volume)
 void AudioPipeline::setVadThreshold(float threshold)
 {
     vadThreshold = threshold;
+}
+
+void AudioPipeline::setVadSensitivity(float percent)
+{
+    vadSensitivity = std::clamp(percent, 0.0f, 100.0f);
 }
 
 void AudioPipeline::setNoiseSuppressionEnabled(bool enabled)
@@ -353,6 +406,10 @@ void AudioPipeline::onMixTick()
     if (deafened || !audioBackend)
         return;
 
+    // Speakers that simply stopped sending never trigger onAudioReceived, so
+    // reclaim idle unmapped ones from the mix tick as well.
+    evictIdleUnmappedSpeakers();
+
     QVector<std::pair<QByteArray, float>> streams;
 
     for (auto it = speakers.begin(); it != speakers.end(); ++it) {
@@ -376,13 +433,18 @@ void AudioPipeline::onMixTick()
                 if (frames.isEmpty())
                     continue;
                 pcm = frames.first();
-                for (int i = 1; i < frames.size(); i++)
+                for (int i = 1; i < frames.size(); i++) {
+                    if (state.pendingFrames.size() >= MAX_PENDING_FRAMES_PER_SPEAKER)
+                        break;
                     state.pendingFrames.append(frames[i]);
+                }
             }
         }
 
         if (pcm.isEmpty())
             continue;
+
+        state.lastActivityMs = QDateTime::currentMSecsSinceEpoch();
 
         // rms before gain
         auto userIt = ssrcToUser.constFind(ssrc);
@@ -439,7 +501,11 @@ bool AudioPipeline::detectVoiceActivity(const QByteArray &pcmFrame, float &outRm
     }
 
     outRms = computeRms(samples, count);
-    return outRms > vadThreshold;
+
+    // Sensitivity scales the base threshold: 50% is neutral, 100% is 4x more
+    // sensitive (threshold / 4), 0% is 4x less sensitive (threshold * 4).
+    const float sensitivityScale = std::pow(2.0f, 2.0f - 4.0f * (vadSensitivity / 100.0f));
+    return outRms > vadThreshold * sensitivityScale;
 }
 
 float AudioPipeline::computeRms(const int16_t *samples, int count)

@@ -38,15 +38,18 @@ signals:
     void channelPermissionsChanged(Snowflake channelId);
 
 private:
+    using CacheKey = QPair<Snowflake /* userId */, Snowflake /* channelId */>;
+
     Discord::Permissions computeChannelPermissions(Snowflake userId, Snowflake channelId);
+    void insertIntoCache(const CacheKey &key, Discord::Permissions permissions);
 
     Storage::RoleRepository roleRepo;
     Storage::GuildRepository guildRepo;
     Storage::ChannelRepository channelRepo;
     Storage::MemberRepository memberRepo;
 
-    QHash<QPair<Snowflake /* userId */, Snowflake /* channelId */>, Discord::Permissions>
-            permissionCache;
+    QHash<CacheKey, Discord::Permissions> permissionCache;
+    QList<CacheKey> permissionCacheLru; // oldest first, most-recently-used last
 };
 
 } // namespace Core

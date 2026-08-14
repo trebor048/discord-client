@@ -25,10 +25,15 @@ bool TokenStore::saveToken(Snowflake accountId, const QString &token)
     job.setKey(keyForAccount(accountId));
     job.setTextData(token);
 
+    // qtkeychain jobs are async; the call sites (account login/add flows) are
+    // synchronous, so we must block here. ExcludeUserInputEvents keeps the UI
+    // from processing user input while the nested loop is re-entered, avoiding
+    // re-entrancy through e.g. double-clicks. Other events still process so
+    // the app doesn't appear frozen.
     QEventLoop loop;
     QObject::connect(&job, &QKeychain::Job::finished, &loop, &QEventLoop::quit);
     job.start();
-    loop.exec();
+    loop.exec(QEventLoop::ExcludeUserInputEvents);
 
     if (job.error() != QKeychain::NoError) {
         qCWarning(LogCore) << "TokenStore: Failed to save token for account"
@@ -45,10 +50,11 @@ QString TokenStore::loadToken(Snowflake accountId)
     job.setAutoDelete(false);
     job.setKey(keyForAccount(accountId));
 
+    // See saveToken() for why this nested loop excludes user input.
     QEventLoop loop;
     QObject::connect(&job, &QKeychain::Job::finished, &loop, &QEventLoop::quit);
     job.start();
-    loop.exec();
+    loop.exec(QEventLoop::ExcludeUserInputEvents);
 
     if (job.error() != QKeychain::NoError) {
         if (job.error() != QKeychain::EntryNotFound)
@@ -66,10 +72,11 @@ bool TokenStore::deleteToken(Snowflake accountId)
     job.setAutoDelete(false);
     job.setKey(keyForAccount(accountId));
 
+    // See saveToken() for why this nested loop excludes user input.
     QEventLoop loop;
     QObject::connect(&job, &QKeychain::Job::finished, &loop, &QEventLoop::quit);
     job.start();
-    loop.exec();
+    loop.exec(QEventLoop::ExcludeUserInputEvents);
 
     if (job.error() != QKeychain::NoError && job.error() != QKeychain::EntryNotFound) {
         qCWarning(LogCore) << "TokenStore: Failed to delete token for account"

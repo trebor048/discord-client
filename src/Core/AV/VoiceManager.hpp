@@ -56,6 +56,7 @@ public:
     void setOutputVolume(float volume);
     void setUserVolume(Snowflake userId, float volume);
     void setVadThreshold(float threshold);
+    void setVadSensitivity(float percent);
 
     void setOpusApplication(int application);
     void setOpusBitrate(int bitrate);
@@ -160,6 +161,7 @@ private:
     bool cachedOpusFec = true;
     int cachedOpusPacketLossPercent = 0;
     bool cachedNoiseSuppression = true;
+    float cachedVadSensitivity = 30.0f;
     bool cachedPushToTalk = false;
     bool pushToTalkKeyHeld = false;
 #ifdef ACHERON_HAVE_RNNOISE

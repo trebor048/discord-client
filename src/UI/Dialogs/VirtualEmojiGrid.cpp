@@ -15,8 +15,8 @@ constexpr int kCellSpacing = 4;
 constexpr int kHeaderGap = 6;
 constexpr int kSectionGap = 10;
 constexpr int kRecycleBufferPx = 200;
-// Largest viewport height we reserve recycled buttons for. Everything above
-// this (extremely tall windows) reuses the existing follow-up-scroll path.
+// Viewport height the initial recycled-button pool covers. Taller windows
+// grow the pool on demand via ensureButtonPoolSize().
 constexpr int kMaxViewportHeight = 1200;
 constexpr int kButtonPoolSize =
         ((kMaxViewportHeight + 2 * kRecycleBufferPx)
@@ -28,29 +28,8 @@ constexpr int kHeaderPoolSize = 32;
 VirtualEmojiGrid::VirtualEmojiGrid(QWidget *parent) : QWidget(parent)
 {
     m_buttons.reserve(kButtonPoolSize);
-    for (int i = 0; i < kButtonPoolSize; ++i) {
-        auto *button = new QToolButton(this);
-        button->setCheckable(true);
-        button->setAutoRaise(true);
-        button->setToolButtonStyle(Qt::ToolButtonIconOnly);
-        button->setFixedSize(QSize(EmojiGridMetrics::kCellSize, EmojiGridMetrics::kCellSize));
-        button->setProperty("emojiGridButton", true);
-        button->setContextMenuPolicy(Qt::CustomContextMenu);
-        button->hide();
-
-        connect(button, &QToolButton::clicked, this, [this, button]() {
-            const QString value = m_buttonValue.value(button);
-            if (!value.isEmpty())
-                emit itemClicked(value);
-        });
-        connect(button, &QWidget::customContextMenuRequested, this, [this, button](const QPoint &) {
-            const auto it = m_buttonItem.constFind(button);
-            if (it != m_buttonItem.constEnd())
-                emit itemContextMenuRequested(button, it.value());
-        });
-
-        m_buttons.append(button);
-    }
+    for (int i = 0; i < kButtonPoolSize; ++i)
+        m_buttons.append(createPoolButton());
 
     // Capture the button's pristine icon size so recycled buttons can be reset
     // to their native rendering (unicode emoji) before a custom icon overrides
@@ -74,6 +53,41 @@ VirtualEmojiGrid::VirtualEmojiGrid(QWidget *parent) : QWidget(parent)
     probeFont.setBold(true);
     probe.setFont(probeFont);
     m_headerHeight = qMax(24, probe.sizeHint().height());
+}
+
+QToolButton *VirtualEmojiGrid::createPoolButton()
+{
+    auto *button = new QToolButton(this);
+    button->setCheckable(true);
+    button->setAutoRaise(true);
+    button->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    button->setFixedSize(QSize(EmojiGridMetrics::kCellSize, EmojiGridMetrics::kCellSize));
+    button->setProperty("emojiGridButton", true);
+    button->setContextMenuPolicy(Qt::CustomContextMenu);
+    button->hide();
+
+    connect(button, &QToolButton::clicked, this, [this, button]() {
+        const QString value = m_buttonValue.value(button);
+        if (!value.isEmpty())
+            emit itemClicked(value);
+    });
+    connect(button, &QWidget::customContextMenuRequested, this, [this, button](const QPoint &) {
+        const auto it = m_buttonItem.constFind(button);
+        if (it != m_buttonItem.constEnd())
+            emit itemContextMenuRequested(button, it.value());
+    });
+    return button;
+}
+
+void VirtualEmojiGrid::ensureButtonPoolSize(int viewportHeight)
+{
+    // The initial pool covers viewports up to kMaxViewportHeight; taller
+    // windows need more buttons or visible cells render as blank holes.
+    const int cellPitch = EmojiGridMetrics::kCellSize + kCellSpacing;
+    const int needed =
+            ((viewportHeight + 2 * kRecycleBufferPx) / cellPitch + 1) * EmojiGridMetrics::kColumns;
+    while (m_buttons.size() < needed)
+        m_buttons.append(createPoolButton());
 }
 
 void VirtualEmojiGrid::attachScrollArea(QScrollArea *area)
@@ -207,6 +221,7 @@ void VirtualEmojiGrid::relayout()
 
     const int viewportWidth = qMax(1, m_scrollArea->viewport()->width());
     const int viewportHeight = m_scrollArea->viewport()->height();
+    ensureButtonPoolSize(viewportHeight);
     const QSize target(viewportWidth, qMax(m_totalHeight, viewportHeight));
     if (size() != target)
         resize(target);
@@ -249,7 +264,7 @@ void VirtualEmojiGrid::relayout()
             if (cellTop + EmojiGridMetrics::kCellSize < top || cellTop > bottom)
                 continue;
             if (buttonIndex >= m_buttons.size())
-                continue; // pool exhausted; cells will render on the next scroll tick
+                continue; // unreachable: ensureButtonPoolSize() covers the viewport
 
             QToolButton *button = m_buttons[buttonIndex++];
             const Core::EmojiCatalogItem &item = section.items.at(i);

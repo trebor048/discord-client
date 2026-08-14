@@ -8,7 +8,6 @@
 #include "UI/Dialogs/GifPickerDialog.hpp"
 #include "UI/Dialogs/StickerPickerDialog.hpp"
 #include "UI/Widgets/Chat/EmojiAutocompletePopup.hpp"
-#include "Core/Markdown/Parser.hpp"
 #include "Core/Theme/Icons.hpp"
 #include <QBuffer>
 #include <QVBoxLayout>
@@ -27,11 +26,13 @@
 #include <QNetworkRequest>
 #include <QPixmap>
 #include <QPropertyAnimation>
+#include <QScreen>
 #include <QSplitter>
 #include <QTextBlock>
 #include <QTextBrowser>
 #include <QTextCursor>
 #include <QTextImageFormat>
+#include <QTimer>
 #include <QToolButton>
 
 #include <algorithm>
@@ -245,22 +246,6 @@ MessageInput::MessageInput(QWidget *parent) : QWidget(parent)
     replyBarOpacity->setOpacity(1.0);
     replyBar->setGraphicsEffect(replyBarOpacity);
 
-    emojiPickerButton = new QToolButton(replyBar);
-    emojiPickerButton->setText(QStringLiteral("☺"));
-    emojiPickerButton->setToolTip(tr("Open emoji picker"));
-    emojiPickerButton->setFixedSize(20, 20);
-    emojiPickerButton->setStyleSheet(
-            "QToolButton { border: none; color: #b5bac1; font-size: 14px; }"
-            "QToolButton:hover { color: #ffffff; }");
-    replyLayout->addWidget(emojiPickerButton);
-    connect(emojiPickerButton, &QToolButton::clicked, this, [this]() {
-        const QString emoji = pickEmoji(this, tr("Emoji Picker"), tr("Search emoji"),
-                                        guildOrder, currentGuildId);
-        if (emoji.isEmpty())
-            return;
-        insertText(emoji);
-    });
-
     outerLayout->addWidget(replyBar);
 
     attachmentPanel = new AttachmentPreviewPanel(this);
@@ -291,6 +276,12 @@ MessageInput::MessageInput(QWidget *parent) : QWidget(parent)
     markdownPreview->setStyleSheet(
             "#MarkdownInputPreview { background: #2b2d31; border: 1px solid #3f4147; "
             "border-radius: 6px; padding: 6px; }");
+
+    markdownPreviewDebounceTimer = new QTimer(this);
+    markdownPreviewDebounceTimer->setSingleShot(true);
+    markdownPreviewDebounceTimer->setInterval(150);
+    connect(markdownPreviewDebounceTimer, &QTimer::timeout,
+            this, &MessageInput::renderMarkdownPreview);
 
     // Text edit
     auto *inputContainer = new QWidget(this);
@@ -718,9 +709,17 @@ void MessageInput::showEmojiPopup()
     emojiPopup->move(bottomLeft);
     emojiPopup->show();
 
-    // Clamp popup to screen boundaries (MEDIUM #18)
-    QRect screenGeo = QGuiApplication::primaryScreen()->availableGeometry();
-    QRect popupGeo = emojiPopup->geometry();
+    // Clamp popup to screen boundaries (MEDIUM #18). Prefer the screen the
+    // popup landed on, falling back to the window's screen for multi-monitor
+    // setups where the position may be between screens.
+    QScreen *screen = QGuiApplication::screenAt(bottomLeft);
+    if (!screen && windowHandle())
+        screen = windowHandle()->screen();
+    if (!screen)
+        return;
+
+    const QRect screenGeo = screen->availableGeometry();
+    const QRect popupGeo = emojiPopup->geometry();
     if (!screenGeo.contains(popupGeo)) {
         QPoint clamped = popupGeo.topLeft();
         clamped.setX(qMax(screenGeo.left(), qMin(clamped.x(),
@@ -818,7 +817,9 @@ void MessageInput::setMarkdownPreviewVisible(bool visible)
 {
     markdownPreviewVisible = visible;
     markdownPreview->setVisible(visible);
-    updateMarkdownPreview();
+    markdownPreviewDebounceTimer->stop();
+    lastMarkdownPreviewText.reset();
+    renderMarkdownPreview();
     adjustHeight();
     textEdit->setFocus();
 }
@@ -828,16 +829,29 @@ void MessageInput::updateMarkdownPreview()
     if (!markdownPreviewVisible)
         return;
 
+    // Debounce: re-rendering parses the whole message, so don't do it on
+    // every keystroke while the user is still typing.
+    markdownPreviewDebounceTimer->start();
+}
+
+void MessageInput::renderMarkdownPreview()
+{
+    if (!markdownPreviewVisible)
+        return;
+
     const QString text = textEdit->toPlainText();
+    if (lastMarkdownPreviewText && text == *lastMarkdownPreviewText)
+        return;
+    lastMarkdownPreviewText = text;
+
     if (text.trimmed().isEmpty()) {
         markdownPreview->setHtml(markdownPreviewHtml(QStringLiteral(
                 "<span style=\"color: #949ba4;\">Markdown preview</span>")));
         return;
     }
 
-    Core::Markdown::Parser parser;
-    const auto nodes = parser.parse(text);
-    const QString rawHtml = parser.toHtml(nodes);
+    const auto nodes = markdownParser.parse(text);
+    const QString rawHtml = markdownParser.toHtml(nodes);
     markdownPreview->setHtml(markdownPreviewHtml(sanitizeHtml(rawHtml)));
 }
 

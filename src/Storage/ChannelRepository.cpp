@@ -1,6 +1,7 @@
 #include "ChannelRepository.hpp"
 
 #include "DatabaseManager.hpp"
+#include "Transaction.hpp"
 #include "Core/Logging.hpp"
 
 #include <QJsonArray>
@@ -97,7 +98,15 @@ bool ChannelRepository::saveChannel(const Discord::Channel &channel, QSqlDatabas
 
 bool ChannelRepository::deleteChannel(Core::Snowflake channelId, QSqlDatabase &db)
 {
-    bool ownsTransaction = db.transaction();
+    bool ownsTransaction = false;
+    if (!Transaction::isActive(db.connectionName())) {
+        if (!db.transaction()) {
+            qCWarning(LogDB) << "ChannelRepository: failed to begin transaction:"
+                             << db.lastError().text();
+            return false;
+        }
+        ownsTransaction = true;
+    }
     bool ok = false;
     do {
         QSqlQuery q(db);
@@ -135,9 +144,17 @@ bool ChannelRepository::deleteChannel(Core::Snowflake channelId, QSqlDatabase &d
 
 bool ChannelRepository::savePermissionOverwrites(
         Core::Snowflake channelId, const QList<Discord::PermissionOverwrite> &overwrites,
-        QSqlDatabase &db)
+                                              QSqlDatabase &db)
 {
-    bool ownsTransaction = db.transaction();
+    bool ownsTransaction = false;
+    if (!Transaction::isActive(db.connectionName())) {
+        if (!db.transaction()) {
+            qCWarning(LogDB) << "ChannelRepository: failed to begin transaction:"
+                             << db.lastError().text();
+            return false;
+        }
+        ownsTransaction = true;
+    }
     bool ok = false;
     do {
         QSqlQuery delQ(db);
@@ -190,9 +207,17 @@ bool ChannelRepository::savePermissionOverwrites(
 
 bool ChannelRepository::saveChannelRecipients(Core::Snowflake channelId,
                                               const QList<Core::Snowflake> &recipientIds,
-                                              QSqlDatabase &db)
+        QSqlDatabase &db)
 {
-    bool ownsTransaction = db.transaction();
+    bool ownsTransaction = false;
+    if (!Transaction::isActive(db.connectionName())) {
+        if (!db.transaction()) {
+            qCWarning(LogDB) << "ChannelRepository: failed to begin transaction:"
+                             << db.lastError().text();
+            return false;
+        }
+        ownsTransaction = true;
+    }
     bool ok = false;
     do {
         QSqlQuery delQ(db);

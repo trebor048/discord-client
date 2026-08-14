@@ -4,6 +4,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QBuffer>
+#include <QRegularExpression>
 
 #include "Core/Markdown/Parser.hpp"
 #include "Core/MessageManager.hpp"
@@ -66,6 +67,36 @@ static EmbedType embedTypeFromString(const QString &typeStr)
     return EmbedType::Rich;
 }
 
+static bool embedMediaLooksLikeImage(const Discord::EmbedMedia &media)
+{
+    if (media.contentType.hasValue() && media.contentType->startsWith("image/"))
+        return true;
+
+    if (media.width.hasValue() && media.height.hasValue() &&
+        *media.width > 0 && *media.height > 0)
+        return true;
+
+    const QString url = media.proxyUrl.hasValue() ? *media.proxyUrl
+                          : (media.url.hasValue() ? *media.url : QString());
+    if (!url.isEmpty()) {
+        static const QStringList imageExtensions = {
+            QStringLiteral(".png"),
+            QStringLiteral(".jpg"),
+            QStringLiteral(".jpeg"),
+            QStringLiteral(".gif"),
+            QStringLiteral(".webp"),
+            QStringLiteral(".bmp"),
+        };
+        const QString lower = url.toLower();
+        for (const QString &ext : imageExtensions) {
+            if (lower.endsWith(ext))
+                return true;
+        }
+    }
+
+    return false;
+}
+
 ChatModel::ChatModel(Core::ImageManager *imageManager, QObject *parent)
     : QAbstractListModel(parent), imageManager(imageManager)
 {
@@ -77,123 +108,105 @@ ChatModel::ChatModel(Core::ImageManager *imageManager, QObject *parent)
                         emit dataChanged(index, index, { Qt::DecorationRole });
                 });
 
-                // custom emoji in message content and embed text
+                // custom emoji in message content, embed text, reactions, stickers
                 if (url.host() == u"cdn.discordapp.com" && url.path().startsWith(u"/emojis/")) {
-                    QString urlStr = url.toString();
-                    bool reactionFound = false;
-                    for (int row = 0; row < messages.size(); ++row) {
-                        const auto &msg = messages[row];
-                        bool found = msg.parsedContentCached.contains(urlStr);
-                        if (!found && embedCache.contains(msg.id)) {
-                            for (const auto &embed : embedCache.value(msg.id)) {
-                                if (embed.titleParsed.contains(urlStr) ||
-                                    embed.descriptionParsed.contains(urlStr)) {
-                                    found = true;
-                                    break;
-                                }
-                                for (const auto &field : embed.fields) {
-                                    if (field.nameParsed.contains(urlStr) ||
-                                        field.valueParsed.contains(urlStr)) {
-                                        found = true;
-                                        break;
-                                    }
-                                }
-                                if (found)
-                                    break;
-                            }
-                        }
+                    const QString urlStr = url.toString();
+                    auto it = emojiUrlIndex.constFind(urlStr);
+                    if (it == emojiUrlIndex.constEnd())
+                        return;
 
-                        if (!found && msg.reactions.hasValue()) {
-                            for (const auto &reaction : *msg.reactions) {
-                                if (!reaction.emoji->isUnicode()) {
-                                    QString emojiUrl = reaction.emoji->getImageUrl(48);
-                                    if (emojiUrl == urlStr) {
-                                        reactionFound = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
+                    ensureMessageRowIndex();
+                    const EmojiUrlRefs &refs = it.value();
 
-                        if (found) {
-                            invalidateDocCacheForMessage(msg.id);
-                            QModelIndex idx = index(row, 0);
-                            emit dataChanged(idx, idx, { HtmlRole, EmbedsRole, CachedSizeRole });
-                        } else if (reactionFound) {
-                            sizeCache.remove(msg.id);
-                            QModelIndex idx = index(row, 0);
-                            emit dataChanged(idx, idx, { ReactionsRole, CachedSizeRole });
-                            reactionFound = false;
-                        }
+                    for (const Snowflake id : refs.content) {
+                        const int row = messageRowById.value(id, -1);
+                        if (row < 0)
+                            continue;
+                        invalidateDocCacheForMessage(id);
+                        QModelIndex idx = index(row, 0);
+                        emit dataChanged(idx, idx, { HtmlRole, EmbedsRole, CachedSizeRole });
+                    }
 
-                        // sticker images
-                        if (!found && msg.stickerItems.hasValue()) {
-                            QString urlStr = url.toString();
-                            for (const auto &sticker : *msg.stickerItems) {
-                                auto stickerUrl = Discord::Cdn::stickerImage(
-                                        sticker.id, sticker.formatType.get(), 160);
-                                if (stickerUrl.toString() == urlStr) {
-                                    sizeCache.remove(msg.id);
-                                    QModelIndex idx = index(row, 0);
-                                    emit dataChanged(idx, idx, { StickersRole, CachedSizeRole });
-                                    break;
-                                }
-                            }
-                        }
+                    for (const Snowflake id : refs.reactions) {
+                        const int row = messageRowById.value(id, -1);
+                        if (row < 0)
+                            continue;
+                        sizeCache.remove(id);
+                        QModelIndex idx = index(row, 0);
+                        emit dataChanged(idx, idx, { ReactionsRole, CachedSizeRole });
+                    }
+
+                    for (const Snowflake id : refs.stickers) {
+                        const int row = messageRowById.value(id, -1);
+                        if (row < 0)
+                            continue;
+                        sizeCache.remove(id);
+                        QModelIndex idx = index(row, 0);
+                        emit dataChanged(idx, idx, { StickersRole, CachedSizeRole });
                     }
                     return;
                 }
 
                 // attachment and embed images
-                for (int row = 0; row < messages.size(); ++row) {
-                    const auto &msg = messages[row];
-                    bool found = false;
-
-                    if (msg.attachments.hasValue()) {
-                        for (const auto &att : *msg.attachments) {
-                            if (QUrl(*att.proxyUrl) == url) {
-                                found = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    if (!found && msg.embeds.hasValue()) {
-                        for (const auto &embed : *msg.embeds) {
-                            if (embed.author.hasValue() && embed.author->proxyIconUrl.hasValue() &&
-                                QUrl(*embed.author->proxyIconUrl) == url) {
-                                found = true;
-                                break;
-                            }
-                            if (embed.footer.hasValue() && embed.footer->proxyIconUrl.hasValue() &&
-                                QUrl(*embed.footer->proxyIconUrl) == url) {
-                                found = true;
-                                break;
-                            }
-                            if (embed.thumbnail.hasValue() &&
-                                embed.thumbnail->proxyUrl.hasValue() &&
-                                QUrl(*embed.thumbnail->proxyUrl) == url) {
-                                found = true;
-                                break;
-                            }
-
-                            if (embed.image.hasValue() && embed.image->proxyUrl.hasValue() &&
-                                QUrl(*embed.image->proxyUrl) == url) {
-                                found = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    if (found) {
-                        embedCache.remove(msg.id);
-                        sizeCache.remove(msg.id);
-                        invalidateDocCacheForMessage(msg.id);
-                        QModelIndex idx = index(row, 0);
-                        emit dataChanged(idx, idx, { AttachmentsRole, EmbedsRole, CachedSizeRole });
-                    }
-                }
+                notifyImageSettled(url);
             });
+
+    connect(imageManager, &Core::ImageManager::imageFailed, this,
+            [this](const QUrl &url, const QSize &) {
+                // A failed fetch never emits imageFetched, so rows holding the
+                // placeholder would never repaint; notify them so the delegate
+                // can paint an error state instead of an eternal gray box.
+                notifyImageSettled(url);
+            });
+}
+
+void ChatModel::notifyImageSettled(const QUrl &url)
+{
+    const QString urlStr = url.toString();
+    auto it = emojiUrlIndex.constFind(urlStr);
+    if (it == emojiUrlIndex.constEnd())
+        return;
+
+    ensureMessageRowIndex();
+    const EmojiUrlRefs &refs = it.value();
+
+    for (const Snowflake id : refs.content) {
+        const int row = messageRowById.value(id, -1);
+        if (row < 0)
+            continue;
+        invalidateDocCacheForMessage(id);
+        QModelIndex idx = index(row, 0);
+        emit dataChanged(idx, idx, { HtmlRole, EmbedsRole, CachedSizeRole });
+    }
+
+    for (const Snowflake id : refs.reactions) {
+        const int row = messageRowById.value(id, -1);
+        if (row < 0)
+            continue;
+        sizeCache.remove(id);
+        QModelIndex idx = index(row, 0);
+        emit dataChanged(idx, idx, { ReactionsRole, CachedSizeRole });
+    }
+
+    for (const Snowflake id : refs.stickers) {
+        const int row = messageRowById.value(id, -1);
+        if (row < 0)
+            continue;
+        sizeCache.remove(id);
+        QModelIndex idx = index(row, 0);
+        emit dataChanged(idx, idx, { StickersRole, CachedSizeRole });
+    }
+
+    for (const Snowflake id : refs.images) {
+        const int row = messageRowById.value(id, -1);
+        if (row < 0)
+            continue;
+        embedCache.remove(id);
+        sizeCache.remove(id);
+        invalidateDocCacheForMessage(id);
+        QModelIndex idx = index(row, 0);
+        emit dataChanged(idx, idx, { AttachmentsRole, EmbedsRole, CachedSizeRole });
+    }
 }
 
 void ChatModel::setAvatarUrlResolver(AvatarUrlResolver resolver)
@@ -366,96 +379,12 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
         if (!msg.attachments.hasValue() || msg.attachments->isEmpty())
             return QVariant();
 
-        const QVector<QPair<qint64, qint64>> *progress = nullptr;
-        if (msg.nonce.hasValue()) {
-            auto it = uploadProgress.constFind(msg.nonce.get());
-            if (it != uploadProgress.constEnd())
-                progress = &it.value();
+        auto it = attachmentCache.find(msg.id);
+        if (it == attachmentCache.end()) {
+            QList<AttachmentData> data = buildAttachmentData(msg);
+            it = attachmentCache.insert(msg.id, std::move(data));
         }
-
-        QList<AttachmentData> result;
-        for (const auto &att : *msg.attachments) {
-            AttachmentData data;
-            data.id = att.id;
-            data.proxyUrl = QUrl(*att.proxyUrl);
-            data.originalUrl = QUrl(*att.url);
-            data.isImage = att.isImage();
-            data.filename = att.filename.hasValue() ? *att.filename : "unknown";
-            data.fileSizeBytes = att.size.hasValue() ? *att.size : 0;
-            data.isSpoiler = att.isSpoiler();
-
-            // Detect animated GIF attachments
-            bool isGif = false;
-            if (att.contentType.hasValue()) {
-                const QString &ct = *att.contentType;
-                if (ct == QStringLiteral("image/gif"))
-                    isGif = true;
-            }
-            // Also check extension as fallback
-            if (!isGif && att.filename.hasValue()) {
-                const QString &fn = *att.filename;
-                if (fn.endsWith(QStringLiteral(".gif"), Qt::CaseInsensitive))
-                    isGif = true;
-            }
-            data.isGif = isGif;
-
-            // Detect video attachments (video/* content type)
-            data.isVideo = att.isVideo();
-
-            // Detect voice messages (audio attachments with IS_VOICE_MESSAGE flag)
-            bool isVoice = false;
-            if (att.contentType.hasValue() && att.contentType->startsWith("audio/") &&
-                msg.flags.hasValue() && msg.flags->testFlag(Discord::MessageFlag::IS_VOICE_MESSAGE)) {
-                isVoice = true;
-            }
-            data.isVoice = isVoice;
-            if (isVoice) {
-                if (att.waveform.hasValue() && !att.waveform->isEmpty()) {
-                    // Decode base64 waveform
-                    data.waveform = QByteArray::fromBase64(att.waveform->toUtf8());
-                } else {
-                    // Generate fake waveform from duration for visual placeholder
-                    data.waveform = QByteArray();
-                }
-                if (att.durationSecs.hasValue())
-                    data.durationSecs = *att.durationSecs;
-            }
-
-            int attIndex = result.size();
-            if (progress && attIndex < progress->size()) {
-                data.uploadSent = (*progress)[attIndex].first;
-                data.uploadTotal = (*progress)[attIndex].second;
-            }
-
-            if (att.isImage()) {
-                QSize original;
-                if (att.width.hasValue() && att.height.hasValue())
-                    original = QSize(*att.width, *att.height);
-
-                data.displaySize = Core::ImageManager::calculateDisplaySize(original);
-                if (!att.localPreview.isNull()) {
-                    // pending paste preview: pixels live in memory, not on disk
-                    data.pixmap = previewPixmap(att.id, att.localPreview, data.displaySize);
-                    data.isLoading = data.pixmap.isNull();
-                } else if (data.proxyUrl.isLocalFile()) {
-                    // pending dropped-file preview: decode from disk
-                    data.pixmap = localPixmap(data.proxyUrl, data.displaySize);
-                    data.isLoading = data.pixmap.isNull();
-                } else {
-                    data.pixmap = suppressImageFetch
-                                          ? imageManager->getIfCached(data.proxyUrl, data.displaySize)
-                                          : imageManager->get(data.proxyUrl, data.displaySize);
-                    data.isLoading = !imageManager->isCached(data.proxyUrl, data.displaySize);
-                }
-            } else {
-                data.displaySize = QSize();
-                data.isLoading = false;
-            }
-
-            result.append(data);
-        }
-
-        return QVariant::fromValue(result);
+        return QVariant::fromValue(*it);
     }
     case EmbedsRole: {
         if (!msg.embeds.hasValue() || msg.embeds->isEmpty())
@@ -472,8 +401,7 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
             QString embedUrl = embed.url.hasValue() ? *embed.url : QString();
 
             bool hasImage = embed.image.hasValue() && embed.image->proxyUrl.hasValue() &&
-                            embed.image->contentType.hasValue() &&
-                            embed.image->contentType->startsWith("image/");
+                            embedMediaLooksLikeImage(*embed.image);
 
             bool shouldMerge = false;
             int parentIndex = -1;
@@ -569,9 +497,13 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
                             embed.provider->url.hasValue() ? *embed.provider->url : QString();
                 }
 
-                // observed png thumbnail with width/height but no content type
+                // observed png thumbnail with width/height but no content type.
+                // gifv/image embeds (e.g. klipy) may omit dimensions; still
+                // take the thumbnail so the GIF/preview can render.
+                const bool isFullBleedEmbed =
+                        data.type == EmbedType::Gifv || data.type == EmbedType::Image;
                 if (embed.thumbnail.hasValue() && embed.thumbnail->proxyUrl.hasValue() &&
-                    embed.thumbnail->width > 0) {
+                    (embed.thumbnail->width > 0 || isFullBleedEmbed)) {
                     hasAnything = true;
                     data.thumbnailUrl = QUrl(*embed.thumbnail->proxyUrl);
                     QSize origSize;
@@ -669,8 +601,10 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
             }
         }
 
-        if (!suppressImageFetch)
-            embedCache[msg.id] = result;
+        // Always cache the parse result — suppressImageFetch only suppresses
+        // the image fetch above, not the (expensive) markdown re-parse.
+        embedCache[msg.id] = result;
+        indexEmbedEmojiUrls(msg.id, result);
         return QVariant::fromValue(result);
     }
     case IsPendingRole:
@@ -685,51 +619,12 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
         if (!msg.reactions.hasValue() || msg.reactions->isEmpty())
             return QVariant();
 
-        QList<ReactionData> result;
-        for (const auto &reaction : *msg.reactions) {
-            QPixmap emojiPixmap;
-            bool isLoading = false;
-            Core::Snowflake emojiId;
-            if (!reaction.emoji->isUnicode()) {
-                emojiId = reaction.emoji->id;
-                QString emojiUrl = reaction.emoji->getImageUrl(48);
-                QSize emojiSize(16, 16);
-                emojiPixmap = imageManager->get(QUrl(emojiUrl), emojiSize);
-                isLoading = !imageManager->isCached(QUrl(emojiUrl), emojiSize);
-            }
-
-            int normalCount = reaction.countDetails.hasValue() ? *reaction.countDetails->normal : *reaction.count;
-            int burstCount = reaction.countDetails.hasValue() ? *reaction.countDetails->burst : 0;
-
-            if (burstCount > 0) {
-                ReactionData data;
-                data.emojiName = reaction.emoji->name;
-                data.emojiId = emojiId;
-                data.emojiAnimated = reaction.emoji->animated.hasValue() && *reaction.emoji->animated;
-                data.count = burstCount;
-                data.me = reaction.meBurst.hasValue() && *reaction.meBurst;
-                data.isBurst = true;
-                data.emojiPixmap = emojiPixmap;
-                data.isLoading = isLoading;
-                data.burstTintColor = reaction.getBrightestBurstColor();
-                result.append(data);
-            }
-
-            if (normalCount > 0) {
-                ReactionData data;
-                data.emojiName = reaction.emoji->name;
-                data.emojiId = emojiId;
-                data.emojiAnimated = reaction.emoji->animated.hasValue() && *reaction.emoji->animated;
-                data.count = normalCount;
-                data.me = reaction.me;
-                data.isBurst = false;
-                data.emojiPixmap = emojiPixmap;
-                data.isLoading = isLoading;
-                result.append(data);
-            }
+        auto it = reactionCache.find(msg.id);
+        if (it == reactionCache.end()) {
+            QList<ReactionData> data = buildReactionData(msg);
+            it = reactionCache.insert(msg.id, std::move(data));
         }
-
-        return QVariant::fromValue(result);
+        return QVariant::fromValue(*it);
     }
     case StickersRole: {
         if (!msg.stickerItems.hasValue() || msg.stickerItems->isEmpty())
@@ -796,7 +691,13 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
         reply.state = ReplyData::State::Present;
         reply.referencedMessageId = ref->id;
         reply.authorId = ref->author->id;
-        reply.contentSnippet = ref->content;
+        // Clamp the replied-to snippet to a single short line so long
+        // original messages can't bloat the reply header (matches Discord).
+        QString snippet = ref->content;
+        snippet.replace('\n', ' ');
+        if (snippet.length() > 100)
+            snippet = snippet.left(100) + "...";
+        reply.contentSnippet = snippet;
 
         reply.authorColor = resolveAuthorColor(ref->author.get());
         reply.authorName = resolveAuthorName(ref->author.get());
@@ -808,18 +709,175 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
     }
 }
 
+QList<AttachmentData> ChatModel::buildAttachmentData(const Discord::Message &msg) const
+{
+    QList<AttachmentData> result;
+
+    if (!msg.attachments.hasValue() || msg.attachments->isEmpty())
+        return result;
+
+    const QVector<QPair<qint64, qint64>> *progress = nullptr;
+    if (msg.nonce.hasValue()) {
+        auto it = uploadProgress.constFind(msg.nonce.get());
+        if (it != uploadProgress.constEnd())
+            progress = &it.value();
+    }
+
+    for (const auto &att : *msg.attachments) {
+        AttachmentData data;
+        data.id = att.id;
+        if (att.proxyUrl.hasValue())
+            data.proxyUrl = QUrl(*att.proxyUrl);
+        else if (att.url.hasValue())
+            data.proxyUrl = QUrl(*att.url);
+
+        if (att.url.hasValue())
+            data.originalUrl = QUrl(*att.url);
+        else if (att.proxyUrl.hasValue())
+            data.originalUrl = QUrl(*att.proxyUrl);
+
+        data.isImage = att.isImage();
+        data.filename = att.filename.hasValue() ? *att.filename : QStringLiteral("unknown");
+        data.fileSizeBytes = att.size.hasValue() ? *att.size : 0;
+        data.isSpoiler = att.isSpoiler();
+
+        // Detect animated GIF attachments
+        bool isGif = false;
+        if (att.contentType.hasValue() && *att.contentType == QStringLiteral("image/gif"))
+            isGif = true;
+        if (!isGif && att.filename.hasValue() &&
+            att.filename->endsWith(QStringLiteral(".gif"), Qt::CaseInsensitive))
+            isGif = true;
+        data.isGif = isGif;
+
+        // Detect video attachments (video/* content type)
+        data.isVideo = att.isVideo();
+
+        // Detect voice messages (audio attachments with IS_VOICE_MESSAGE flag)
+        bool isVoice = false;
+        if (att.contentType.hasValue() && att.contentType->startsWith("audio/") &&
+            msg.flags.hasValue() && msg.flags->testFlag(Discord::MessageFlag::IS_VOICE_MESSAGE))
+            isVoice = true;
+        data.isVoice = isVoice;
+        if (isVoice) {
+            if (att.waveform.hasValue() && !att.waveform->isEmpty())
+                data.waveform = QByteArray::fromBase64(att.waveform->toUtf8());
+            if (att.durationSecs.hasValue())
+                data.durationSecs = *att.durationSecs;
+        }
+
+        int attIndex = result.size();
+        if (progress && attIndex < progress->size()) {
+            data.uploadSent = (*progress)[attIndex].first;
+            data.uploadTotal = (*progress)[attIndex].second;
+        }
+
+        if (att.isImage()) {
+            QSize original;
+            if (att.width.hasValue() && att.height.hasValue())
+                original = QSize(*att.width, *att.height);
+
+            data.displaySize = Core::ImageManager::calculateDisplaySize(original);
+            if (!att.localPreview.isNull()) {
+                // pending paste preview: pixels live in memory, not on disk
+                data.pixmap = previewPixmap(att.id, att.localPreview, data.displaySize);
+                data.isLoading = false; // decoded synchronously
+            } else if (data.proxyUrl.isLocalFile()) {
+                // pending dropped-file preview: decoded synchronously from disk
+                data.pixmap = localPixmap(data.proxyUrl, data.displaySize);
+                data.isLoading = false;
+            } else {
+                data.pixmap = suppressImageFetch
+                                      ? imageManager->getIfCached(data.proxyUrl, data.displaySize)
+                                      : imageManager->get(data.proxyUrl, data.displaySize);
+                data.isLoading = !imageManager->isCached(data.proxyUrl, data.displaySize);
+            }
+        } else {
+            data.displaySize = QSize();
+            data.isLoading = false;
+        }
+
+        result.append(data);
+    }
+
+    return result;
+}
+
+QList<ReactionData> ChatModel::buildReactionData(const Discord::Message &msg) const
+{
+    QList<ReactionData> result;
+
+    if (!msg.reactions.hasValue() || msg.reactions->isEmpty())
+        return result;
+
+    for (const auto &reaction : *msg.reactions) {
+        QPixmap emojiPixmap;
+        bool isLoading = false;
+        Core::Snowflake emojiId;
+        if (reaction.emoji.hasValue() && !reaction.emoji->isUnicode()) {
+            emojiId = reaction.emoji->id;
+            QString emojiUrl = reaction.emoji->getImageUrl(48);
+            QSize emojiSize(16, 16);
+            emojiPixmap = imageManager->get(QUrl(emojiUrl), emojiSize);
+            isLoading = !imageManager->isCached(QUrl(emojiUrl), emojiSize);
+        }
+
+        int normalCount = reaction.countDetails.hasValue() ? *reaction.countDetails->normal : *reaction.count;
+        int burstCount = reaction.countDetails.hasValue() ? *reaction.countDetails->burst : 0;
+
+        if (burstCount > 0) {
+            ReactionData data;
+            data.emojiName = reaction.emoji.hasValue() ? reaction.emoji->name.get() : QString();
+            data.emojiId = emojiId;
+            data.emojiAnimated = reaction.emoji.hasValue() &&
+                                 reaction.emoji->animated.hasValue() &&
+                                 *reaction.emoji->animated;
+            data.count = burstCount;
+            data.me = reaction.meBurst.hasValue() && *reaction.meBurst;
+            data.isBurst = true;
+            data.emojiPixmap = emojiPixmap;
+            data.isLoading = isLoading;
+            data.burstTintColor = reaction.getBrightestBurstColor();
+            result.append(data);
+        }
+
+        if (normalCount > 0) {
+            ReactionData data;
+            data.emojiName = reaction.emoji.hasValue() ? reaction.emoji->name.get() : QString();
+            data.emojiId = emojiId;
+            data.emojiAnimated = reaction.emoji.hasValue() &&
+                                 reaction.emoji->animated.hasValue() &&
+                                 *reaction.emoji->animated;
+            data.count = normalCount;
+            data.me = reaction.me;
+            data.isBurst = false;
+            data.emojiPixmap = emojiPixmap;
+            data.isLoading = isLoading;
+            result.append(data);
+        }
+    }
+
+    return result;
+}
+
 bool ChatModel::setData(const QModelIndex &index, const QVariant &value, int role)
 {
     if (!index.isValid())
         return false;
 
     if (role == CachedSizeRole) {
-        auto &msg = messages[index.row()];
-        sizeCache[msg.id] = value.toSize();
+        setCachedSize(index, value.toSize());
         return true;
     }
 
     return false;
+}
+
+void ChatModel::setCachedSize(const QModelIndex &index, const QSize &size) const
+{
+    if (!index.isValid() || index.row() < 0 || index.row() >= messages.size())
+        return;
+    sizeCache[messages[index.row()].id] = size;
 }
 
 Snowflake ChatModel::getOldestMessageId() const
@@ -861,12 +919,16 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
         beginResetModel();
         sizeCache.clear();
         embedCache.clear();
+        reactionCache.clear();
         docCache.clear();
         pendingNonces.clear();
         erroredNonces.clear();
         uploadProgress.clear();
         localPixmapCache.clear();
         previewPixmapCache.clear();
+        emojiUrlIndex.clear();
+        emojiUrlsByMessage.clear();
+        messageRowIndexDirty = true;
 
         // Clean up animated sticker movies from previous message set
         qDeleteAll(stickerMovies);
@@ -886,8 +948,14 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
         gifAnimationRows.clear();
         failedGifUrls.clear();
 
+        // Allow images that failed in the previous channel to be retried here.
+        imageManager->clearFailedRequests();
+
         messages = incomingMessages;
+        for (const auto &msg : messages)
+            indexMessageEmojiUrls(msg);
         endResetModel();
+        trimOldestMessagesIfNeeded();
         break;
     };
     case Discord::Client::MessageLoadType::History: {
@@ -898,6 +966,9 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
             // History load before any Latest — treat as initial population
             beginInsertRows({}, 0, incomingMessages.size() - 1);
             messages = incomingMessages;
+            for (const auto &msg : messages)
+                indexMessageEmojiUrls(msg);
+            messageRowIndexDirty = true;
             endInsertRows();
             break;
         }
@@ -924,6 +995,9 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
 
         beginInsertRows({}, 0, numNew - 1);
         messages = trulyNew + messages;
+        for (const auto &msg : trulyNew)
+            indexMessageEmojiUrls(msg);
+        messageRowIndexDirty = true;
         endInsertRows();
 
         // invalidate cached size cuz header and/or separator might have moved
@@ -934,34 +1008,119 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
 
         break;
     }
+    case Discord::Client::MessageLoadType::Jump: {
+        // Insert the fetched jump-target message into the existing history,
+        // preserving ascending ID order so it can be centered by the view.
+        if (incomingMessages.isEmpty())
+            break;
+
+        QSet<quint64> existingIds;
+        existingIds.reserve(messages.size());
+        for (const auto &msg : messages)
+            existingIds.insert(msg.id.get());
+
+        QVector<Discord::Message> trulyNew;
+        trulyNew.reserve(incomingMessages.size());
+        for (const auto &msg : incomingMessages) {
+            if (!existingIds.contains(msg.id.get()))
+                trulyNew.append(msg);
+        }
+
+        if (trulyNew.isEmpty())
+            break;
+
+        int firstAffected = static_cast<int>(messages.size());
+        int lastAffected = -1;
+
+        for (const auto &msg : trulyNew) {
+            const Snowflake targetId = msg.id.get();
+            auto it = std::lower_bound(messages.begin(), messages.end(), targetId,
+                                       [](const Discord::Message &m, const Snowflake &id) {
+                                           return m.id.get() < id;
+                                       });
+            const int row = static_cast<int>(std::distance(messages.begin(), it));
+            beginInsertRows({}, row, row);
+            messages.insert(it, msg);
+            indexMessageEmojiUrls(msg);
+            messageRowIndexDirty = true;
+            endInsertRows();
+
+            firstAffected = qMin(firstAffected, row);
+            lastAffected = qMax(lastAffected, qMin(row + 1, static_cast<int>(messages.size()) - 1));
+        }
+
+        if (firstAffected <= lastAffected) {
+            for (int row = firstAffected; row <= lastAffected; ++row)
+                sizeCache.remove(messages[row].id);
+
+            emit dataChanged(index(firstAffected, 0), index(lastAffected, 0),
+                             { CachedSizeRole, ShowHeaderRole, DateSeparatorRole });
+        }
+
+        trimOldestMessagesIfNeeded();
+        break;
+    }
+    case Discord::Client::MessageLoadType::Updated: {
+        // Edits and reaction updates must refresh the existing row in place —
+        // never insert a new one.
+        ensureMessageRowIndex();
+        for (const auto &incomingMsg : incomingMessages) {
+            const int row = messageRowById.value(incomingMsg.id, -1);
+            if (row < 0)
+                continue;
+
+            unindexMessageEmojiUrls(messages[row].id);
+            messages[row] = incomingMsg;
+            indexMessageEmojiUrls(messages[row]);
+
+            sizeCache.remove(incomingMsg.id);
+            embedCache.remove(incomingMsg.id);
+            reactionCache.remove(incomingMsg.id);
+            invalidateDocCacheForMessage(incomingMsg.id);
+
+            QModelIndex idx = index(row, 0);
+            emit dataChanged(idx, idx);
+        }
+        break;
+    }
     case Discord::Client::MessageLoadType::Created: {
         // Track which incoming messages have been handled (by ID match or nonce
         // replacement) so they aren't also appended as new messages below.
         // Processing each message independently is critical: a single batch can
         // contain both message updates (edits) AND new messages, and we must not
         // drop either.
+        ensureMessageRowIndex();
         QVector<bool> handled(incomingMessages.size(), false);
 
         // Phase 1 — update existing messages by matching ID
         for (int j = 0; j < incomingMessages.size(); j++) {
             const auto &incomingMsg = incomingMessages[j];
-            for (int i = 0; i < messages.size(); i++) {
-                if (messages[i].id == incomingMsg.id) {
-                    messages[i] = incomingMsg;
+            const int row = messageRowById.value(incomingMsg.id, -1);
+            if (row < 0)
+                continue;
 
-                    sizeCache.remove(incomingMsg.id);
-                    embedCache.remove(incomingMsg.id);
-                    invalidateDocCacheForMessage(incomingMsg.id);
+            unindexMessageEmojiUrls(messages[row].id);
+            messages[row] = incomingMsg;
+            indexMessageEmojiUrls(messages[row]);
 
-                    QModelIndex idx = index(i, 0);
-                    emit dataChanged(idx, idx);
-                    handled[j] = true;
-                    break;
-                }
-            }
+            sizeCache.remove(incomingMsg.id);
+            embedCache.remove(incomingMsg.id);
+            reactionCache.remove(incomingMsg.id);
+            invalidateDocCacheForMessage(incomingMsg.id);
+
+            QModelIndex idx = index(row, 0);
+            emit dataChanged(idx, idx);
+            handled[j] = true;
         }
 
         // Phase 2 — replace sent messages by nonce (skip ones already handled)
+        QHash<QString, int> nonceToRow;
+        nonceToRow.reserve(messages.size());
+        for (int i = 0; i < messages.size(); ++i) {
+            if (messages[i].nonce.hasValue())
+                nonceToRow.insert(messages[i].nonce.get(), i);
+        }
+
         for (int j = 0; j < incomingMessages.size(); j++) {
             if (handled[j])
                 continue;
@@ -971,31 +1130,34 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
                 continue;
 
             QString nonce = incomingMsg.nonce.get();
-            for (int i = 0; i < messages.size(); i++) {
-                if (messages[i].nonce.hasValue() && messages[i].nonce.get() == nonce) {
-                    prunePreviewCaches(messages[i]); // drop the pending preview's pixmaps
-                    messages[i] = incomingMsg;
-                    pendingNonces.remove(nonce);
-                    uploadProgress.remove(nonce);
-                    QModelIndex idx = index(i, 0);
-                    emit dataChanged(idx, idx);
-                    handled[j] = true;
-                    break;
-                }
-            }
+            auto it = nonceToRow.find(nonce);
+            if (it == nonceToRow.end())
+                continue;
+
+            const int row = it.value();
+            prunePreviewCaches(messages[row]); // drop the pending preview's pixmaps
+            unindexMessageEmojiUrls(messages[row].id);
+            messages[row] = incomingMsg;
+            indexMessageEmojiUrls(messages[row]);
+            pendingNonces.remove(nonce);
+            uploadProgress.remove(nonce);
+            reactionCache.remove(incomingMsg.id);
+            messageRowIndexDirty = true; // message ID changed
+            QModelIndex idx = index(row, 0);
+            emit dataChanged(idx, idx);
+            handled[j] = true;
         }
 
-        // Phase 3 — append truly new messages (those not matched by ID or nonce)
+        // Phase 3 — append truly new messages (those not matched by ID or nonce).
+        // IsPendingRole is driven by pendingNonces, which is pre-seeded by
+        // messageSendPending; a pending-outbound message from another session
+        // will not be registered and therefore won't show as a stuck local send.
         QVector<Discord::Message> newMessages;
         for (int j = 0; j < incomingMessages.size(); j++) {
             if (handled[j])
                 continue;
 
-            const auto &msg = incomingMessages[j];
-            if (msg.isPendingOutbound && msg.nonce.hasValue())
-                pendingNonces.insert(msg.nonce.get());
-
-            newMessages.append(msg);
+            newMessages.append(incomingMessages[j]);
         }
 
         if (!newMessages.isEmpty()) {
@@ -1005,7 +1167,11 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
             lastNewMessageCount = newMessages.size();
 
             messages = messages + newMessages;
+            for (const auto &msg : newMessages)
+                indexMessageEmojiUrls(msg);
+            messageRowIndexDirty = true;
             endInsertRows();
+            trimOldestMessagesIfNeeded();
 
             // Track newly inserted message IDs for highlight animation
             for (const auto &msg : newMessages)
@@ -1045,8 +1211,11 @@ void ChatModel::handleMessageDeleted(Snowflake channelId, Snowflake messageId)
             beginRemoveRows({}, i, i);
             sizeCache.remove(messageId);
             embedCache.remove(messageId);
+            reactionCache.remove(messageId);
             invalidateDocCacheForMessage(messageId);
+            unindexMessageEmojiUrls(messageId);
             messages.remove(i);
+            messageRowIndexDirty = true;
             endRemoveRows();
 
             // invalidate what came afterwards
@@ -1079,6 +1248,11 @@ void ChatModel::handleMessageErrored(const QString &nonce)
     }
 }
 
+void ChatModel::addPendingNonce(const QString &nonce)
+{
+    pendingNonces.insert(nonce);
+}
+
 void ChatModel::handleUploadProgress(const QString &nonce, int fileIndex, qint64 sent, qint64 total)
 {
     if (fileIndex < 0 || !pendingNonces.contains(nonce))
@@ -1100,7 +1274,11 @@ void ChatModel::handleUploadProgress(const QString &nonce, int fileIndex, qint64
 
 QPixmap ChatModel::localPixmap(const QUrl &url, const QSize &displaySize) const
 {
-    auto it = localPixmapCache.constFind(url);
+    // Keyed by path + size so repeat paints for the same attachment at the
+    // same display size don't re-decode/re-scale from disk.
+    const QString cacheKey = url.toLocalFile() + u'|' + QString::number(displaySize.width()) +
+                             u'x' + QString::number(displaySize.height());
+    auto it = localPixmapCache.constFind(cacheKey);
     if (it != localPixmapCache.constEnd())
         return it.value();
 
@@ -1117,7 +1295,7 @@ QPixmap ChatModel::localPixmap(const QUrl &url, const QSize &displaySize) const
     QPixmap pixmap = QPixmap::fromImage(reader.read());
     if (!pixmap.isNull()) {
         pixmap.setDevicePixelRatio(qApp->devicePixelRatio());
-        localPixmapCache.insert(url, pixmap);
+        localPixmapCache.insert(cacheKey, pixmap);
     }
     return pixmap;
 }
@@ -1147,9 +1325,181 @@ void ChatModel::prunePreviewCaches(const Discord::Message &msg)
         return;
     for (const auto &att : *msg.attachments) {
         previewPixmapCache.remove(*att.id);
-        if (att.proxyUrl.hasValue())
-            localPixmapCache.remove(QUrl(*att.proxyUrl));
+        if (att.proxyUrl.hasValue()) {
+            // localPixmapCache is keyed by path + size; drop every size variant
+            const QString prefix = QUrl(*att.proxyUrl).toLocalFile() + u'|';
+            for (auto it = localPixmapCache.begin(); it != localPixmapCache.end();) {
+                if (it.key().startsWith(prefix))
+                    it = localPixmapCache.erase(it);
+                else
+                    ++it;
+            }
+        }
     }
+}
+
+static void collectImgSrcUrls(const QString &html, QSet<QString> &out)
+{
+    if (html.isEmpty())
+        return;
+    static const QRegularExpression imgSrcRe(QStringLiteral(R"rx(src="([^"]+)")rx"));
+    auto it = imgSrcRe.globalMatch(html);
+    while (it.hasNext())
+        out.insert(it.next().captured(1));
+}
+
+void ChatModel::indexMessageEmojiUrls(const Discord::Message &msg)
+{
+    QSet<QString> contentUrls;
+    collectImgSrcUrls(msg.parsedContentCached, contentUrls);
+
+    // Embeds are parsed lazily; index whatever is already cached. When the
+    // EmbedsRole later parses and caches, indexEmbedEmojiUrls picks up the rest.
+    if (embedCache.contains(msg.id)) {
+        for (const auto &embed : embedCache.value(msg.id)) {
+            collectImgSrcUrls(embed.titleParsed, contentUrls);
+            collectImgSrcUrls(embed.descriptionParsed, contentUrls);
+            for (const auto &field : embed.fields) {
+                collectImgSrcUrls(field.nameParsed, contentUrls);
+                collectImgSrcUrls(field.valueParsed, contentUrls);
+            }
+        }
+    }
+
+    QSet<QString> reactionUrls;
+    if (msg.reactions.hasValue()) {
+        for (const auto &reaction : *msg.reactions) {
+            if (reaction.emoji.hasValue() && !reaction.emoji->isUnicode())
+                reactionUrls.insert(reaction.emoji->getImageUrl(48));
+        }
+    }
+
+    QSet<QString> stickerUrls;
+    if (msg.stickerItems.hasValue()) {
+        for (const auto &sticker : *msg.stickerItems) {
+            stickerUrls.insert(Discord::Cdn::stickerImage(sticker.id, sticker.formatType.get(), 160)
+                                       .toString());
+        }
+    }
+
+    QSet<QString> imageUrls;
+    if (msg.attachments.hasValue()) {
+        for (const auto &att : *msg.attachments) {
+            if (att.proxyUrl.hasValue())
+                imageUrls.insert(*att.proxyUrl);
+        }
+    }
+    if (msg.embeds.hasValue()) {
+        for (const auto &embed : *msg.embeds) {
+            if (embed.author.hasValue() && embed.author->proxyIconUrl.hasValue())
+                imageUrls.insert(*embed.author->proxyIconUrl);
+            if (embed.footer.hasValue() && embed.footer->proxyIconUrl.hasValue())
+                imageUrls.insert(*embed.footer->proxyIconUrl);
+            if (embed.thumbnail.hasValue() && embed.thumbnail->proxyUrl.hasValue())
+                imageUrls.insert(*embed.thumbnail->proxyUrl);
+            if (embed.image.hasValue() && embed.image->proxyUrl.hasValue())
+                imageUrls.insert(*embed.image->proxyUrl);
+            if (embed.video.hasValue() && embed.video->proxyUrl.hasValue())
+                imageUrls.insert(*embed.video->proxyUrl);
+        }
+    }
+
+    QSet<QString> &all = emojiUrlsByMessage[msg.id];
+    all = contentUrls + reactionUrls + stickerUrls + imageUrls;
+    for (const QString &url : contentUrls)
+        emojiUrlIndex[url].content.insert(msg.id);
+    for (const QString &url : reactionUrls)
+        emojiUrlIndex[url].reactions.insert(msg.id);
+    for (const QString &url : stickerUrls)
+        emojiUrlIndex[url].stickers.insert(msg.id);
+    for (const QString &url : imageUrls)
+        emojiUrlIndex[url].images.insert(msg.id);
+}
+
+void ChatModel::indexEmbedEmojiUrls(Snowflake messageId, const QList<EmbedData> &embeds) const
+{
+    QSet<QString> embedUrls;
+    for (const auto &embed : embeds) {
+        collectImgSrcUrls(embed.titleParsed, embedUrls);
+        collectImgSrcUrls(embed.descriptionParsed, embedUrls);
+        for (const auto &field : embed.fields) {
+            collectImgSrcUrls(field.nameParsed, embedUrls);
+            collectImgSrcUrls(field.valueParsed, embedUrls);
+        }
+    }
+
+    auto &urls = const_cast<ChatModel *>(this)->emojiUrlsByMessage[messageId];
+    for (const QString &url : embedUrls) {
+        urls.insert(url);
+        const_cast<ChatModel *>(this)->emojiUrlIndex[url].content.insert(messageId);
+    }
+}
+
+void ChatModel::unindexMessageEmojiUrls(Snowflake messageId)
+{
+    auto it = emojiUrlsByMessage.find(messageId);
+    if (it == emojiUrlsByMessage.end())
+        return;
+
+    for (const QString &url : it.value()) {
+        auto refIt = emojiUrlIndex.find(url);
+        if (refIt == emojiUrlIndex.end())
+            continue;
+        refIt->content.remove(messageId);
+        refIt->reactions.remove(messageId);
+        refIt->stickers.remove(messageId);
+        refIt->images.remove(messageId);
+        if (refIt->content.isEmpty() && refIt->reactions.isEmpty() &&
+            refIt->stickers.isEmpty() && refIt->images.isEmpty())
+            emojiUrlIndex.erase(refIt);
+    }
+    emojiUrlsByMessage.erase(it);
+}
+
+int ChatModel::rowForMessage(Snowflake messageId) const
+{
+    if (!messageId.isValid())
+        return -1;
+    ensureMessageRowIndex();
+    return messageRowById.value(messageId, -1);
+}
+
+void ChatModel::ensureMessageRowIndex() const
+{
+    if (!messageRowIndexDirty)
+        return;
+    messageRowById.clear();
+    messageRowById.reserve(messages.size());
+    for (int row = 0; row < messages.size(); ++row)
+        messageRowById.insert(messages[row].id, row);
+    messageRowIndexDirty = false;
+}
+
+void ChatModel::trimOldestMessagesIfNeeded()
+{
+    const int excess = messages.size() - MaxLoadedMessages;
+    if (excess <= 0)
+        return;
+
+    beginRemoveRows({}, 0, excess - 1);
+    for (int i = 0; i < excess; ++i) {
+        const auto &msg = messages[i];
+        if (msg.nonce.hasValue()) {
+            pendingNonces.remove(msg.nonce.get());
+            erroredNonces.remove(msg.nonce.get());
+            uploadProgress.remove(msg.nonce.get());
+        }
+        prunePreviewCaches(msg);
+        sizeCache.remove(msg.id);
+        embedCache.remove(msg.id);
+        reactionCache.remove(msg.id);
+        invalidateDocCacheForMessage(msg.id);
+        unindexMessageEmojiUrls(msg.id);
+        newMessageIds.remove(msg.id.get());
+    }
+    messages.remove(0, excess);
+    messageRowIndexDirty = true;
+    endRemoveRows();
 }
 
 void ChatModel::setActiveChannel(Snowflake channelId, Snowflake guildId)
@@ -1180,10 +1530,13 @@ void ChatModel::setActiveChannel(Snowflake channelId, Snowflake guildId)
     gifAnimationRows.clear();
     failedGifUrls.clear();
 
+    // Channel switch: give previously failed image fetches a fresh chance.
+    imageManager->clearFailedRequests();
     beginResetModel();
     messages.clear();
     sizeCache.clear();
     embedCache.clear();
+    reactionCache.clear();
     docCache.clear();
     pendingNonces.clear();
     erroredNonces.clear();
@@ -1191,12 +1544,18 @@ void ChatModel::setActiveChannel(Snowflake channelId, Snowflake guildId)
     localPixmapCache.clear();
     previewPixmapCache.clear();
     revealedSpoilers.clear();
+    emojiUrlIndex.clear();
+    emojiUrlsByMessage.clear();
+    messageRowIndexDirty = true;
     endResetModel();
 }
 
 void ChatModel::refreshUsersInView(const QList<Snowflake> &userIds)
 {
     bool refreshAll = userIds.isEmpty();
+
+    int firstRow = -1;
+    int lastRow = -1;
 
     for (int row = 0; row < messages.size(); ++row) {
         const auto &msg = messages[row];
@@ -1206,9 +1565,15 @@ void ChatModel::refreshUsersInView(const QList<Snowflake> &userIds)
         Snowflake authorId = msg.author->id.get();
 
         if (refreshAll || userIds.contains(authorId)) {
-            QModelIndex idx = index(row, 0);
-            emit dataChanged(idx, idx, { UsernameRole, UsernameColorRole });
+            if (firstRow < 0)
+                firstRow = row;
+            lastRow = row;
         }
+    }
+
+    if (firstRow >= 0) {
+        emit dataChanged(index(firstRow, 0), index(lastRow, 0),
+                         { UsernameRole, UsernameColorRole });
     }
 }
 
@@ -1246,11 +1611,13 @@ QTextDocument *ChatModel::getCachedDocument(const DocCacheKey &key) const
 void ChatModel::cacheDocument(const DocCacheKey &key, QTextDocument *doc) const
 {
     docCache.insert(key, doc);
+    docCacheSubIds[key.messageId].insert(key.subId);
 }
 
 void ChatModel::invalidateDocCache()
 {
     docCache.clear();
+    docCacheSubIds.clear();
     docCacheWidth = 0;
 }
 
@@ -1262,17 +1629,13 @@ void ChatModel::invalidateLayout()
 
 void ChatModel::invalidateDocCacheForMessage(Snowflake messageId)
 {
-    docCache.remove(bodyDocKey(messageId));
+    auto it = docCacheSubIds.find(messageId);
+    if (it == docCacheSubIds.end())
+        return;
 
-    // brute remove all possible entries
-    for (int ei = 0; ei < 10; ++ei) {
-        docCache.remove(embedTitleDocKey(messageId, ei));
-        docCache.remove(embedDescDocKey(messageId, ei));
-        for (int fi = 0; fi < 25; ++fi) {
-            docCache.remove(embedFieldNameDocKey(messageId, ei, fi));
-            docCache.remove(embedFieldValueDocKey(messageId, ei, fi));
-        }
-    }
+    for (int subId : it.value())
+        docCache.remove(DocCacheKey{ messageId, subId });
+    docCacheSubIds.erase(it);
 }
 
 QMovie *ChatModel::stickerMovie(Snowflake stickerId, const QUrl &cdnUrl,
@@ -1298,12 +1661,15 @@ QMovie *ChatModel::stickerMovie(Snowflake stickerId, const QUrl &cdnUrl,
     auto *movie = new QMovie(this);
     movie->setCacheMode(QMovie::CacheAll);
 
-    // Fetch the sticker image data from CDN
-    QNetworkAccessManager *nam = new QNetworkAccessManager(movie);
-    QNetworkReply *reply = nam->get(QNetworkRequest(cdnUrl));
-    connect(reply, &QNetworkReply::finished, this, [this, movie, nam, reply, stickerId]() {
+    // Fetch the sticker image data from CDN via a shared NAM (a per-sticker
+    // NAM would leak whenever a reply stalls and never finishes).
+    if (!stickerNetworkManager)
+        stickerNetworkManager = new QNetworkAccessManager(this);
+    QNetworkRequest request(cdnUrl);
+    request.setTransferTimeout(15000);
+    QNetworkReply *reply = stickerNetworkManager->get(request);
+    connect(reply, &QNetworkReply::finished, this, [this, movie, reply, stickerId]() {
         reply->deleteLater();
-        nam->deleteLater();
 
         if (reply->error() != QNetworkReply::NoError) {
             if (stickerMovies.value(stickerId) == movie)
@@ -1384,6 +1750,11 @@ void ChatModel::cleanupStickerMovies(const QList<Snowflake> &visibleStickerIds)
     }
 }
 
+bool ChatModel::hasImageFailed(const QUrl &url, const QSize &size) const
+{
+    return imageManager->hasFailed(url, size);
+}
+
 Core::GifAnimation *ChatModel::ensureGifAnimation(const QUrl &url, int row) const
 {
     if (!url.isValid())
@@ -1422,7 +1793,7 @@ Core::GifAnimation *ChatModel::ensureGifAnimation(const QUrl &url, int row) cons
                 if (!rowIndex.isValid())
                     continue;
                 QModelIndex idx = rowIndex;
-                emit self->dataChanged(idx, idx, { AttachmentsRole });
+                emit self->dataChanged(idx, idx, { AttachmentsRole, EmbedsRole });
             }
         }
     });
@@ -1434,7 +1805,7 @@ Core::GifAnimation *ChatModel::ensureGifAnimation(const QUrl &url, int row) cons
                 if (!rowIndex.isValid())
                     continue;
                 QModelIndex idx = rowIndex;
-                emit self->dataChanged(idx, idx, { AttachmentsRole, CachedSizeRole });
+                emit self->dataChanged(idx, idx, { AttachmentsRole, EmbedsRole, CachedSizeRole });
             }
         }
     });

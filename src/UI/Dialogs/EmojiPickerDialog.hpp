@@ -70,7 +70,7 @@ private:
         Server = 3,
     };
 
-    QList<Core::EmojiCatalogItem> itemsForSection(Section section) const;
+    const QList<Core::EmojiCatalogItem> &itemsForSection(Section section) const;
     QList<Core::EmojiCatalogItem> filterItems(const QList<Core::EmojiCatalogItem> &items,
                                               const QString &query) const;
     Core::EmojiCatalogItem itemForValue(const QString &value) const;
@@ -89,6 +89,7 @@ private:
     QString currentSelectedEmojiValue() const;
     void restoreSelectionToEmoji(const QString &emojiValue);
     bool isServerSectionActive() const;
+    void rebuildServerSectionIfStale();
     void scrollToCategory(const QString &categoryName);
     void updateCategoryStickyHeader();
 

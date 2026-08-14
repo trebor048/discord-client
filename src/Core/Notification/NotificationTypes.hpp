@@ -3,6 +3,7 @@
 #include <QString>
 #include <QColor>
 #include <QHash>
+#include <QList>
 #include <QUrl>
 #include <QStringList>
 #include <QVariant>
@@ -62,10 +63,29 @@ struct UserSoundMapping {
     QString customUrl;
 };
 
+// A quick-action button rendered on a toast (e.g. "Reply"). The manager maps
+// action ids to behavior; the widget only reports which action was triggered.
+struct ToastAction {
+    QString id;
+    QString label;
+};
+
+inline bool operator==(const ToastAction &lhs, const ToastAction &rhs)
+{
+    return lhs.id == rhs.id && lhs.label == rhs.label;
+}
+
+inline bool operator!=(const ToastAction &lhs, const ToastAction &rhs)
+{
+    return !(lhs == rhs);
+}
+
 struct ToastNotificationData {
     QString title;
     QString body;
+    QString authorName;
     QString iconUrl;
+    QString thumbnailUrl;
     int attachments = 0;
     int timeout = 5;
     int opacity = 95;
@@ -74,15 +94,42 @@ struct ToastNotificationData {
     QString guildName;
     QString guildId;
     Core::Snowflake authorId;
+    Core::Snowflake messageId = Core::Snowflake::Invalid;
     QColor badgeColor;
+    QColor channelColor;
+    bool coloredAccents = true;
     NotificationType type = NotificationType::Message;
+
+    // Grouping: toasts sharing a non-empty groupKey collapse into one widget
+    // whose messageCount is incremented for each collapsed notification.
+    QString groupKey;
+    int messageCount = 1;
+
+    bool pauseOnHover = true;
+
+    // Visual behavior knobs, copied from NotificationSettings at display time
+    bool animationsEnabled = true;
+    bool showProgressBar = true;
+
+    QList<ToastAction> actions;
 
     std::function<void()> onClick;
     std::function<void()> onIconClick;
     std::function<void()> onDismiss;
+    std::function<void(const QString &actionId)> onAction;
 };
 
 struct NotificationSettings {
+    // Master switch: disables all notification output (toasts, native, sound)
+    bool enabled = true;
+
+    // Delivery backend: in-app custom toasts, OS-native tray messages, or both
+    enum class DeliveryMode { InApp, Native, Both };
+    DeliveryMode deliveryMode = DeliveryMode::InApp;
+
+    // Grouping: collapse multiple messages from the same conversation into one toast
+    bool groupingEnabled = true;
+
     // Appearance
     NotificationPosition position = NotificationPosition::BottomLeft;
     int maxNotifications = 3;
@@ -92,6 +139,9 @@ struct NotificationSettings {
     double scaleFactor = 1.0;
     bool pauseOnHover = true;
     bool renderImages = true;
+    bool animationsEnabled = true;
+    bool progressBarEnabled = true;
+    bool coloredAccents = true;
 
     // Notification Types
     bool notifyMentions = true;
@@ -135,8 +185,17 @@ QString streamingTreatmentToString(NotificationSettings::StreamingTreatment t);
 NotificationSettings::StreamingTreatment stringToStreamingTreatment(const QString &str);
 QString nativeModeToString(NotificationSettings::NativeMode m);
 NotificationSettings::NativeMode stringToNativeMode(const QString &str);
+QString deliveryModeToString(NotificationSettings::DeliveryMode m);
+NotificationSettings::DeliveryMode stringToDeliveryMode(const QString &str);
 
 QColor generateBadgeColor(const QString &id);
+
+enum class ColorPalette {
+    Avatar,
+    Channel
+};
+
+QColor colorForSnowflake(const QString &seed, ColorPalette palette);
 
 } // namespace Notification
 } // namespace Core

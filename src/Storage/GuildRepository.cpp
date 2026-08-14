@@ -32,7 +32,33 @@ bool GuildRepository::saveGuild(const Discord::Guild &guild, QSqlDatabase &db)
 
 void GuildRepository::deleteGuild(Core::Snowflake guildId, QSqlDatabase &db)
 {
+    // channels/members/messages have no FK to guilds, so delete them
+    // explicitly to avoid orphaning rows. Caller wraps this in a transaction.
     QSqlQuery q(db);
+
+    q.prepare(R"(
+        DELETE FROM attachments WHERE message_id IN
+        (SELECT id FROM messages WHERE channel_id IN
+         (SELECT id FROM channels WHERE guild_id = :guild_id))
+    )");
+    q.bindValue(":guild_id", static_cast<qint64>(guildId));
+    execLogged(q, "GuildRepository: Delete guild attachments");
+
+    q.prepare(R"(
+        DELETE FROM messages WHERE channel_id IN
+        (SELECT id FROM channels WHERE guild_id = :guild_id)
+    )");
+    q.bindValue(":guild_id", static_cast<qint64>(guildId));
+    execLogged(q, "GuildRepository: Delete guild messages");
+
+    q.prepare("DELETE FROM members WHERE guild_id = :guild_id");
+    q.bindValue(":guild_id", static_cast<qint64>(guildId));
+    execLogged(q, "GuildRepository: Delete guild members");
+
+    q.prepare("DELETE FROM channels WHERE guild_id = :guild_id");
+    q.bindValue(":guild_id", static_cast<qint64>(guildId));
+    execLogged(q, "GuildRepository: Delete guild channels");
+
     q.prepare("DELETE FROM guilds WHERE id = :id");
     q.bindValue(":id", static_cast<qint64>(guildId));
     execLogged(q, "GuildRepository: Delete");

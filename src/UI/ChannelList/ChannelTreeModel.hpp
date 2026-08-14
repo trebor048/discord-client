@@ -6,6 +6,7 @@
 #include <QModelIndex>
 #include <QPair>
 #include <QString>
+#include <QStringList>
 #include <QVariant>
 
 #include "ChannelNode.hpp"
@@ -102,6 +103,10 @@ public:
     ChannelNode *findChannelTreeNode(Snowflake channelId);
     ChannelNode *findChannelTreeNode(Snowflake channelId, Snowflake accountId);
     QModelIndex indexForNode(ChannelNode *node) const;
+
+    // Guild ids in guild-sidebar order (top to bottom), expanding folders in
+    // place so a folder's guilds appear at the folder's position.
+    [[nodiscard]] QStringList orderedGuildIds(Snowflake accountId) const;
 
     QModelIndex serverIndex(Snowflake accountId, Snowflake guildId);
     QModelIndex folderIndex(Snowflake accountId, Snowflake folderId);

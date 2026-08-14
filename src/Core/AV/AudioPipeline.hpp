@@ -30,6 +30,7 @@ struct SpeakerState
     std::unique_ptr<OpusDecoder> decoder;
     std::unique_ptr<JitterBuffer> jitterBuffer;
     QVector<QByteArray> pendingFrames; // overflow from multi-frame Opus packets
+    qint64 lastActivityMs = 0; // monotonic-ish timestamp of last packet/mix activity
 };
 
 class AudioPipeline : public QObject
@@ -57,6 +58,7 @@ public slots:
     void setInputGain(float gain);
     void setOutputVolume(float volume);
     void setVadThreshold(float threshold);
+    void setVadSensitivity(float percent);
     void setNoiseSuppressionEnabled(bool enabled);
     void setUseRnnoiseVad(bool enabled);
 
@@ -87,6 +89,12 @@ private:
     void reconfigureNoiseSuppressorChannels();
     static float computeRms(const int16_t *samples, int count);
 
+    // Eviction for speakers that never got an ssrcToUser mapping. Without these,
+    // packets from unknown SSRCs would accumulate decoders and buffered frames
+    // for the life of the call.
+    void evictIdleUnmappedSpeakers();
+    bool evictLeastRecentlyUsedUnmappedSpeaker();
+
     IAudioBackend *audioBackend = nullptr;
     QTimer *mixTimer = nullptr;
     std::unique_ptr<OpusEncoder> encoder;
@@ -99,6 +107,7 @@ private:
     bool deafened = false;
     bool isSpeaking = false;
     float vadThreshold = 100.0f;
+    float vadSensitivity = 30.0f; // percent, 0..100
     int vadHoldoffFrames = 25;
     int vadHoldoffCounter = 0;
 
@@ -126,6 +135,11 @@ private:
 
     static constexpr int TRAILING_SILENCE_FRAMES = 5;
     static constexpr qint64 RMS_EMIT_INTERVAL_MS = 60;
+
+    // Bounds on receive-side speaker state (see evict* helpers above).
+    static constexpr int MAX_SPEAKERS = 64;
+    static constexpr qint64 UNMAPPED_SPEAKER_IDLE_TIMEOUT_MS = 30'000;
+    static constexpr int MAX_PENDING_FRAMES_PER_SPEAKER = 10;
 };
 
 } // namespace AV

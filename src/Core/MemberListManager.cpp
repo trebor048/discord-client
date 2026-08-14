@@ -1,12 +1,16 @@
 #include "MemberListManager.hpp"
 
 #include <algorithm>
+#include <iterator>
+#include <limits>
 
+#include <QDateTime>
+
+#include "Logging.hpp"
 #include "MurmurHash3.hpp"
 
 // #define MEMBERLIST_DEBUG
 #ifdef MEMBERLIST_DEBUG
-#include "Logging.hpp"
 #define ML_LOG qCDebug(LogCore)
 #else
 #define ML_LOG QT_NO_QDEBUG_MACRO()
@@ -85,6 +89,12 @@ void MemberListManager::setActiveChannel(Snowflake guildId, Snowflake channelId)
            << "ch:" << activeChannelId
            << "list:" << listId << ")";
 
+    if (!guildId.isValid()) {
+        // DM channels have no member list; don't create state for an invalid guild.
+        clear();
+        return;
+    }
+
     if (activeGuildId == guildId && activeChannelId == channelId)
         return;
 
@@ -117,6 +127,8 @@ void MemberListManager::setActiveChannel(Snowflake guildId, Snowflake channelId)
     listId = newListId;
 
     ListData &ld = gs.lists[newListId];
+    ld.lastUsed = QDateTime::currentMSecsSinceEpoch();
+    updateTotalItemCountCache();
     ML_LOG << "[ML] listId:" << newListId
            << "sameGuild:" << sameGuild
            << "listChanged:" << listChanged
@@ -148,6 +160,7 @@ void MemberListManager::clear()
     activeChannelId = Snowflake::Invalid;
     listId.clear();
     ranges.clear();
+    totalItemCountCache = 0;
     emit listReset();
 }
 
@@ -240,10 +253,13 @@ void MemberListManager::handleRoleDeleted(Snowflake guildId, Snowflake roleId)
 
 void MemberListManager::handleMemberListUpdate(const Discord::GuildMemberListUpdate &update)
 {
+    const bool hasOps = !update.ops.isUndefined();
+    const bool hasGroups = !update.groups.isUndefined();
+
     ML_LOG << "[ML] update guild:" << update.guildId.get()
            << "list:" << update.id
-           << "ops:" << update.ops->size()
-           << "groups:" << update.groups->size()
+           << "ops:" << (hasOps ? update.ops->size() : 0)
+           << "groups:" << (hasGroups ? update.groups->size() : 0)
            << "(active guild:" << activeGuildId
            << "list:" << listId << ")";
 
@@ -252,8 +268,9 @@ void MemberListManager::handleMemberListUpdate(const Discord::GuildMemberListUpd
     gs.onlineCount = update.onlineCount;
 
     ListData &ld = gs.lists[update.id];
+    ld.lastUsed = QDateTime::currentMSecsSinceEpoch();
 
-    if (!update.groups->isEmpty())
+    if (hasGroups && !update.groups->isEmpty())
         ld.groups = update.groups;
 
     bool isActiveList = (update.guildId == activeGuildId && update.id == listId);
@@ -266,29 +283,61 @@ void MemberListManager::handleMemberListUpdate(const Discord::GuildMemberListUpd
     if (isActiveList)
         emit listAboutToReset();
 
-    for (const auto &op : update.ops.get()) {
+    const QList<Discord::GuildMemberListUpdate::ListOp> emptyOps;
+
+    // Batch consecutive INSERT/DELETE operations so the underlying QHash is
+    // rebuilt once per run instead of once per op.
+    QList<Discord::GuildMemberListUpdate::ListOp> insertBatch;
+    QList<int> deleteBatch;
+
+    auto flushBatches = [&]() {
+        if (!insertBatch.isEmpty()) {
+            processBatchInserts(insertBatch, ld, gs);
+            insertBatch.clear();
+        }
+        if (!deleteBatch.isEmpty()) {
+            processBatchDeletes(deleteBatch, ld);
+            deleteBatch.clear();
+        }
+    };
+
+    for (const auto &op : (hasOps ? update.ops.get() : emptyOps)) {
         const QString &opType = op.op;
 
         if (opType == "SYNC") {
+            flushBatches();
             ML_LOG << "[ML]  SYNC [" << (op.range.isUndefined() ? -1 : op.range->first)
                    << "-" << (op.range.isUndefined() ? -1 : op.range->second)
                    << "] items:" << (op.items.isUndefined() ? -1 : op.items->size());
             processSync(op, ld, gs);
         } else if (opType == "INSERT") {
-            ML_LOG << "[ML]  INSERT idx:" << (op.index.isUndefined() ? -1 : (int)op.index);
-            processInsert(op, ld, gs);
+            if (!deleteBatch.isEmpty()) {
+                processBatchDeletes(deleteBatch, ld);
+                deleteBatch.clear();
+            }
+            insertBatch.append(op);
         } else if (opType == "UPDATE") {
+            flushBatches();
             ML_LOG << "[ML]  UPDATE idx:" << (op.index.isUndefined() ? -1 : (int)op.index);
             processUpdate(op, ld, gs);
         } else if (opType == "DELETE") {
-            ML_LOG << "[ML]  DELETE idx:" << (op.index.isUndefined() ? -1 : (int)op.index);
-            processDelete(op, ld);
+            if (!insertBatch.isEmpty()) {
+                processBatchInserts(insertBatch, ld, gs);
+                insertBatch.clear();
+            }
+            if (!op.index.isUndefined())
+                deleteBatch.append(op.index);
         } else if (opType == "INVALIDATE") {
+            flushBatches();
             ML_LOG << "[ML]  INVALIDATE [" << (op.range.isUndefined() ? -1 : op.range->first)
                    << "-" << (op.range.isUndefined() ? -1 : op.range->second) << "]";
             processInvalidate(op, ld);
         }
     }
+    flushBatches();
+
+    if (isActiveList)
+        updateTotalItemCountCache();
 
     ML_LOG << "[ML] after: list:" << update.id
            << "items:" << ld.items.size()
@@ -303,17 +352,103 @@ void MemberListManager::handleMemberListUpdate(const Discord::GuildMemberListUpd
         applyAndSendRanges(pendingRanges);
     else if (isActiveList)
         hasPendingRanges = false;
+
+    // Evict only after every use of `ld` above: QHash::remove may relocate
+    // other elements, so holding a reference into gs.lists across eviction
+    // would silently write incoming ops into a dangling ListData.
+    evictStaleLists(gs, update.guildId);
+}
+
+void MemberListManager::handleMemberAdded(Snowflake guildId, const Discord::Member &member)
+{
+    auto it = guildStates.find(guildId);
+    if (it == guildStates.end())
+        return;
+
+    if (member.user.isUndefined())
+        return;
+
+    const Snowflake userId = member.user->id;
+    bool alreadyCounted = false;
+    for (const auto &ld : it->lists) {
+        for (auto iit = ld.items.constBegin(); iit != ld.items.constEnd(); ++iit) {
+            if (iit.value().type == MemberListItem::Type::Member && iit.value().userId == userId) {
+                alreadyCounted = true;
+                break;
+            }
+        }
+        if (alreadyCounted)
+            break;
+    }
+
+    if (!alreadyCounted)
+        it->memberCount++;
+}
+
+void MemberListManager::handleMemberRemoved(Snowflake guildId, Snowflake userId)
+{
+    auto it = guildStates.find(guildId);
+    if (it == guildStates.end())
+        return;
+
+    GuildListState &gs = it.value();
+    if (gs.memberCount > 0)
+        gs.memberCount--;
+
+    bool changed = false;
+    for (auto lit = gs.lists.begin(); lit != gs.lists.end(); ++lit) {
+        ListData &ld = lit.value();
+        QList<int> removedKeys;
+        removedKeys.reserve(ld.items.size());
+        for (auto iit = ld.items.constBegin(); iit != ld.items.constEnd(); ++iit) {
+            if (iit.value().type == MemberListItem::Type::Member && iit.value().userId == userId)
+                removedKeys.append(iit.key());
+        }
+
+        if (removedKeys.isEmpty())
+            continue;
+
+        std::sort(removedKeys.begin(), removedKeys.end());
+        changed = true;
+
+        // Rebuild the materialized map with indices shifted down for every
+        // removed row, keeping the model consistent instead of leaving holes.
+        QHash<int, MemberListItem> newItems;
+        newItems.reserve(ld.items.size() - removedKeys.size());
+        int removedIndex = 0;
+        for (auto iit = ld.items.constBegin(); iit != ld.items.constEnd(); ++iit) {
+            int key = iit.key();
+            while (removedIndex < removedKeys.size() && removedKeys[removedIndex] < key)
+                ++removedIndex;
+            if (removedIndex < removedKeys.size() && removedKeys[removedIndex] == key)
+                continue;
+            newItems[key - removedIndex] = iit.value();
+        }
+        ld.items = std::move(newItems);
+    }
+
+    if (changed && guildId == this->activeGuildId) {
+        emit listAboutToReset();
+        emit listReset();
+    }
 }
 
 int MemberListManager::totalItemCount() const
 {
+    return totalItemCountCache;
+}
+
+void MemberListManager::updateTotalItemCountCache()
+{
     const auto *ld = activeListData();
-    if (!ld)
-        return 0;
+    if (!ld) {
+        totalItemCountCache = 0;
+        return;
+    }
     int count = 0;
     for (const auto &group : ld->groups)
         count += 1 + group.count;
-    return count;
+    totalItemCountCache = count;
 }
 
 const MemberListItem *MemberListManager::itemAt(int index) const
@@ -425,6 +560,33 @@ void MemberListManager::evictUnsubscribedItems(const QList<QPair<int, int>> &,
     emit listReset();
 }
 
+void MemberListManager::evictStaleLists(GuildListState &gs, Snowflake guildId)
+{
+    // Bound per-guild list cache: each visited channel materializes a ListData
+    // keyed by listId, previously only reclaimed by clearGuild().
+    static constexpr int MaxListsPerGuild = 8;
+
+    while (gs.lists.size() > MaxListsPerGuild) {
+        QString victim;
+        qint64 oldest = std::numeric_limits<qint64>::max();
+        for (auto it = gs.lists.constBegin(); it != gs.lists.constEnd(); ++it) {
+            if (guildId == activeGuildId && it.key() == listId)
+                continue; // never evict the list the user is looking at
+            if (it.value().lastUsed < oldest) {
+                oldest = it.value().lastUsed;
+                victim = it.key();
+            }
+        }
+
+        if (victim.isEmpty())
+            return; // only the active list remains
+
+        qCDebug(LogCore) << "[ML] evicting stale member list" << victim << "for guild"
+                         << guildId.toString();
+        gs.lists.remove(victim);
+    }
+}
+
 bool MemberListManager::indexInRanges(int index, const QList<QPair<int, int>> &ranges)
 {
     for (const auto &r : ranges) {
@@ -521,10 +683,18 @@ void MemberListManager::processSync(const Discord::GuildMemberListUpdate::ListOp
         return;
 
     // no changes
-    if (op.items.isUndefined() || op.items->isEmpty())
+    if (op.items.isUndefined())
         return;
 
     int rangeStart = op.range->first;
+
+    // an empty SYNC means the range is now empty: drop stale materialized rows
+    if (op.items->isEmpty()) {
+        int rangeEnd = op.range->second;
+        for (int i = rangeStart; i <= rangeEnd; i++)
+            listData.items.remove(i);
+        return;
+    }
 
     int idx = rangeStart;
     for (const auto &syncItem : op.items.get()) {
@@ -533,26 +703,42 @@ void MemberListManager::processSync(const Discord::GuildMemberListUpdate::ListOp
     }
 }
 
-void MemberListManager::processInsert(const Discord::GuildMemberListUpdate::ListOp &op,
-                                      ListData &listData, const GuildListState &guildState)
+void MemberListManager::processBatchInserts(
+        const QList<Discord::GuildMemberListUpdate::ListOp> &ops,
+        ListData &listData, const GuildListState &guildState)
 {
-    if (op.index.isUndefined() || op.item.isUndefined())
+    if (ops.isEmpty())
         return;
 
-    int insertIdx = op.index;
+    // Apply all inserts to a sorted map, shifting suffix entries for each op.
+    // The final QHash is rebuilt once at the end.
+    QMap<int, MemberListItem> map;
+    for (auto it = listData.items.constBegin(); it != listData.items.constEnd(); ++it)
+        map.insert(it.key(), it.value());
 
-    QList<int> keys;
-    keys.reserve(listData.items.size());
-    for (auto it = listData.items.constBegin(); it != listData.items.constEnd(); ++it) {
-        if (it.key() >= insertIdx)
-            keys.append(it.key());
+    for (const auto &op : ops) {
+        if (op.index.isUndefined() || op.item.isUndefined())
+            continue;
+
+        int insertIdx = op.index;
+        ML_LOG << "[ML]  INSERT idx:" << insertIdx;
+
+        auto suffix = map.lowerBound(insertIdx);
+        QList<QPair<int, MemberListItem>> shifted;
+        shifted.reserve(static_cast<int>(std::distance(suffix, map.end())));
+        for (auto it = suffix; it != map.end(); ++it)
+            shifted.append(qMakePair(it.key() + 1, it.value()));
+        map.erase(suffix, map.end());
+
+        for (const auto &kv : shifted)
+            map.insert(kv.first, kv.second);
+
+        map.insert(insertIdx, syncItemToListItem(op.item, guildState, listData));
     }
 
-    std::sort(keys.begin(), keys.end(), std::greater<int>());
-    for (int key : keys)
-        listData.items[key + 1] = listData.items.take(key);
-
-    listData.items[insertIdx] = syncItemToListItem(op.item, guildState, listData);
+    listData.items.clear();
+    for (auto it = map.constBegin(); it != map.constEnd(); ++it)
+        listData.items.insert(it.key(), it.value());
 }
 
 void MemberListManager::processUpdate(const Discord::GuildMemberListUpdate::ListOp &op,
@@ -565,25 +751,36 @@ void MemberListManager::processUpdate(const Discord::GuildMemberListUpdate::List
     listData.items[index] = syncItemToListItem(op.item, guildState, listData);
 }
 
-void MemberListManager::processDelete(const Discord::GuildMemberListUpdate::ListOp &op,
-                                      ListData &listData)
+void MemberListManager::processBatchDeletes(const QList<int> &indices, ListData &listData)
 {
-    if (op.index.isUndefined())
+    if (indices.isEmpty())
         return;
 
-    int deleteIdx = op.index;
-    listData.items.remove(deleteIdx);
+    QMap<int, MemberListItem> map;
+    for (auto it = listData.items.constBegin(); it != listData.items.constEnd(); ++it)
+        map.insert(it.key(), it.value());
 
-    QList<int> keys;
-    keys.reserve(listData.items.size());
-    for (auto it = listData.items.constBegin(); it != listData.items.constEnd(); ++it) {
-        if (it.key() > deleteIdx)
-            keys.append(it.key());
+    for (int deleteIdx : indices) {
+        ML_LOG << "[ML]  DELETE idx:" << deleteIdx;
+
+        auto it = map.find(deleteIdx);
+        if (it != map.end())
+            map.erase(it);
+
+        auto suffix = map.upperBound(deleteIdx);
+        QList<QPair<int, MemberListItem>> shifted;
+        shifted.reserve(static_cast<int>(std::distance(suffix, map.end())));
+        for (auto sit = suffix; sit != map.end(); ++sit)
+            shifted.append(qMakePair(sit.key() - 1, sit.value()));
+        map.erase(suffix, map.end());
+
+        for (const auto &kv : shifted)
+            map.insert(kv.first, kv.second);
     }
 
-    std::sort(keys.begin(), keys.end());
-    for (int key : keys)
-        listData.items[key - 1] = listData.items.take(key);
+    listData.items.clear();
+    for (auto it = map.constBegin(); it != map.constEnd(); ++it)
+        listData.items.insert(it.key(), it.value());
 }
 
 void MemberListManager::processInvalidate(const Discord::GuildMemberListUpdate::ListOp &op,
@@ -603,7 +800,7 @@ QString MemberListManager::computeListId(const QList<Discord::PermissionOverwrit
 {
     bool hasDenyRules = false;
     for (const auto &ow : overwrites) {
-        if (ow.deny->testFlag(Discord::Permission::VIEW_CHANNEL)) {
+        if (ow.deny.hasValue() && ow.deny->testFlag(Discord::Permission::VIEW_CHANNEL)) {
             hasDenyRules = true;
             break;
         }
@@ -614,9 +811,9 @@ QString MemberListManager::computeListId(const QList<Discord::PermissionOverwrit
 
     QStringList hashInputs;
     for (const auto &ow : overwrites) {
-        if (ow.allow->testFlag(Discord::Permission::VIEW_CHANNEL))
+        if (ow.allow.hasValue() && ow.allow->testFlag(Discord::Permission::VIEW_CHANNEL))
             hashInputs.append("allow:" + QString::number(ow.id.get()));
-        else if (ow.deny->testFlag(Discord::Permission::VIEW_CHANNEL))
+        else if (ow.deny.hasValue() && ow.deny->testFlag(Discord::Permission::VIEW_CHANNEL))
             hashInputs.append("deny:" + QString::number(ow.id.get()));
     }
 

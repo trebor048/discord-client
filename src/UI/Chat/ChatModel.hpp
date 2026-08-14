@@ -1,5 +1,7 @@
 #pragma once
 
+class QNetworkAccessManager;
+
 #include <QAbstractListModel>
 #include <QCache>
 #include <QColor>
@@ -250,6 +252,14 @@ public:
     QVariant data(const QModelIndex &index, int role) const override;
     bool setData(const QModelIndex &index, const QVariant &value, int role) override;
 
+    /// Writes the cached layout size for a row directly, without emitting
+    /// dataChanged. Safe for the delegate to call during the view's layout
+    /// pass, unlike setData which can re-enter layout via dataChanged.
+    void setCachedSize(const QModelIndex &index, const QSize &size) const;
+
+    /// Row of a loaded message, or -1 when it isn't in the current channel view.
+    [[nodiscard]] int rowForMessage(Core::Snowflake messageId) const;
+
     [[nodiscard]] Core::Snowflake getOldestMessageId() const;
     [[nodiscard]] Core::Snowflake getActiveChannelId() const;
     [[nodiscard]] Core::Snowflake getActiveGuildId() const;
@@ -265,12 +275,21 @@ public:
     /// The delegate calls this during paint() to get the current GIF frame.
     Core::GifAnimation *ensureGifAnimation(const QUrl &url, int row) const;
 
+    /// True if the ImageManager fetch for this url+size definitively failed;
+    /// the delegate paints an error state instead of the gray placeholder.
+    [[nodiscard]] bool hasImageFailed(const QUrl &url, const QSize &size) const;
+
 public slots:
     void setActiveChannel(Snowflake channelId, Snowflake guildId = Snowflake::Invalid);
     void handleIncomingMessages(const Core::MessageRequestResult &result);
     void handleMessageDeleted(Snowflake channelId, Snowflake messageId);
     void handleMessageErrored(const QString &nonce);
     void handleUploadProgress(const QString &nonce, int fileIndex, qint64 sent, qint64 total);
+    /// Register a nonce as a local pending send so the matching outbound
+    /// preview is rendered in the pending state. Called by MessageManager's
+    /// messageSendPending signal or by the MainWindow send path.
+    void addPendingNonce(const QString &nonce);
+    void handleSendPending(const QString &nonce) { addPendingNonce(nonce); }
     void refreshUsersInView(const QList<Snowflake> &userIds);
     void revealSpoiler(Snowflake attachmentId);
 
@@ -297,11 +316,44 @@ private:
     QPixmap previewPixmap(Snowflake attachmentId, const QImage &image, const QSize &displaySize) const;
     void prunePreviewCaches(const Discord::Message &msg);
 
+    QList<AttachmentData> buildAttachmentData(const Discord::Message &msg) const;
+    QList<ReactionData> buildReactionData(const Discord::Message &msg) const;
+    void warmCachesForMessage(const Discord::Message &msg);
+    void ensureStickerMoviesForRow(int row, const QList<StickerData> &stickers);
+
+    void shiftMessageRows(int startRow, int delta);
+    void insertMessageRow(Snowflake messageId, int row);
+    void removeMessageRow(Snowflake messageId);
+    void replaceMessageRow(Snowflake oldId, Snowflake newId, int row);
+
+    // Emoji/sticker/media reverse index: URL -> messages referencing it, so
+    // imageFetched only has to touch the rows that actually reference the URL.
+    struct EmojiUrlRefs
+    {
+        QSet<Snowflake> content;  // referenced in parsed content or embed text
+        QSet<Snowflake> reactions;
+        QSet<Snowflake> stickers;
+        QSet<Snowflake> images;   // attachments, embed author/footer/thumbnail/image/video
+    };
+    void indexMessageEmojiUrls(const Discord::Message &msg);
+    void indexEmbedEmojiUrls(Snowflake messageId, const QList<EmbedData> &embeds) const;
+    void notifyImageSettled(const QUrl &url);
+    void unindexMessageEmojiUrls(Snowflake messageId);
+    void ensureMessageRowIndex() const;
+    void trimOldestMessagesIfNeeded();
+
+    /// Cap on messages kept loaded per channel; oldest are trimmed from the top.
+    static constexpr int MaxLoadedMessages = 500;
+
     Core::ImageManager *imageManager;
     QVector<Discord::Message> messages;
     mutable QHash<Snowflake, QSize> sizeCache;
     mutable QHash<Snowflake, QList<EmbedData>> embedCache;
+    mutable QHash<Snowflake, QList<AttachmentData>> attachmentCache;
+    mutable QHash<Snowflake, QList<ReactionData>> reactionCache;
+    mutable QHash<Snowflake, QList<StickerData>> stickerCache;
     mutable QCache<DocCacheKey, QTextDocument> docCache{ 500 };
+    mutable QHash<Snowflake, QSet<int>> docCacheSubIds;
     mutable int docCacheWidth = 0;
 
     Snowflake currentChannelId = Snowflake::Invalid;
@@ -315,7 +367,12 @@ private:
     QSet<QString> pendingNonces;
     QSet<QString> erroredNonces;
     QHash<QString, QVector<QPair<qint64, qint64>>> uploadProgress; // by nonce
-    mutable QHash<QUrl, QPixmap> localPixmapCache; // file previews
+    mutable QHash<QString, QPixmap> localPixmapCache; // file previews, keyed by path + size
+    QHash<QString, EmojiUrlRefs> emojiUrlIndex; // emoji/sticker URL -> referencing message ids
+    QHash<Snowflake, QSet<QString>> emojiUrlsByMessage; // message id -> indexed URLs (for eviction)
+    mutable QHash<Snowflake, int> messageRowById; // message id -> current row (lazily rebuilt)
+    mutable bool messageRowIndexDirty = true;
+    QNetworkAccessManager *stickerNetworkManager = nullptr; // shared NAM for animated stickers
     mutable QHash<Snowflake, QPixmap> previewPixmapCache; // pasted bitmap previews by attachment id
     mutable QSet<Snowflake> revealedSpoilers;
     mutable bool suppressImageFetch = false;

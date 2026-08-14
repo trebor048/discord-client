@@ -5,6 +5,7 @@
 #include <QPropertyAnimation>
 #include <QSettings>
 #include <QGraphicsOpacityEffect>
+#include <QStatusBar>
 #include <QTimer>
 
 #include "Chat/ChatModel.hpp"
@@ -117,7 +118,7 @@ MainWindow::MainWindow(Session *session, QWidget *parent) : QMainWindow(parent),
     setupUi();
     setupMenu();
 
-    qApp->installEventFilter(this);
+    installEventFilter(this);
 
     voiceController->createPushToTalkListener();
 
@@ -196,9 +197,39 @@ void MainWindow::closeEvent(QCloseEvent *event)
     event->accept();
 }
 
+void MainWindow::setChannelName(const QString &name)
+{
+    if (channelFullName == name)
+        return;
+    channelFullName = name;
+    channelNameLabel->setToolTip(name);
+    updateChannelNameElide();
+}
+
+void MainWindow::updateChannelNameElide()
+{
+    if (!channelNameLabel)
+        return;
+    const int available = channelNameLabel->contentsRect().width();
+    if (available <= 0) {
+        channelNameLabel->setText(channelFullName);
+        return;
+    }
+    channelNameLabel->setText(channelNameLabel->fontMetrics().elidedText(
+            channelFullName, Qt::ElideRight, available));
+}
+
 bool MainWindow::eventFilter(QObject *obj, QEvent *ev)
 {
-    if (ev->type() == QEvent::MouseButtonPress && isActiveWindow()) {
+    if (obj != channelNameLabel && obj != this)
+        return QMainWindow::eventFilter(obj, ev);
+
+    if (obj == channelNameLabel && ev->type() == QEvent::Resize) {
+        updateChannelNameElide();
+        return false;
+    }
+
+    if (obj == this && ev->type() == QEvent::MouseButtonPress && isActiveWindow()) {
         auto *me = static_cast<QMouseEvent *>(ev);
         if (me->button() == Qt::BackButton) {
             tabBar->navigateBack();
@@ -228,22 +259,42 @@ void MainWindow::switchChatChannel(Core::Snowflake channelId, Core::Snowflake gu
     channelController->switchChatChannel(channelId, guildId);
 }
 
+void MainWindow::trackInstanceConnection(Core::ClientInstance *instance,
+                                         const QMetaObject::Connection &connection)
+{
+    if (!instance)
+        return;
+    instanceConnections[instance->accountId()].append(connection);
+}
+
+void MainWindow::disconnectInstanceConnections(Core::ClientInstance *instance)
+{
+    if (!instance)
+        return;
+
+    auto it = instanceConnections.find(instance->accountId());
+    if (it == instanceConnections.end())
+        return;
+
+    for (const QMetaObject::Connection &connection : *it)
+        disconnect(connection);
+
+    instanceConnections.erase(it);
+}
+
 void MainWindow::switchActiveInstance(Core::ClientInstance *newInstance)
 {
     if (currentInstance) {
         currentInstance->forums()->setCurrentForum({});
 
-        auto *msgs = currentInstance->messages();
-        disconnect(msgs, nullptr, chatModel, nullptr);
-        disconnect(msgs, nullptr, this, nullptr);
-        disconnect(currentInstance->discord(), &Discord::Client::typingStart, this, nullptr);
-        disconnect(currentInstance->permissions(), nullptr, this, nullptr);
-        disconnect(currentInstance, &Core::ClientInstance::membersUpdated, this, nullptr);
-        disconnect(memberListView, nullptr, currentInstance->memberList(), nullptr);
-        disconnect(currentInstance->forums(), nullptr, this, nullptr);
+        // Disconnect every per-instance signal wired for the old foreground
+        // account so background instances cannot mutate the current UI.
+        disconnectInstanceConnections(currentInstance);
 
         // Clean up old notification manager
         notificationController->teardown();
+
+        chatView->setMessageManager(nullptr);
     }
 
     if (windowManager->friendsWindow) {
@@ -257,15 +308,18 @@ void MainWindow::switchActiveInstance(Core::ClientInstance *newInstance)
     memberListModel->setManager(currentInstance->memberList());
 
     forumModel->setManager(currentInstance->forums());
-    connect(currentInstance->forums(), &Core::ForumManager::loadingChanged, this,
-            [this](Core::Snowflake forumId, bool loading) {
-                if (forumId == channelController->currentForumId)
-                    forumBrowser->setLoading(loading);
-            });
-    connect(memberListView, &MemberListView::visibleRangeChanged,
-            currentInstance->memberList(), &Core::MemberListManager::updateSubscriptionRange);
+    trackInstanceConnection(currentInstance,
+                            connect(currentInstance->forums(), &Core::ForumManager::loadingChanged, this,
+                                    [this](Core::Snowflake forumId, bool loading) {
+                                        if (forumId == channelController->currentForumId)
+                                            forumBrowser->setLoading(loading);
+                                    }));
+    trackInstanceConnection(currentInstance,
+                            connect(memberListView, &MemberListView::visibleRangeChanged,
+                                    currentInstance->memberList(), &Core::MemberListManager::updateSubscriptionRange));
 
     chatView->setCurrentUserId(currentInstance->accountId());
+    chatView->setMessageManager(msgs);
 
     typingTracker->clear();
     typingTracker->setUserManager(currentInstance->users());
@@ -280,45 +334,85 @@ void MainWindow::switchActiveInstance(Core::ClientInstance *newInstance)
         windowManager->settingsWindow->setVoiceManager(currentInstance ? currentInstance->voice() : nullptr);
     }
 
-    connect(msgs, &MessageManager::messagesReceived, chatModel, &ChatModel::handleIncomingMessages);
-    connect(msgs, &MessageManager::messageErrored, chatModel, &ChatModel::handleMessageErrored);
-    connect(msgs, &MessageManager::messageDeleted, chatModel, &ChatModel::handleMessageDeleted);
-    connect(msgs, &MessageManager::attachmentUploadProgress, chatModel, &ChatModel::handleUploadProgress);
-    connect(msgs, &MessageManager::messageErrored, this, [this]() {
-        if (messageInput)
-            messageInput->setSendBlocked(false);
-    });
-    connect(msgs, &MessageManager::messagesReceived, this,
-            [this](const MessageRequestResult &result) {
-                if (result.type == Discord::Client::MessageLoadType::History &&
-                    result.channelId == chatModel->getActiveChannelId()) {
-                    if (result.success)
-                        chatView->onHistoryRequestFinished();
-                    else
-                        chatView->onHistoryRequestFailed();
-                }
-            });
+    trackInstanceConnection(currentInstance,
+                            connect(msgs, &MessageManager::messagesReceived, chatModel, &ChatModel::handleIncomingMessages));
+    trackInstanceConnection(currentInstance,
+                            connect(msgs, &MessageManager::messageSendPending, chatModel, &ChatModel::handleSendPending));
+    trackInstanceConnection(currentInstance,
+                            connect(msgs, &MessageManager::messageErrored, chatModel, &ChatModel::handleMessageErrored));
+    trackInstanceConnection(currentInstance,
+                            connect(msgs, &MessageManager::messageDeleted, chatModel, &ChatModel::handleMessageDeleted));
+    trackInstanceConnection(currentInstance,
+                            connect(msgs, &MessageManager::attachmentUploadProgress, chatModel, &ChatModel::handleUploadProgress));
+    trackInstanceConnection(currentInstance,
+                            connect(msgs, &MessageManager::messageErrored, this, [this]() {
+                                if (messageInput)
+                                    messageInput->setSendBlocked(false);
+                            }));
+    trackInstanceConnection(currentInstance,
+                            connect(msgs, &MessageManager::messagesReceived, this,
+                                    [this](const MessageRequestResult &result) {
+                                        // Only one history request is in flight at a time (gated by
+                                        // ChatView::isFetchingTop), so every History result must reset
+                                        // the flag — even a late reply for a previously active channel.
+                                        if (result.type == Discord::Client::MessageLoadType::History) {
+                                            if (result.success)
+                                                chatView->onHistoryRequestFinished();
+                                            else
+                                                chatView->onHistoryRequestFailed();
+                                        }
 
-    connect(currentInstance->discord(), &Discord::Client::typingStart, this,
-            &MainWindow::onTypingStart);
+                                        // Distinguish "still fetching" from "truly empty" for the
+                                        // chat placeholder: an empty Latest result for the active
+                                        // channel means the channel has no messages.
+                                        if (result.type == Discord::Client::MessageLoadType::Latest
+                                            && result.channelId == chatModel->getActiveChannelId()) {
+                                            if (result.success && result.messages.isEmpty())
+                                                chatView->showEmptyPlaceholder();
+                                            else if (result.success)
+                                                chatView->hidePlaceholder();
+                                        }
+                                    }));
+
+    trackInstanceConnection(currentInstance,
+                            connect(currentInstance->discord(), &Discord::Client::typingStart, this,
+                                    [this](const Discord::TypingStart &event) {
+                                        if (!currentInstance)
+                                            return;
+                                        // The typing signal is wired to whichever instance is
+                                        // currently foreground; ignore stale emissions after a switch.
+                                        if (sender() != currentInstance->discord())
+                                            return;
+                                        onTypingStart(event);
+                                    }));
     // Note: messageCreated is now handled by NotificationManager
     // We still need to remove typer
-    connect(currentInstance->discord(), &Discord::Client::messageCreated, this,
-            [this](const Discord::Message &msg) {
-                typingTracker->removeTyper(msg.channelId, msg.author->id);
-            });
+    trackInstanceConnection(currentInstance,
+                            connect(currentInstance->discord(), &Discord::Client::messageCreated, this,
+                                    [this](const Discord::Message &msg) {
+                                        typingTracker->removeTyper(msg.channelId, msg.author->id);
+                                    }));
 
-    connect(currentInstance->permissions(), &Core::PermissionManager::channelPermissionsChanged,
-            this, &MainWindow::onChannelPermissionsChanged);
+    trackInstanceConnection(currentInstance,
+                            connect(currentInstance->permissions(), &Core::PermissionManager::channelPermissionsChanged,
+                                    this, &MainWindow::onChannelPermissionsChanged));
 
-    connect(currentInstance, &Core::ClientInstance::membersUpdated, this,
-            [this](Snowflake guildId, const QList<Snowflake> &userIds) {
-                for (const auto &userId : userIds)
-                    channelController->userColorCache.remove(userId);
+    trackInstanceConnection(currentInstance,
+                            connect(currentInstance, &Core::ClientInstance::membersUpdated, this,
+                                    [this](Snowflake guildId, const QList<Snowflake> &userIds) {
+                                        if (!currentInstance)
+                                            return;
+                                        // membersUpdated is foreground-only; stale emissions from a
+                                        // background account must not refresh the current chat view.
+                                        if (sender() != currentInstance)
+                                            return;
 
-                chatModel->refreshUsersInView(userIds);
-                forumModel->refreshAuthors();
-            });
+                                        for (const auto &userId : userIds)
+                                            channelController->userColorCache.remove(userId);
+
+                                        chatModel->refreshUsersInView(userIds);
+                                        forumModel->refreshAuthors();
+                                    }));
 
 #ifndef ACHERON_NO_VOICE
     updateVoiceStatusLabel();
@@ -418,6 +512,8 @@ void MainWindow::setupPermanentConnections(Core::ClientInstance *instance)
 
     connect(instance->discord(), &Discord::Client::guildLeaveFailed, this,
             [this, instance](Snowflake guildId, const QString &error) {
+                if (instance != currentInstance)
+                    return;
                 auto guild = instance->getGuild(guildId);
                 QString guildName = guild.has_value() ? guild->name.get() : QString::number(guildId);
                 QMessageBox::warning(this,
@@ -482,6 +578,11 @@ void MainWindow::setupPermanentConnections(Core::ClientInstance *instance)
                         channelTreeModel->addThread(*ch, acc);
                     channelTreeModel->updateReadState(threadId, acc);
                 } else if (chatModel->getActiveChannelId() == threadId) {
+                    // Showing a temporary thread for the active channel is a
+                    // foreground-only action; ignore stale updates from background
+                    // accounts so they don't overwrite the current view.
+                    if (instance != currentInstance)
+                        return;
                     if (auto ch = instance->getChannel(threadId))
                         channelTreeModel->showTemporaryThread(*ch, acc);
                 } else {
@@ -491,28 +592,45 @@ void MainWindow::setupPermanentConnections(Core::ClientInstance *instance)
 
     // todo: i dont really like the refresh users logic rn
     connect(instance, &Core::ClientInstance::guildRoleCreated, this,
-            [this](const Discord::GuildRoleCreate &event) {
-                if (event.guildId.hasValue())
+            [this, instance](const Discord::GuildRoleCreate &event) {
+                if (event.guildId.hasValue()) {
+                    if (instance != currentInstance)
+                        return;
                     refreshGuildRoleData(event.guildId.get());
+                }
             });
 
     connect(instance, &Core::ClientInstance::guildRoleUpdated, this,
-            [this](const Discord::GuildRoleUpdate &event) {
-                if (event.guildId.hasValue())
+            [this, instance](const Discord::GuildRoleUpdate &event) {
+                if (event.guildId.hasValue()) {
+                    if (instance != currentInstance)
+                        return;
                     refreshGuildRoleData(event.guildId.get());
+                }
             });
 
     connect(instance, &Core::ClientInstance::guildRoleDeleted, this,
-            [this](const Discord::GuildRoleDelete &event) {
-                if (event.guildId.hasValue())
+            [this, instance](const Discord::GuildRoleDelete &event) {
+                if (event.guildId.hasValue()) {
+                    if (instance != currentInstance)
+                        return;
                     refreshGuildRoleData(event.guildId.get());
+                }
             });
+
+    // permission-relevant gateway events invalidate the PermissionManager
+    // cache in ClientInstance; re-run the channel filter so visibility
+    // updates immediately instead of waiting for a selection change
+    connect(instance, &Core::ClientInstance::permissionsChanged, this,
+            [this](Core::Snowflake) { channelFilterProxy->invalidateFilter(); });
 
     connect(instance, &Core::ClientInstance::readStateChanged, this,
             [this, instance](Core::Snowflake channelId) {
                 channelTreeModel->updateReadState(channelId, instance->accountId());
                 refreshTabReadStates();
-                forumModel->refreshPost(channelId);
+                // forumModel is bound to the foreground instance only
+                if (instance == currentInstance)
+                    forumModel->refreshPost(channelId);
             });
 
     connect(instance, &Core::ClientInstance::forumBadgeChanged, this,
@@ -533,12 +651,17 @@ void MainWindow::setupPermanentConnections(Core::ClientInstance *instance)
             });
 
     connect(instance, &Core::ClientInstance::customEmojisChanged, this,
-            [this]() {
-                messageInput->refreshEmojiCompleter();
+            [this, instance]() {
+                if (instance != currentInstance)
+                    return;
+                if (messageInput)
+                    messageInput->refreshEmojiCompleter();
             });
 
     connect(instance, &Core::ClientInstance::stickerStoreChanged, this,
             [this, instance](Core::Snowflake guildId) {
+                if (instance != currentInstance)
+                    return;
                 if (guildId != channelController->cachedGuildId)
                     return;
 
@@ -553,18 +676,39 @@ void MainWindow::setupPermanentConnections(Core::ClientInstance *instance)
             });
 
     connect(instance, &Core::ClientInstance::reconnecting, this,
-            [this](int attempt, int maxAttempts) {
+            [this, instance](int attempt, int maxAttempts) {
+                if (instance != currentInstance)
+                    return;
                 connectionBanner->showReconnecting(attempt, maxAttempts);
             });
 
     connect(instance, &Core::ClientInstance::stateChanged, this,
-            [this](Core::ConnectionState state) {
-                if (state == Core::ConnectionState::Connected)
+            [this, instance](Core::ConnectionState state) {
+                if (instance != currentInstance)
+                    return;
+                // Lightweight global connection feedback: while the foreground
+                // account is connecting, say so in the status bar; clear once
+                // connected or fully disconnected. The banner handles reconnects.
+                switch (state) {
+                case Core::ConnectionState::Connecting:
+                    statusBar()->showMessage(tr("Connecting to Discord…"));
+                    break;
+                case Core::ConnectionState::Connected:
                     connectionBanner->hide();
+                    statusBar()->clearMessage();
+                    break;
+                case Core::ConnectionState::Disconnected:
+                    statusBar()->clearMessage();
+                    break;
+                default:
+                    break;
+                }
             });
 
     connect(instance, &Core::ClientInstance::authenticationFailed, this,
-            [this](const Core::AccountInfo &info) {
+            [this, instance](const Core::AccountInfo &info) {
+                if (instance != currentInstance)
+                    return;
                 connectionBanner->hide();
                 const QString accountLabel = info.displayName.isEmpty() ? info.username
                                                                         : info.displayName;
@@ -673,13 +817,23 @@ void MainWindow::setupUi()
     pinnedMessagesButton->setCursor(Qt::PointingHandCursor);
     connect(pinnedMessagesButton, &QToolButton::clicked, this, &MainWindow::openPinnedMessages);
 
+    channelNameLabel = new QLabel(rightSideWidget);
+    {
+        QFont nameFont = channelNameLabel->font();
+        nameFont.setBold(true);
+        channelNameLabel->setFont(nameFont);
+    }
+    channelNameLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    channelNameLabel->setMinimumWidth(0);
+    channelNameLabel->installEventFilter(this);
+
     channelToolbar = new QWidget(rightSideWidget);
     channelToolbar->setObjectName("channelToolbar");
     channelToolbar->setAttribute(Qt::WA_StyledBackground, true);
     auto *channelToolbarLayout = new QHBoxLayout(channelToolbar);
     channelToolbarLayout->setContentsMargins(8, 3, 8, 3);
     channelToolbarLayout->setSpacing(4);
-    channelToolbarLayout->addStretch(1);
+    channelToolbarLayout->addWidget(channelNameLabel, 1);
     channelToolbarLayout->addWidget(pinnedMessagesButton, 0);
     channelToolbarLayout->addWidget(threadBrowserButton, 0);
     channelToolbar->setStyleSheet(
@@ -690,6 +844,15 @@ void MainWindow::setupUi()
     chatView->setFont(Core::Theme::Manager::instance().font(Core::Theme::FontRole::Message));
     messageInput = new MessageInput(rightSideWidget);
     messageInput->setCompact(QSettings().value("ui/compactInput", false).toBool());
+
+    connect(chatView, &ChatView::messageJumpLoadStarted, this, [this]() {
+        if (messageInput)
+            messageInput->setSendBlocked(true);
+    });
+    connect(chatView, &ChatView::messageJumpLoadFinished, this, [this](bool) {
+        if (messageInput)
+            messageInput->setSendBlocked(false);
+    });
     typingIndicator = new TypingIndicator(rightSideWidget);
     slowModeIndicator = new SlowModeIndicator(rightSideWidget);
 
@@ -814,6 +977,21 @@ void MainWindow::setupUi()
                                     memberListView->viewport()->mapToGlobal(pos));
             });
 
+    connect(memberListView, &QListView::clicked, this, [this](const QModelIndex &idx) {
+        if (!idx.isValid())
+            return;
+        if (idx.data(MemberListModel::ItemTypeRole).toInt() != static_cast<int>(Core::MemberListItem::Type::Member))
+            return;
+        if (!currentInstance)
+            return;
+        Snowflake userId = idx.data(MemberListModel::UserIdRole).toULongLong();
+        Snowflake guildId = currentInstance->memberList()->currentGuildId();
+        QPoint globalPos =
+                memberListView->viewport()->mapToGlobal(memberListView->visualRect(idx).center());
+        (new UserProfilePopup(session->getImageManager(), currentInstance, userId, guildId, this))
+                ->showAt(globalPos);
+    });
+
     leftSideWidget = buildLeftSide();
 
     mainSplitter = new Splitter(this);
@@ -902,7 +1080,9 @@ void MainWindow::setupUi()
         }
 
         Snowflake replyTo = messageInput->replyTargetMessageId();
-        currentInstance->messages()->sendMessage(channelId, text, replyTo, attachments);
+        const QString nonce = currentInstance->messages()->sendMessage(channelId, text, replyTo, attachments);
+        chatModel->addPendingNonce(nonce);
+        qCDebug(LogCore) << "Sending message with nonce" << nonce << "in channel" << channelId;
 
         int rateLimit = currentInstance->getChannelRateLimit(channelId);
         Snowflake userId = currentInstance->accountId();
@@ -920,9 +1100,14 @@ void MainWindow::setupUi()
     connect(chatView, &ChatView::historyRequested, this, [this]() {
         Snowflake oldestId = chatModel->getOldestMessageId();
 
-        if (currentInstance && oldestId.isValid())
+        if (currentInstance && oldestId.isValid()) {
             currentInstance->messages()->requestLoadHistory(chatModel->getActiveChannelId(),
                                                             oldestId);
+        } else {
+            // No request was sent (e.g. empty channel) — release the fetch
+            // gate so isFetchingTop isn't stuck true forever.
+            chatView->onHistoryRequestFailed();
+        }
     });
 
     connect(chatView, &ChatView::filesDropped, this, [this](const QList<QUrl> &urls) {
@@ -1813,6 +1998,54 @@ void MainWindow::showUserContextMenu(Snowflake userId, Snowflake guildId, QPoint
 void MainWindow::selectChannelInTree(Snowflake channelId)
 {
     channelController->selectChannelInTree(channelId);
+}
+
+void MainWindow::jumpToMessage(Snowflake channelId, Snowflake messageId)
+{
+    selectChannelInTree(channelId);
+
+    if (!messageId.isValid())
+        return;
+
+    // If the message is already present, scroll immediately.
+    if (chatModel->rowForMessage(messageId) >= 0) {
+        chatView->scrollToMessage(messageId);
+        return;
+    }
+
+    // Otherwise wait for the model to populate after the channel switch, then
+    // scroll once the target row exists. A 5-second safety timeout prevents
+    // leaking the connections if the message never loads.
+    auto *rowsConn = new QMetaObject::Connection;
+    auto *resetConn = new QMetaObject::Connection;
+
+    auto cleanup = [rowsConn, resetConn]() {
+        disconnect(*rowsConn);
+        disconnect(*resetConn);
+        delete rowsConn;
+        delete resetConn;
+    };
+
+    *rowsConn = connect(chatModel, &QAbstractItemModel::rowsInserted, this,
+                        [this, messageId, cleanup](const QModelIndex &parent, int first, int last) {
+                            Q_UNUSED(parent)
+                            Q_UNUSED(first)
+                            Q_UNUSED(last)
+                            if (chatModel->rowForMessage(messageId) < 0)
+                                return;
+                            chatView->scrollToMessage(messageId);
+                            cleanup();
+                        });
+
+    *resetConn = connect(chatModel, &QAbstractItemModel::modelReset, this,
+                         [this, messageId, cleanup]() {
+                             if (chatModel->rowForMessage(messageId) < 0)
+                                 return;
+                             chatView->scrollToMessage(messageId);
+                             cleanup();
+                         });
+
+    QTimer::singleShot(5000, this, cleanup);
 }
 
 void MainWindow::showUserProfile(Core::Snowflake userId, Core::Snowflake guildId)

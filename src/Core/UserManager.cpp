@@ -8,6 +8,12 @@ namespace Core {
 UserManager::UserManager(Snowflake accountId, QObject *parent)
     : QObject(parent), userRepo(accountId), memberRepo(accountId)
 {
+    // QCache defaults to maxCost 100 with cost 1 per insert, so after ~100
+    // entries everything evicts and getUser()/getMember() fall through to
+    // synchronous SQLite on the UI thread. Large guilds hold thousands of
+    // users; size the caches to keep them memory-resident.
+    userCache.setMaxCost(10000);
+    memberCache.setMaxCost(10000);
 }
 
 UserManager::~UserManager() {}

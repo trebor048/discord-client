@@ -18,6 +18,21 @@ const QVector<EmojiCatalogItem> &unicodeEmojiData()
     return items;
 }
 
+// Hash index over unicodeEmojiData() so per-emoji lookups are O(1) instead of
+// scanning the whole (~4k entry) table for every recents/favorites entry.
+const QHash<QString, int> &unicodeIndexByEmoji()
+{
+    static const QHash<QString, int> index = [] {
+        QHash<QString, int> map;
+        const auto &data = unicodeEmojiData();
+        map.reserve(data.size());
+        for (int i = 0; i < data.size(); ++i)
+            map.insert(data[i].unicodeEmoji, i);
+        return map;
+    }();
+    return index;
+}
+
 QString normalizeQuery(const QString &text)
 {
     return text.trimmed().toCaseFolded();
@@ -165,11 +180,7 @@ bool EmojiCatalog::isSupportedSelection(const QString &value)
         return customEmojiRegistry().contains(parsed->customId);
     }
 
-    for (const auto &item : unicodeEmojiData()) {
-        if (item.unicodeEmoji == value)
-            return true;
-    }
-    return false;
+    return unicodeIndexByEmoji().contains(value);
 }
 
 EmojiSelectionValue EmojiCatalog::selectionForUnicode(const QString &unicodeEmoji)
@@ -189,14 +200,29 @@ std::optional<EmojiSelectionValue> EmojiCatalog::selectionForRaw(const QString &
         return std::nullopt;
     }
 
-    for (const auto &item : unicodeEmojiData()) {
-        if (item.unicodeEmoji == value) {
-            EmojiSelectionValue selection;
-            selection.raw = value;
-            return selection;
-        }
+    if (unicodeIndexByEmoji().contains(value)) {
+        EmojiSelectionValue selection;
+        selection.raw = value;
+        return selection;
     }
     return std::nullopt;
+}
+
+const EmojiCatalogItem *EmojiCatalog::itemForUnicode(const QString &unicodeEmoji)
+{
+    const auto it = unicodeIndexByEmoji().constFind(unicodeEmoji);
+    if (it == unicodeIndexByEmoji().constEnd())
+        return nullptr;
+    return &unicodeEmojiData()[it.value()];
+}
+
+std::optional<EmojiCatalogItem> EmojiCatalog::itemForCustomId(const QString &customId)
+{
+    const QMutexLocker locker(&customEmojiMutex());
+    const auto it = customEmojiRegistry().constFind(customId);
+    if (it == customEmojiRegistry().constEnd())
+        return std::nullopt;
+    return it.value();
 }
 
 void EmojiCatalog::registerCustomEmoji(const EmojiCatalogItem &item)

@@ -171,6 +171,26 @@ void MessageManager::requestLoadChannel(Snowflake channelId)
             });
 }
 
+void MessageManager::requestMessage(Snowflake channelId, Snowflake messageId)
+{
+    QPointer<MessageManager> guard = this;
+    client->fetchMessage(channelId, messageId,
+                         [this, guard, channelId, messageId](const Result<QList<Discord::Message>> &result) {
+                             if (!guard)
+                                 return;
+
+                             if (!result.success() || result.value.value().isEmpty()) {
+                                 emit messageJumpFailed(channelId, messageId);
+                                 return;
+                             }
+
+                             onApiMessagesReceived(result.value.value(),
+                                                   Discord::Client::MessageLoadType::Jump,
+                                                   channelId);
+                             emit messageJumpReady(channelId, messageId);
+                         });
+}
+
 void MessageManager::requestLoadHistory(Snowflake channelId, Snowflake beforeId)
 {
     if (historyDebounce.contains(channelId))
@@ -178,7 +198,8 @@ void MessageManager::requestLoadHistory(Snowflake channelId, Snowflake beforeId)
 
     if (lowestKnownId.contains(channelId)) {
         // nothing to see here
-        if (lowestKnownId[channelId] >= beforeId) {
+        const auto &known = lowestKnownId[channelId];
+        if (!known.has_value() || *known >= beforeId) {
             emit messagesReceived({
                     true,
                     Discord::Client::MessageLoadType::History,
@@ -273,12 +294,51 @@ void MessageManager::cacheMessages(Snowflake channelId, const QList<Discord::Mes
         return;
 
     auto &order = channelMessages[channelId];
-    for (const auto &msg : msgs) {
+
+    // Cache message objects (the QCache owns the heap copies).
+    for (const auto &msg : msgs)
         messageCache.insert(msg.id, new Discord::Message(msg));
-        auto it = std::lower_bound(order.begin(), order.end(), msg.id);
-        if (it == order.end() || *it != msg.id.get())
-            order.insert(it, msg.id);
+
+    if (order.empty()) {
+        for (const auto &msg : msgs)
+            order.push_back(msg.id);
+    } else if (msgs.first().id >= order.back()) {
+        // Common fast path: incoming batch is entirely newer than what we have
+        // (Latest / new message batches). Append in O(n).
+        for (const auto &msg : msgs)
+            order.push_back(msg.id);
+    } else if (msgs.last().id <= order.front()) {
+        // History batches are entirely older; prepend in O(n).
+        for (auto it = msgs.crbegin(); it != msgs.crend(); ++it)
+            order.push_front(it->id);
+    } else {
+        // General merge of two sorted ranges. This is rare in practice.
+        std::deque<Snowflake> merged;
+        auto oit = order.begin();
+        auto mit = msgs.begin();
+        while (oit != order.end() && mit != msgs.end()) {
+            if (*oit < mit->id) {
+                merged.push_back(*oit++);
+            } else if (*oit > mit->id) {
+                merged.push_back(mit->id);
+                ++mit;
+            } else {
+                merged.push_back(*oit++);
+                ++mit; // duplicate
+            }
+        }
+        while (oit != order.end())
+            merged.push_back(*oit++);
+        while (mit != msgs.end())
+            merged.push_back(mit->id), ++mit;
+        order = std::move(merged);
     }
+
+    // bound per-channel ID lists — the message cache is capped at 1000 entries
+    // anyway, so retaining unbounded ID lists only wastes memory
+    constexpr qsizetype MaxChannelMessageIds = 2'000;
+    while (order.size() > MaxChannelMessageIds)
+        order.pop_front();
 }
 
 void MessageManager::onMessageCreated(const Discord::Message &message)
@@ -287,17 +347,19 @@ void MessageManager::onMessageCreated(const Discord::Message &message)
     // duplicate entries — the preview used a local-only Snowflake ID, but
     // the real message from Discord now carries the server-assigned one.
     if (message.nonce.hasValue() && !message.nonce->isEmpty()) {
-        const QString &nonce = message.nonce.get();
-        for (const Snowflake &cachedId : messageCache.keys()) {
-            const Discord::Message *cached = messageCache.object(cachedId);
-            if (cached && cached->nonce.hasValue() && cached->nonce.get() == nonce) {
-                Snowflake channelId = cached->channelId;
-                if (channelMessages.contains(channelId)) {
-                    auto &order = channelMessages[channelId];
-                    order.erase(std::remove(order.begin(), order.end(), cachedId), order.end());
-                }
-                messageCache.remove(cachedId);
-                break;
+        auto it = pendingSends.find(message.nonce.get());
+        if (it != pendingSends.end()) {
+            Snowflake cachedId = it->messageId;
+            Snowflake channelId = it->channelId;
+            const QString nonce = it.key();
+            pendingSends.erase(it);
+
+            emit messageSendSucceeded(nonce);
+
+            messageCache.remove(cachedId);
+            if (channelMessages.contains(channelId)) {
+                auto &order = channelMessages[channelId];
+                order.erase(std::remove(order.begin(), order.end(), cachedId), order.end());
             }
         }
     }
@@ -337,7 +399,7 @@ void MessageManager::onMessageUpdated(const Discord::Message &message)
     if (message.presentKeys.contains(QStringLiteral("reactions")))
         repo.updateReactionsJson(merged.id, merged.reactionsJson);
 
-    emit messagesReceived({ true, Discord::Client::MessageLoadType::Created, message.channelId, { merged } });
+    emit messagesReceived({ true, Discord::Client::MessageLoadType::Updated, message.channelId, { merged } });
 }
 
 void MessageManager::onMessageDeleted(const Discord::MessageDelete &event)
@@ -359,16 +421,60 @@ void MessageManager::onMessageDeleted(const Discord::MessageDelete &event)
     emit messageDeleted(channelId, messageId);
 }
 
+void MessageManager::onMessagesDeletedBulk(const Discord::MessageDeleteBulk &event)
+{
+    if (!event.channelId.hasValue() || !event.ids.hasValue())
+        return;
+
+    Snowflake channelId = event.channelId.get();
+
+    for (Snowflake messageId : event.ids.get()) {
+        messageCache.remove(messageId);
+
+        if (channelMessages.contains(channelId)) {
+            auto &order = channelMessages[channelId];
+            auto it = std::find(order.begin(), order.end(), messageId);
+            if (it != order.end())
+                order.erase(it);
+        }
+
+        repo.markMessageDeleted(messageId);
+
+        emit messageDeleted(channelId, messageId);
+    }
+}
+
 void MessageManager::onMessageSendFailed(const QString &nonce, const QString &error)
 {
     qCWarning(LogCore) << "Message send failed for nonce" << nonce << ":" << error;
 
+    auto it = pendingSends.find(nonce);
+    if (it == pendingSends.end()) {
+        emit messageErrored(nonce);
+        return;
+    }
+
+    // Remove the pending preview entirely — a failed send must not linger in
+    // the UI as a ghost message.
+    Snowflake channelId = it->channelId;
+    Snowflake messageId = it->messageId;
+    pendingSends.erase(it);
+
+    messageCache.remove(messageId);
+    if (channelMessages.contains(channelId)) {
+        auto &order = channelMessages[channelId];
+        auto oit = std::find(order.begin(), order.end(), messageId);
+        if (oit != order.end())
+            order.erase(oit);
+    }
+
+    emit messageDeleted(channelId, messageId);
     emit messageErrored(nonce);
 }
 
-void MessageManager::sendMessage(Snowflake channelId, const QString &content,
-                                 Snowflake replyToMessageId,
-                                 const QList<PendingAttachment> &attachments)
+QString MessageManager::sendMessage(Snowflake channelId, const QString &content,
+                                    Snowflake replyToMessageId,
+                                    const QList<PendingAttachment> &attachments)
 {
     Snowflake nonceId = Snowflake::generateNonce();
     QString nonce = QString::number(nonceId);
@@ -420,7 +526,7 @@ void MessageManager::sendMessage(Snowflake channelId, const QString &content,
     for (const auto &att : outgoing) {
         if (att.data.isEmpty() && att.filePath.isEmpty()) {
             emit messageErrored(nonce);
-            return;
+            return nonce;
         }
     }
 
@@ -440,17 +546,26 @@ void MessageManager::sendMessage(Snowflake channelId, const QString &content,
     bool jumbo = Markdown::Parser::isEmojiOnly(ast);
     preview.parsedContentCached = parser->toHtml(ast, jumbo);
 
+    pendingSends.insert(nonce, { channelId, nonceId });
+
+    // Notify listeners before the synchronous Created batch is emitted so
+    // they can register this nonce as a known local pending send.
+    emit messageSendPending(nonce);
+
     // get our fake preview in
     emit messagesReceived(
             { true, Discord::Client::MessageLoadType::Created, channelId, { preview } });
 
     client->sendMessage(channelId, content, nonce, replyToMessageId, outgoing);
+    return nonce;
 }
 
 void MessageManager::cancelSend(Snowflake channelId, const QString &nonce)
 {
     if (!client->cancelMessageSend(nonce))
         return;
+
+    pendingSends.remove(nonce);
 
     Snowflake nonceId(nonce.toULongLong());
     messageCache.remove(nonceId);
@@ -547,7 +662,7 @@ void MessageManager::emitReactionUpdate(Discord::Message &msg)
     rebuildReactionsJson(msg);
     messageCache.insert(msg.id, new Discord::Message(msg));
     repo.saveMessages({ msg });
-    emit messagesReceived({ true, Discord::Client::MessageLoadType::Created, msg.channelId, { msg } });
+    emit messagesReceived({ true, Discord::Client::MessageLoadType::Updated, msg.channelId, { msg } });
 }
 
 static void applyReactionAdd(QList<Discord::Reaction> &reactions,
@@ -797,12 +912,13 @@ void MessageManager::onApiMessagesReceived(const QList<Discord::Message> &messag
     std::sort(sortedMessages.begin(), sortedMessages.end(),
               [](const auto &a, const auto &b) { return a.id.get() < b.id.get(); });
 
-    if (type == Discord::Client::MessageLoadType::Latest ||
-        type == Discord::Client::MessageLoadType::History) {
+    if (type == Discord::Client::MessageLoadType::History) {
         // hit the end probably
         // maybe 0 could happen mistakenly prob not tho
-        if (sortedMessages.size() == 0)
-            lowestKnownId[channelId] = 0;
+        // only history loads prove exhaustion — a partial Latest fetch says
+        // nothing about how far back the channel's history goes
+        if (sortedMessages.isEmpty())
+            lowestKnownId[channelId] = std::nullopt;
         else if (sortedMessages.size() < 30)
             lowestKnownId[channelId] = sortedMessages.first().id;
     }
@@ -818,8 +934,13 @@ void MessageManager::onApiMessagesReceived(const QList<Discord::Message> &messag
 
     if (type == Discord::Client::MessageLoadType::Latest) {
         fetchedChannels.insert(channelId);
-        // channel load means channelMessages should be fresh
-        channelMessages[channelId].clear();
+        // Drop the stale tail covered by this fresh fetch, but retain older
+        // history IDs below the fetched range so loaded history survives.
+        if (!sortedMessages.isEmpty()) {
+            auto &order = channelMessages[channelId];
+            auto it = std::lower_bound(order.begin(), order.end(), sortedMessages.first().id);
+            order.erase(it, order.end());
+        }
     }
 
     cacheMessages(channelId, sortedMessages);

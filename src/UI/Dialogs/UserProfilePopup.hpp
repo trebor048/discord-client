@@ -32,6 +32,10 @@ public:
                      QWidget *parent = nullptr);
     ~UserProfilePopup() override;
 
+    // Show the popup anchored near a global position (e.g. the click point)
+    // instead of centered over the parent window.
+    void showAt(const QPoint &globalPos);
+
 protected:
     void showEvent(QShowEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
@@ -56,6 +60,7 @@ private:
     void loadCachedNote();
     void saveNote();
     void positionOverParent();
+    void positionNear(const QPoint &globalPos);
     void requestProfile();
 
     [[nodiscard]] std::optional<Discord::User> cachedUser() const;
@@ -73,6 +78,9 @@ private:
     QPointer<Core::ClientInstance> instance;
     Core::Snowflake userId;
     Core::Snowflake guildId;
+
+    QPoint requestedPos;
+    bool hasRequestedPos = false;
 
     bool guildView = true;
     bool hasProfile = false;

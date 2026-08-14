@@ -51,18 +51,26 @@ QString guildHeaderText(const QList<Core::EmojiCatalogItem> &items)
 }
 
 constexpr int kDialogMinWidth = 720;
-constexpr int kGifCacheMaxEntries = 200; // max animated emoji to cache to prevent memory growth
+// Raw GIF payloads are tens of KB to several MB each, so bound the cache by
+// total bytes rather than entry count to keep memory usage predictable.
+constexpr qsizetype kGifCacheMaxBytes = 32 * 1024 * 1024;
+constexpr int kStaticIconCacheMaxEntries = 1000;
+constexpr int kMaxDisplayedSearchResults = 200;
 
-// Evict the oldest entry from gifCache when it exceeds the limit
+// Evict entries from gifCache until the total byte budget (minus the entry
+// that was just inserted) fits within kGifCacheMaxBytes.
 void pruneGifCache(QHash<QString, QByteArray> &cache, const QString &newKey)
 {
-    if (cache.size() < kGifCacheMaxEntries)
-        return;
-    // Remove the first entry that isn't the one we just inserted
-    auto it = cache.begin();
-    if (it.key() == newKey && cache.size() > 1)
-        ++it;
-    cache.erase(it);
+    qsizetype totalBytes = 0;
+    for (auto it = cache.constBegin(); it != cache.constEnd(); ++it)
+        totalBytes += it.value().size();
+    while (totalBytes > kGifCacheMaxBytes && cache.size() > 1) {
+        auto it = cache.begin();
+        if (it.key() == newKey)
+            ++it;
+        totalBytes -= it.value().size();
+        cache.erase(it);
+    }
 }
 
 QIcon renderUnicodeEmojiIcon(const QString &emojiText, int size)
@@ -128,6 +136,9 @@ EmojiPickerDialog::EmojiPickerDialog(QWidget *parent) : QDialog(parent)
     sectionTabs->addTab(new QWidget(sectionTabs), tr("Recents"));
     sectionTabs->addTab(new QWidget(sectionTabs), tr("Favorites"));
     sectionTabs->addTab(new QWidget(sectionTabs), tr("Server"));
+    // The Server tab is the default view; the initial rebuildResults() at the
+    // end of the constructor picks this up.
+    sectionTabs->setCurrentIndex(static_cast<int>(Section::Server));
     outer->addWidget(sectionTabs);
 
     // Category quick-jump bar
@@ -297,12 +308,28 @@ void EmojiPickerDialog::setSearchPlaceholder(const QString &text)
 
 void EmojiPickerDialog::setOrderedGuildIds(const QStringList &guildIds)
 {
+    if (orderedGuildIds == guildIds)
+        return;
     orderedGuildIds = guildIds;
+    rebuildServerSectionIfStale();
 }
 
 void EmojiPickerDialog::setCurrentGuildId(const QString &guildId)
 {
+    if (currentGuildId == guildId)
+        return;
     currentGuildId = guildId;
+    rebuildServerSectionIfStale();
+}
+
+// The constructor runs rebuildResults() before callers can push the guild
+// ordering, so the Server grid is initially built with empty ordering state.
+// When ordering arrives later while the Server tab is showing, rebuild it.
+void EmojiPickerDialog::rebuildServerSectionIfStale()
+{
+    if (!isServerSectionActive())
+        return;
+    rebuildResults();
 }
 
 void EmojiPickerDialog::onSearchDebounced()
@@ -488,7 +515,11 @@ void EmojiPickerDialog::showSkinTonePicker(QToolButton *button, const Core::Emoj
     if (item.unicodeEmoji.isEmpty())
         return;
 
-    const char32_t firstCp = item.unicodeEmoji[0].unicode();
+    const QString &text = item.unicodeEmoji;
+    const QChar first = text.at(0);
+    const char32_t firstCp = (first.isHighSurrogate() && text.size() > 1 && text.at(1).isLowSurrogate())
+            ? QChar::surrogateToUcs4(first, text.at(1))
+            : first.unicode();
 
     // Check if it's an emoji modifier base (simplified check)
     bool isModifierBase = (firstCp == 0x261D || firstCp == 0x26F9 ||
@@ -575,6 +606,14 @@ bool EmojiPickerDialog::eventFilter(QObject *watched, QEvent *event)
             if (emojiValue.isEmpty() || !gifCache.contains(emojiValue))
                 return false;
 
+            // Stop and dispose any previous movie for this button before
+            // creating a new one; repeated Enter events would otherwise leak.
+            QMovie *oldMovie = hoveredMovies.take(btn);
+            if (oldMovie) {
+                oldMovie->stop();
+                oldMovie->deleteLater();
+            }
+
             auto *movie = new QMovie(this);
             auto *buf = new QBuffer(movie);
             buf->setData(gifCache.value(emojiValue));
@@ -621,13 +660,17 @@ bool EmojiPickerDialog::eventFilter(QObject *watched, QEvent *event)
     return QDialog::eventFilter(watched, event);
 }
 
-QList<Core::EmojiCatalogItem> EmojiPickerDialog::itemsForSection(Section section) const
+const QList<Core::EmojiCatalogItem> &EmojiPickerDialog::itemsForSection(Section section) const
 {
-    QList<Core::EmojiCatalogItem> items;
+    // The All section uses the catalog's cached list directly — no copy.
+    if (section == Section::All)
+        return Core::EmojiCatalog::items();
+
+    static thread_local QList<Core::EmojiCatalogItem> items;
+    items.clear();
     switch (section) {
     case Section::All:
-        for (const auto &item : Core::EmojiCatalog::items())
-            items.append(item);
+        Q_UNREACHABLE();
         break;
     case Section::Recents: {
         for (const auto &value : EmojiPreferences::recents())
@@ -770,6 +813,11 @@ void EmojiPickerDialog::startCustomIconFetch(const Core::EmojiCatalogItem &item,
             QPixmap pix;
             if (!pix.loadFromData(data))
                 return;
+            // The static icon cache previously grew without bound; cap it so
+            // long sessions in emoji-heavy guilds don't accumulate icons.
+            if (staticEmojiIconCache.size() >= kStaticIconCacheMaxEntries
+                && !staticEmojiIconCache.contains(value))
+                staticEmojiIconCache.erase(staticEmojiIconCache.begin());
             staticEmojiIconCache.insert(value, QIcon(pix));
         }
 
@@ -815,38 +863,41 @@ QList<Core::EmojiCatalogItem> EmojiPickerDialog::filterItems(
     if (needle.isEmpty())
         return items;
 
-    QList<Core::EmojiCatalogItem> filtered;
-    QList<Core::EmojiCatalogItem> exactMatches;
-    QList<Core::EmojiCatalogItem> prefixMatches;
-    QList<Core::EmojiCatalogItem> otherMatches;
+    struct ScoredItem {
+        Core::EmojiCatalogItem item;
+        QString foldedName;
+        int score; // 0 = exact, 1 = prefix, 2 = other
+    };
+
+    QList<ScoredItem> scored;
+    scored.reserve(items.size());
     QSet<QString> seen; // deduplicate by selectionValue
     for (const auto &item : items) {
         const QString val = item.selectionValue();
         if (seen.contains(val))
             continue;
-        const QString name = item.name.toCaseFolded();
-        if (!name.contains(needle))
+        const QString foldedName = item.name.toCaseFolded();
+        if (!foldedName.contains(needle))
             continue;
         seen.insert(val);
-        if (name == needle)
-            exactMatches.append(item);
-        else if (name.startsWith(needle))
-            prefixMatches.append(item);
-        else
-            otherMatches.append(item);
+        int score = 2;
+        if (foldedName == needle)
+            score = 0;
+        else if (foldedName.startsWith(needle))
+            score = 1;
+        scored.append({ item, foldedName, score });
     }
-    auto sortByName = [](QList<Core::EmojiCatalogItem> &bucket) {
-        std::sort(bucket.begin(), bucket.end(), [](const auto &a, const auto &b) {
-            return a.name.toCaseFolded() < b.name.toCaseFolded();
-        });
-    };
-    sortByName(exactMatches);
-    sortByName(prefixMatches);
-    sortByName(otherMatches);
 
-    filtered = exactMatches;
-    filtered.append(prefixMatches);
-    filtered.append(otherMatches);
+    std::sort(scored.begin(), scored.end(), [](const auto &a, const auto &b) {
+        if (a.score != b.score)
+            return a.score < b.score;
+        return a.foldedName < b.foldedName;
+    });
+
+    QList<Core::EmojiCatalogItem> filtered;
+    filtered.reserve(scored.size());
+    for (const auto &s : scored)
+        filtered.append(s.item);
     return filtered;
 }
 
@@ -854,10 +905,8 @@ Core::EmojiCatalogItem EmojiPickerDialog::itemForValue(const QString &value) con
 {
     if (const auto selection = Core::EmojiCatalog::selectionForRaw(value)) {
         if (selection->isCustom) {
-            for (const auto &item : Core::EmojiCatalog::items()) {
-                if (item.isCustom() && item.customId == selection->customId)
-                    return item;
-            }
+            if (const auto item = Core::EmojiCatalog::itemForCustomId(selection->customId))
+                return *item;
             Core::EmojiCatalogItem item;
             item.name = selection->name;
             item.customId = selection->customId;
@@ -866,10 +915,8 @@ Core::EmojiCatalogItem EmojiPickerDialog::itemForValue(const QString &value) con
         }
     }
 
-    for (const auto &item : Core::EmojiCatalog::items()) {
-        if (item.unicodeEmoji == value)
-            return item;
-    }
+    if (const auto *item = Core::EmojiCatalog::itemForUnicode(value))
+        return *item;
     return {};
 }
 
@@ -1042,7 +1089,14 @@ void EmojiPickerDialog::rebuildResults()
     resultsList->show();
 
     resultsList->clear();
+    const int totalMatches = items.size();
+    int displayed = 0;
     for (const auto &item : items) {
+        // Cap displayed rows: every custom emoji row triggers an icon fetch,
+        // so an unbounded list can fire thousands of network requests.
+        if (displayed >= kMaxDisplayedSearchResults)
+            break;
+        ++displayed;
         auto *row = new QListWidgetItem(resultsList);
         row->setData(Qt::UserRole, item.selectionValue());
         row->setToolTip(QStringLiteral(":%1:").arg(item.name));
@@ -1054,6 +1108,12 @@ void EmojiPickerDialog::rebuildResults()
             row->setText(QStringLiteral(" :%1:").arg(item.name));
             row->setIcon(renderUnicodeEmojiIcon(item.unicodeEmoji, iconSize));
         }
+    }
+    if (totalMatches > displayed) {
+        auto *hint = new QListWidgetItem(
+                tr("Showing first %1 of %2 matches — refine your search").arg(displayed).arg(totalMatches),
+                resultsList);
+        hint->setFlags(Qt::NoItemFlags);
     }
 
     selectFirstItem();

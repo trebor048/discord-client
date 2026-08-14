@@ -83,8 +83,14 @@ VoicePage::VoicePage(QWidget *parent)
     auto *processingGroup = new QGroupBox(tr("Audio Processing"), this);
     auto *processingLayout = new QVBoxLayout(processingGroup);
 
-    echoCancellationCheckbox = new QCheckBox(tr("Echo cancellation"), this);
-    echoCancellationCheckbox->setChecked(QSettings().value("voice/echo_cancellation", true).toBool());
+    // No AEC implementation exists in the audio stack yet (miniaudio + rnnoise
+    // provide neither echo cancellation nor a reference-signal path), so this
+    // toggle is shown disabled instead of pretending to do something.
+    echoCancellationCheckbox = new QCheckBox(tr("Echo cancellation (not yet implemented)"), this);
+    echoCancellationCheckbox->setEnabled(false);
+    echoCancellationCheckbox->setChecked(false);
+    echoCancellationCheckbox->setToolTip(
+            tr("The audio engine does not support echo cancellation yet."));
     processingLayout->addWidget(echoCancellationCheckbox);
 
     noiseSuppressionCheckbox = new QCheckBox(tr("Noise suppression"), this);
@@ -128,7 +134,7 @@ VoicePage::VoicePage(QWidget *parent)
             this, [this](double val) {
                 QSettings().setValue("voice/input_sensitivity", val);
                 if (voiceManager)
-                    voiceManager->setVadThreshold(static_cast<float>(val));
+                    voiceManager->setVadSensitivity(static_cast<float>(val));
             });
     connect(pushToTalkCheckbox, &QCheckBox::toggled, this, [this](bool checked) {
         QSettings().setValue("voice/push_to_talk", checked);
@@ -138,9 +144,6 @@ VoicePage::VoicePage(QWidget *parent)
         recordKeyButton->setText(tr("Press a key..."));
         recordKeyButton->grabKeyboard();
         recordKeyButton->installEventFilter(this);
-    });
-    connect(echoCancellationCheckbox, &QCheckBox::toggled, this, [](bool checked) {
-        QSettings().setValue("voice/echo_cancellation", checked);
     });
     connect(noiseSuppressionCheckbox, &QCheckBox::toggled, this, [this](bool checked) {
         QSettings().setValue("voice/noise_suppression", checked);
@@ -169,8 +172,11 @@ void VoicePage::setVoiceManager(Core::AV::VoiceManager *manager)
 
     inputSensitivitySpin->setValue(QSettings().value("voice/input_sensitivity", 30.0).toDouble());
     pushToTalkCheckbox->setChecked(QSettings().value("voice/push_to_talk", false).toBool());
-    echoCancellationCheckbox->setChecked(QSettings().value("voice/echo_cancellation", true).toBool());
     noiseSuppressionCheckbox->setChecked(QSettings().value("voice/noise_suppression", true).toBool());
+
+    // setValue() only emits when the value changed; push the current setting
+    // explicitly so the manager always has it.
+    voiceManager->setVadSensitivity(static_cast<float>(inputSensitivitySpin->value()));
 
     connect(voiceManager, &Core::AV::VoiceManager::devicesChanged, this, &VoicePage::refreshDevices,
             Qt::UniqueConnection);

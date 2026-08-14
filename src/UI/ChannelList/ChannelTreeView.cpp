@@ -1,7 +1,6 @@
 #include "ChannelTreeView.hpp"
 #include "ChannelFilterProxyModel.hpp"
 #include "ChannelTreeModel.hpp"
-#include "Core/AnimationUtils.hpp"
 
 #include <QApplication>
 #include <QColorDialog>
@@ -30,9 +29,16 @@ ChannelTreeView::ChannelTreeView(QWidget *parent)
 
 void ChannelTreeView::setModel(QAbstractItemModel *m)
 {
+    if (auto *oldModel = model()) {
+        disconnect(oldModel, &QAbstractItemModel::rowsInserted, this,
+                   &ChannelTreeView::onRowsInserted);
+    }
+
     QTreeView::setModel(m);
-    if (m)
+
+    if (m) {
         connect(m, &QAbstractItemModel::rowsInserted, this, &ChannelTreeView::onRowsInserted);
+    }
 }
 
 void ChannelTreeView::onRowsInserted(const QModelIndex &parent, int first, int last)
@@ -163,7 +169,6 @@ bool ChannelTreeView::handleMouseEventForExpansion(QMouseEvent *event)
     auto nodeType = static_cast<ChannelNode::Type>(sourceIndex.data(ChannelTreeModel::TypeRole).toInt());
     if (nodeType == ChannelNode::Type::Category) {
         sourceModel->toggleCollapsed(sourceIndex);
-        proxy->invalidateFilter();
         return true;
     } else if (nodeType != ChannelNode::Type::Channel && !isAlwaysExpanded(nodeType) && model()->hasChildren(proxyIndex)) {
         setExpanded(proxyIndex, !isExpanded(proxyIndex));
@@ -341,9 +346,10 @@ Core::Snowflake ChannelTreeView::findAccountIdForIndex(const QModelIndex &source
 
 void ChannelTreeView::currentChanged(const QModelIndex &current, const QModelIndex &previous)
 {
+    // No viewport fade here: selection also changes programmatically (e.g.
+    // when gateway events reselect a channel), and fading the whole
+    // viewport each time read as a periodic full-sidebar flicker.
     QTreeView::currentChanged(current, previous);
-    if (current.isValid())
-        Core::AnimationUtils::fadeIn(viewport(), 120);
 }
 
 } // namespace UI

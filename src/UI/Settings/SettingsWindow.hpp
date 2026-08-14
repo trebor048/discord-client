@@ -12,6 +12,7 @@ namespace Discord {
 class Client;
 }
 namespace Core {
+class ImageManager;
 class NotificationManager;
 namespace AV {
 class VoiceManager;
@@ -26,6 +27,7 @@ public:
     explicit SettingsWindow(QWidget *parent = nullptr);
 
     void setClient(Discord::Client *client);
+    void setImageManager(Core::ImageManager *mgr);
     void setNotificationManager(Core::NotificationManager *mgr);
     void setVoiceManager(Core::AV::VoiceManager *mgr);
 

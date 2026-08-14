@@ -13,6 +13,9 @@
 #include <QProcess>
 #include <QRegularExpression>
 #include <QSystemTrayIcon>
+#include <QPointer>
+
+#include <vector>
 
 #ifdef Q_OS_WIN
 #  include <windows.h>
@@ -30,10 +33,13 @@ namespace {
 bool streamingSoftwareRunning()
 {
 #ifdef Q_OS_WIN
-    DWORD processes[1024];
+    std::vector<DWORD> processes;
     DWORD needed = 0;
-    if (!EnumProcesses(processes, sizeof(processes), &needed))
-        return false;
+    do {
+        processes.resize(processes.empty() ? 1024 : processes.size() * 2);
+        if (!EnumProcesses(processes.data(), static_cast<DWORD>(processes.size() * sizeof(DWORD)), &needed))
+            return false;
+    } while (needed == processes.size() * sizeof(DWORD));
 
     DWORD count = needed / sizeof(DWORD);
     for (DWORD i = 0; i < count; ++i) {
@@ -95,6 +101,7 @@ void NotificationManager::initialize()
     m_toastContainer->setOpacity(m_settings.opacity);
     m_toastContainer->setScale(m_settings.scaleFactor);
     m_toastContainer->setEdgeOffset(m_settings.edgeOffset);
+    m_toastContainer->setAnimationsEnabled(m_settings.animationsEnabled);
 
     connect(m_toastContainer, &UI::ToastContainer::notificationClicked,
             this, [this](const Notification::ToastNotificationData &data) {
@@ -103,6 +110,12 @@ void NotificationManager::initialize()
     connect(m_toastContainer, &UI::ToastContainer::notificationIconClicked,
             this, [this](const Notification::ToastNotificationData &data) {
         if (data.onIconClick) data.onIconClick();
+    });
+    connect(m_toastContainer, &UI::ToastContainer::replySubmitted,
+            this, &NotificationManager::sendToastReply);
+    connect(m_toastContainer, &UI::ToastContainer::groupEntryClicked,
+            this, [this](Core::Snowflake channelId, Core::Snowflake messageId) {
+        emit jumpToMessageRequested(channelId, messageId);
     });
 
     // Connect to client instance signals
@@ -120,10 +133,12 @@ void NotificationManager::initialize()
     }
 
     // Streamer mode check timer
-    auto *streamerTimer = new QTimer(this);
-    streamerTimer->setInterval(5000);
-    connect(streamerTimer, &QTimer::timeout, this, &NotificationManager::checkStreamerMode);
-    streamerTimer->start();
+    if (!m_streamerTimer) {
+        m_streamerTimer = new QTimer(this);
+        connect(m_streamerTimer, &QTimer::timeout, this, &NotificationManager::checkStreamerMode);
+    }
+    m_streamerTimer->setInterval(5000);
+    m_streamerTimer->start();
 }
 
 void NotificationManager::shutdown()
@@ -138,6 +153,9 @@ void NotificationManager::shutdown()
         m_systemTray->deleteLater();
         m_systemTray = nullptr;
     }
+    if (m_streamerTimer) {
+        m_streamerTimer->stop();
+    }
     m_soundManager.shutdown();
     saveSettings();
 }
@@ -145,6 +163,11 @@ void NotificationManager::shutdown()
 void NotificationManager::loadSettings()
 {
     QSettings settings;
+
+    // Master switch, delivery backend, grouping
+    m_settings.enabled = settings.value("notifications/enabled", true).toBool();
+    m_settings.deliveryMode = Notification::stringToDeliveryMode(settings.value("notifications/delivery", "in-app").toString());
+    m_settings.groupingEnabled = settings.value("notifications/grouping", true).toBool();
 
     // Appearance
     m_settings.position = Notification::stringToPosition(settings.value("notifications/position", "bottom-left").toString());
@@ -155,6 +178,10 @@ void NotificationManager::loadSettings()
     m_settings.scaleFactor = settings.value("notifications/scale", 1.0).toDouble();
     m_settings.pauseOnHover = settings.value("notifications/pause_on_hover", true).toBool();
     m_settings.renderImages = settings.value("notifications/render_images", true).toBool();
+    m_settings.animationsEnabled = settings.value("notifications/animations", true).toBool();
+    m_settings.progressBarEnabled = settings.value("notifications/progress_bar", true).toBool();
+    m_settings.coloredAccents = settings.value("notifications/colored_accents", true).toBool();
+
 
     // Notification types
     m_settings.notifyMentions = settings.value("notifications/mentions", true).toBool();
@@ -239,11 +266,27 @@ void NotificationManager::loadSettings()
         m_ignoreUsersSet = QSet<QString>(values.cbegin(), values.cend());
     }
     m_listsLoaded = true;
+
+    // Re-apply live display settings so edits from the settings page take
+    // effect without recreating the container.
+    if (m_toastContainer) {
+        m_toastContainer->setMaxNotifications(m_settings.maxNotifications);
+        m_toastContainer->setOpacity(m_settings.opacity);
+        m_toastContainer->setScale(m_settings.scaleFactor);
+        m_toastContainer->setEdgeOffset(m_settings.edgeOffset);
+        m_toastContainer->setPosition(m_settings.position);
+        m_toastContainer->setAnimationsEnabled(m_settings.animationsEnabled);
+    }
+    m_soundManager.setGlobalVolume(m_settings.globalSoundVolume);
 }
 
 void NotificationManager::saveSettings()
 {
     QSettings settings;
+
+    settings.setValue("notifications/enabled", m_settings.enabled);
+    settings.setValue("notifications/delivery", Notification::deliveryModeToString(m_settings.deliveryMode));
+    settings.setValue("notifications/grouping", m_settings.groupingEnabled);
 
     settings.setValue("notifications/position", Notification::positionToString(m_settings.position));
     settings.setValue("notifications/max_notifications", m_settings.maxNotifications);
@@ -253,6 +296,9 @@ void NotificationManager::saveSettings()
     settings.setValue("notifications/scale", m_settings.scaleFactor);
     settings.setValue("notifications/pause_on_hover", m_settings.pauseOnHover);
     settings.setValue("notifications/render_images", m_settings.renderImages);
+    settings.setValue("notifications/animations", m_settings.animationsEnabled);
+    settings.setValue("notifications/progress_bar", m_settings.progressBarEnabled);
+    settings.setValue("notifications/colored_accents", m_settings.coloredAccents);
 
     settings.setValue("notifications/mentions", m_settings.notifyMentions);
     settings.setValue("notifications/direct_messages", m_settings.notifyDirectMessages);
@@ -318,6 +364,7 @@ void NotificationManager::setSettings(const Notification::NotificationSettings &
         m_toastContainer->setScale(m_settings.scaleFactor);
         m_toastContainer->setEdgeOffset(m_settings.edgeOffset);
         m_toastContainer->setPosition(m_settings.position);
+        m_toastContainer->setAnimationsEnabled(m_settings.animationsEnabled);
     }
 
     m_soundManager.setGlobalVolume(m_settings.globalSoundVolume);
@@ -343,12 +390,14 @@ void NotificationManager::showNotification(const Notification::ToastNotification
         }
     }
 
-    if (!m_toastContainer) return;
-
-    auto *toast = new UI::ToastNotification(data);
-    toast->setOpacity(m_settings.opacity / 100.0);
-    toast->setScale(m_settings.scaleFactor);
-    m_toastContainer->addNotification(toast);
+    // Apply the current display settings to the outgoing notification.
+    Notification::ToastNotificationData toastData = data;
+    toastData.timeout = m_settings.timeoutSeconds;
+    toastData.opacity = m_settings.opacity;
+    toastData.pauseOnHover = m_settings.pauseOnHover;
+    toastData.animationsEnabled = m_settings.animationsEnabled;
+    toastData.showProgressBar = m_settings.progressBarEnabled;
+    toastData.coloredAccents = m_settings.coloredAccents;
 
     // Play sound (only if notification sounds are enabled)
     const bool muteDuringStreamerMode =
@@ -425,19 +474,126 @@ void NotificationManager::showNotification(const Notification::ToastNotification
         }
     }
 
-    // Native notifications
-    if (m_settings.nativeMode != Notification::NotificationSettings::NativeMode::Never) {
-        bool shouldShowNative = false;
-        if (m_settings.nativeMode == Notification::NotificationSettings::NativeMode::Always) {
-            shouldShowNative = true;
-        } else if (m_settings.nativeMode == Notification::NotificationSettings::NativeMode::NotFocused) {
-            shouldShowNative = !QApplication::activeWindow();
-        }
+    // Delivery: in-app toasts, OS-native tray messages, or both. The master
+    // enable switch gates all visual output (sounds are gated separately).
+    if (!m_settings.enabled)
+        return;
 
-        if (shouldShowNative) {
-            showNativeNotification(data);
+    using DeliveryMode = Notification::NotificationSettings::DeliveryMode;
+    using NativeMode = Notification::NotificationSettings::NativeMode;
+
+    if (m_settings.deliveryMode != DeliveryMode::Native)
+        displayToast(toastData);
+
+    bool shouldShowNative = false;
+    switch (m_settings.deliveryMode) {
+    case DeliveryMode::InApp:
+        break;
+    case DeliveryMode::Native:
+        shouldShowNative = true;
+        break;
+    case DeliveryMode::Both:
+        if (m_settings.nativeMode == NativeMode::Always)
+            shouldShowNative = true;
+        else if (m_settings.nativeMode == NativeMode::NotFocused)
+            shouldShowNative = !QApplication::activeWindow();
+        break;
+    }
+
+    if (shouldShowNative)
+        showNativeNotification(toastData);
+}
+
+void NotificationManager::displayToast(const Notification::ToastNotificationData &data)
+{
+    if (!m_toastContainer)
+        return;
+
+    // Grouping: collapse repeats from the same conversation into one toast.
+    // Ignore toasts that are already fading out; merging them would lose the
+    // update and may touch a widget scheduled for deletion.
+    if (m_settings.groupingEnabled && !data.groupKey.isEmpty()) {
+        if (auto *existing = m_toastContainer->findByGroupKey(data.groupKey)) {
+            if (!existing->isDismissing()) {
+                existing->mergeData(data);
+                return;
+            }
         }
     }
+
+    auto *toast = new UI::ToastNotification(data, m_imageManager);
+    toast->setScale(m_settings.scaleFactor);
+    m_toastContainer->addNotification(toast);
+}
+
+void NotificationManager::sendToastReply(UI::ToastNotification *toast,
+                                         const Notification::ToastNotificationData &data,
+                                         const QString &text)
+{
+    if (!toast || !m_instance || !m_instance->messages())
+        return;
+
+    const Core::Snowflake channelId(data.channelId.toULongLong());
+    if (!channelId.isValid()) {
+        toast->setReplyState(UI::ToastNotification::ReplyState::Failed);
+        return;
+    }
+
+    // Message-reference reply when we know which message is being answered.
+    auto *messages = m_instance->messages();
+    const QString nonce = messages->sendMessage(channelId, text, data.messageId);
+    if (nonce.isEmpty()) {
+        toast->setReplyState(UI::ToastNotification::ReplyState::Failed);
+        return;
+    }
+
+    // Track the reply at manager level. This decouples the outcome connection
+    // from MessageManager's lifetime: if the account is switched, MessageManager
+    // is destroyed, but the manager-level slot can still forward the result to
+    // the toast (or clean up on manager destruction).
+    m_pendingReplyToasts[nonce] = toast;
+
+    if (m_replyMessages != messages) {
+        if (m_replyMessages) {
+            disconnect(m_replyMessages, nullptr, this, nullptr);
+        }
+        m_replyMessages = messages;
+        connect(messages, &Core::MessageManager::messageSendSucceeded,
+                this, &NotificationManager::onReplySendSucceeded);
+        connect(messages, &Core::MessageManager::messageErrored,
+                this, &NotificationManager::onReplySendFailed);
+        connect(messages, &QObject::destroyed, this, [this]() {
+            // Any pending replies whose MessageManager disappeared are failures.
+            for (auto it = m_pendingReplyToasts.begin(); it != m_pendingReplyToasts.end(); ++it) {
+                if (auto t = it.value())
+                    t->setReplyState(UI::ToastNotification::ReplyState::Failed);
+            }
+            m_pendingReplyToasts.clear();
+            m_replyMessages = nullptr;
+        });
+    }
+}
+
+void NotificationManager::onReplySendSucceeded(const QString &nonce)
+{
+    auto it = m_pendingReplyToasts.find(nonce);
+    if (it == m_pendingReplyToasts.end())
+        return;
+
+    if (auto toast = it.value())
+        toast->setReplyState(UI::ToastNotification::ReplyState::Sent);
+    m_pendingReplyToasts.erase(it);
+}
+
+void NotificationManager::onReplySendFailed(const QString &nonce)
+{
+    auto it = m_pendingReplyToasts.find(nonce);
+    if (it == m_pendingReplyToasts.end())
+        return;
+
+    if (auto toast = it.value())
+        toast->setReplyState(UI::ToastNotification::ReplyState::Failed);
+    m_pendingReplyToasts.erase(it);
 }
 
 void NotificationManager::dismissAllNotifications()
@@ -456,6 +612,7 @@ void NotificationManager::onMessageCreated(const Discord::Message &message)
 {
     if (!m_instance || !m_instance->discord()) return;
 
+    if (!message.author.hasValue()) return;
     const auto &author = message.author.get();
     const auto authorId = author.id.get();
     const auto channelId = message.channelId.get();
@@ -697,6 +854,17 @@ void NotificationManager::onReady(const Discord::Ready &ready)
     m_cachedCurrentUser = ready.user;
     m_cachedCurrentUserTime = QDateTime::currentMSecsSinceEpoch();
 
+    // Reconnecting/re-READY clears transient notification state so stale voice
+    // and context data from the previous session don't leak into the new one.
+    // Deliberately keep m_activeChannelId intact: after a reconnect the user
+    // is still viewing the same channel, and resetting it would cause messages
+    // in that channel to toast until MainWindow calls setActiveChannel again.
+    m_voiceStates.clear();
+    m_lastVoiceNotification.clear();
+    m_voiceTimestamps.clear();
+    m_lastVoiceUpdate = 0;
+    m_lastNotificationContext.reset();
+
     // Load notify/ignore lists from ready data if needed
 }
 
@@ -790,10 +958,21 @@ Notification::ToastNotificationData NotificationManager::createMessageNotificati
     Notification::ToastNotificationData data;
     data.title = QString("%1 (%2)").arg(getUserDisplayName(author)).arg(channel.name.getOr("#unknown"));
     data.body = message.content.get();
+    data.authorName = getUserDisplayName(author);
     data.channelName = channel.name.getOr("Unknown");
     data.channelId = channelId.toString();
     data.authorId = authorId;
+    data.messageId = message.id.get();
+    data.groupKey = channelId.toString();
     data.badgeColor = Notification::generateBadgeColor(authorId.toString());
+
+    const auto channelType = channel.type.get();
+    if (channelType == Discord::ChannelType::DM || channelType == Discord::ChannelType::GROUP_DM) {
+        data.channelColor = data.badgeColor;
+    } else {
+        data.channelColor = Notification::colorForSnowflake(channelId.toString(),
+                                                            Notification::ColorPalette::Channel);
+    }
 
     if (channel.type.get() == Discord::ChannelType::DM) {
         data.type = Notification::NotificationType::DirectMessage;
@@ -819,9 +998,25 @@ Notification::ToastNotificationData NotificationManager::createMessageNotificati
 
     data.attachments = message.attachments.hasValue() ? message.attachments->size() : 0;
 
-    data.onClick = [this, channelId]() {
+    // Thumbnail: first visible image attachment gets rendered in the toast.
+    if (m_settings.renderImages && message.attachments.hasValue()) {
+        for (const auto &attachment : message.attachments.get()) {
+            if (!attachment.isImage() || attachment.isSpoiler())
+                continue;
+            const QString proxyUrl = attachment.proxyUrl.getOr(QString());
+            data.thumbnailUrl = proxyUrl.isEmpty() ? attachment.url.getOr(QString()) : proxyUrl;
+            break;
+        }
+    }
+
+    // Quick actions: Reply expands an inline composer inside the toast; the
+    // submitted text comes back through ToastContainer::replySubmitted.
+    data.actions = { { QStringLiteral("reply"), tr("Reply") } };
+
+    const auto messageId = message.id.get();
+    data.onClick = [this, channelId, messageId]() {
         if (m_instance) {
-            emit openChannelRequested(channelId);
+            emit jumpToMessageRequested(channelId, messageId);
         }
     };
 
@@ -846,6 +1041,15 @@ Notification::ToastNotificationData NotificationManager::createVoiceNotification
     data.channelId = channelId.toString();
     data.authorId = userId;
     data.badgeColor = Notification::generateBadgeColor(userId.toString());
+
+    const auto channelType = channel.type.get();
+    if (channelType == Discord::ChannelType::DM || channelType == Discord::ChannelType::GROUP_DM) {
+        data.channelColor = data.badgeColor;
+    } else {
+        data.channelColor = Notification::colorForSnowflake(channelId.toString(),
+                                                            Notification::ColorPalette::Channel);
+    }
+
     data.type = action == "joined" ? Notification::NotificationType::VoiceJoin : Notification::NotificationType::VoiceLeave;
 
     if (m_settings.renderImages && user.avatar.hasValue()) {
@@ -884,23 +1088,37 @@ Notification::ToastNotificationData NotificationManager::createRelationshipNotif
         data.iconUrl = Discord::Cdn::userAvatar(user.id.get(), user.avatar.getOr(""), 64).toString();
     }
     data.badgeColor = Notification::generateBadgeColor(relationship.id.get().toString());
+    data.channelColor = data.badgeColor;
     data.type = Notification::NotificationType::FriendRequest;
 
     if (relationship.type.get() == Discord::RelationshipType::FRIEND) {
-        const auto &user = relationship.user.get();
-        data.title = QString("%1 is now your friend").arg(getUserDisplayName(user));
-        data.body = "You can now message them directly.";
-        data.type = Notification::NotificationType::FriendAccepted;
-        data.onClick = [this, userId = user.id.get()]() {
-            emit openDmWithUserRequested(userId);
-        };
+        if (relationship.user.hasValue()) {
+            const auto &user = relationship.user.get();
+            data.title = QString("%1 is now your friend").arg(getUserDisplayName(user));
+            data.body = "You can now message them directly.";
+            data.type = Notification::NotificationType::FriendAccepted;
+            data.onClick = [this, userId = user.id.get()]() {
+                emit openDmWithUserRequested(userId);
+            };
+        } else {
+            data.title = tr("Friend added");
+            data.body = tr("A new friend was added.");
+        }
     } else if (relationship.type.get() == Discord::RelationshipType::INCOMING_REQUEST) {
-        const auto &user = relationship.user.get();
-        data.title = QString("Incoming friend request from %1").arg(getUserDisplayName(user));
-        data.body = "Open friends tab to accept or decline.";
-        data.onClick = [this]() {
-            emit openFriendsTabRequested();
-        };
+        if (relationship.user.hasValue()) {
+            const auto &user = relationship.user.get();
+            data.title = QString("Incoming friend request from %1").arg(getUserDisplayName(user));
+            data.body = "Open friends tab to accept or decline.";
+            data.onClick = [this]() {
+                emit openFriendsTabRequested();
+            };
+        } else {
+            data.title = tr("Incoming friend request");
+            data.body = tr("Open friends tab to accept or decline.");
+            data.onClick = [this]() {
+                emit openFriendsTabRequested();
+            };
+        }
     }
 
     if (relationship.user.hasValue()) {
@@ -1227,6 +1445,8 @@ void NotificationManager::sendTestNotification()
     data.attachments = 0;
     data.channelName = "test-channel";
     data.badgeColor = Notification::generateBadgeColor(QStringLiteral("acheron-test"));
+    data.channelColor = Notification::colorForSnowflake(QStringLiteral("test-channel"),
+                                                        Notification::ColorPalette::Channel);
     data.type = Notification::NotificationType::Custom;
     data.onClick = []() {};
 
@@ -1239,7 +1459,16 @@ void NotificationManager::sendTestNotification()
         }
     }
 
-    showNotification(data);
+    data.actions = { { QStringLiteral("reply"), tr("Reply") } };
+    data.timeout = m_settings.timeoutSeconds;
+    data.opacity = m_settings.opacity;
+    data.pauseOnHover = m_settings.pauseOnHover;
+
+    // Bypass the master enable switch: the preview must always render.
+    if (m_settings.deliveryMode != Notification::NotificationSettings::DeliveryMode::Native)
+        displayToast(data);
+    else
+        showNativeNotification(data);
 }
 
 void NotificationManager::setStreamerModeEnabled(bool enabled)

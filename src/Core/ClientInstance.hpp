@@ -110,6 +110,7 @@ signals:
     void forumBadgeChanged(Snowflake forumId);
     void forumJoinedPostsChanged(Snowflake forumId);
     void guildSettingsChanged(Snowflake guildId);
+    void permissionsChanged(Snowflake guildId);
     void customEmojisChanged();
     void stickerStoreChanged(Core::Snowflake guildId);
     void channelLastMessageUpdated(Snowflake channelId, Snowflake messageId);
@@ -134,6 +135,8 @@ private slots:
     void onGuildRoleDeleted(const Discord::GuildRoleDelete &event);
     void onGuildMembersChunk(const Discord::GuildMembersChunk &chunk);
     void onGuildMemberUpdate(const Discord::GuildMemberUpdate &event);
+    void onGuildMemberAdd(const Discord::GuildMemberUpdate &event);
+    void onGuildMemberRemove(const Discord::GuildMemberRemove &event);
     void onGuildMemberListUpdate(const Discord::GuildMemberListUpdate &update);
     void onMessagesReceived(const MessageRequestResult &result);
     void onMessageCreated(const Discord::Message &msg);

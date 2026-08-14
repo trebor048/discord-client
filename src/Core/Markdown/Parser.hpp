@@ -45,6 +45,10 @@ struct MarkdownRule
     ParseFn parse;
     HtmlOutputFn html;
     QualityFn quality = nullptr;
+    // Possible starting characters for this rule. Empty means "any character"
+    // and the rule is always attempted. Used as a cheap pre-filter so the
+    // parse loop only runs anchored regexes that can possibly match.
+    QSet<QChar> firstChars;
 };
 
 using UserResolverFn = std::function<QString(const QString &userId)>;

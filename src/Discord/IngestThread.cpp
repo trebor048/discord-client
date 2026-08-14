@@ -50,6 +50,19 @@ void IngestThread::push(const QByteArray &data)
     {
         std::lock_guard lock(mutex);
         queue.push_back({ data, generation.load() });
+        queuedBytes += data.size();
+
+        // Drop oldest chunks when the queue exceeds its cap. Dropping is safer
+        // than blocking the network thread (which would starve the websocket
+        // recv loop) — a gap in the compressed stream will surface as a
+        // decompression error and trigger a clean reconnect.
+        while ((queuedBytes > maxQueuedBytes || queue.size() > maxQueuedMessages) &&
+               queue.size() > 1) {
+            qCWarning(LogNetwork) << "Ingest queue overflow (" << queuedBytes
+                                  << "bytes," << queue.size() << "messages) — dropping oldest chunk";
+            queuedBytes -= queue.front().data.size();
+            queue.pop_front();
+        }
     }
 
     cv.notify_one();
@@ -62,6 +75,7 @@ void IngestThread::reset()
     std::lock_guard lock(mutex);
     generation++;
     queue.clear();
+    queuedBytes = 0;
 }
 
 void IngestThread::threadLoop()
@@ -79,6 +93,7 @@ void IngestThread::threadLoop()
 
             data = queue.front().data;
             dataGen = queue.front().generation;
+            queuedBytes -= data.size();
             queue.pop_front();
         }
 

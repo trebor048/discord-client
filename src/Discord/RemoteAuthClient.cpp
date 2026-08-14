@@ -5,6 +5,7 @@
 
 #include "Core/Logging.hpp"
 
+#include <QCoreApplication>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QPointer>
@@ -376,6 +377,13 @@ void RemoteAuthClient::handlePendingTicket(const QJsonObject &obj)
 
     // id:discriminator:avatar:username
     const QStringList parts = QString::fromUtf8(payload).split(':');
+    if (parts.size() < 4 || parts.value(0).isEmpty()) {
+        qCWarning(LogDiscord) << "Remote auth: malformed pending_ticket payload"
+                              << "(expected id:discriminator:avatar:username, got" << parts.size()
+                              << "fields); aborting auth flow";
+        fail(RemoteAuthError::HandshakeFailed);
+        return;
+    }
     const QString userId = parts.value(0);
     const QString avatar = parts.value(2);
     const QString username = parts.value(3);
@@ -407,8 +415,6 @@ void RemoteAuthClient::postLogin(const QString &ticket, std::optional<CaptchaSol
 
     QPointer<RemoteAuthClient> self(this);
     httpThread = std::thread([self, body, ticket, solution, attempt]() {
-        if (!self)
-            return;
         CURL *curl = curl_easy_init();
         QByteArray response;
         long httpCode = 0;
@@ -451,8 +457,12 @@ void RemoteAuthClient::postLogin(const QString &ticket, std::optional<CaptchaSol
             curl_easy_cleanup(curl);
         }
 
+        // Use qApp as the queued-call context: a QPointer checked on this
+        // worker thread could die before delivery, leaving a dangling
+        // context. The QPointer is checked inside the lambda on the UI
+        // thread instead.
         QMetaObject::invokeMethod(
-                self,
+                qApp,
                 [self, ok, httpCode, response, ticket, attempt]() {
                     if (!self || self->done)
                         return;

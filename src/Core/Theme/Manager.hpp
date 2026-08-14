@@ -57,8 +57,15 @@ private:
     QJsonObject toObject(bool includeDefaults) const;
     void loadFromObject(const QJsonObject &obj);
 
+    /// Schedules a coalesced apply()/applyFonts() on the next event-loop turn
+    /// so bursts of mutator calls rebuild the stylesheet only once.
+    void scheduleApply(bool colors, bool fonts);
+
     QHash<Token, QColor> overrides;
     QHash<FontRole, QFont> fontOverrides;
+    bool applyScheduled = false;
+    bool pendingColorApply = false;
+    bool pendingFontApply = false;
 };
 
 } // namespace Theme

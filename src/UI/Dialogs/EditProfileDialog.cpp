@@ -9,6 +9,7 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QImage>
+#include <QImageReader>
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
@@ -162,6 +163,41 @@ void EditProfileDialog::loadProfile()
     });
 }
 
+bool EditProfileDialog::loadImageFile(const QString &path, QByteArray &outData,
+                                      QString &outMimeType)
+{
+    constexpr qint64 kMaxImageBytes = 10 * 1024 * 1024; // 10 MB
+
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        QMessageBox::warning(this, tr("Error"), tr("Could not open the selected image."));
+        return false;
+    }
+    if (file.size() > kMaxImageBytes) {
+        QMessageBox::warning(this, tr("Image Too Large"),
+                             tr("The selected image is larger than 10 MB. "
+                                "Please choose a smaller file."));
+        return false;
+    }
+
+    // Detect the real format from file contents so the data URI carries the
+    // correct MIME type (animated GIF/WebP avatars are not PNG).
+    const QByteArray format = QImageReader::imageFormat(path).toLower();
+    if (format == "png" || format == "gif" || format == "webp") {
+        outMimeType = QStringLiteral("image/") + QString::fromLatin1(format);
+    } else if (format == "jpeg" || format == "jpg") {
+        outMimeType = QStringLiteral("image/jpeg");
+    } else {
+        QMessageBox::warning(this, tr("Unsupported Image"),
+                             tr("The selected file is not a supported image "
+                                "(PNG, JPEG, GIF, or WebP)."));
+        return false;
+    }
+
+    outData = file.readAll();
+    return true;
+}
+
 void EditProfileDialog::onAvatarUpload()
 {
     QString path = QFileDialog::getOpenFileName(this, tr("Select Avatar Image"), {},
@@ -169,11 +205,8 @@ void EditProfileDialog::onAvatarUpload()
     if (path.isEmpty())
         return;
 
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly))
+    if (!loadImageFile(path, avatarData, avatarMimeType))
         return;
-
-    avatarData = file.readAll();
 
     QPixmap pix;
     pix.loadFromData(avatarData);
@@ -189,6 +222,7 @@ void EditProfileDialog::onAvatarUpload()
         avatarPreview->setPixmap(circular);
     } else {
         avatarData.clear();
+        avatarMimeType.clear();
     }
 }
 
@@ -199,11 +233,8 @@ void EditProfileDialog::onBannerUpload()
     if (path.isEmpty())
         return;
 
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly))
+    if (!loadImageFile(path, bannerData, bannerMimeType))
         return;
-
-    bannerData = file.readAll();
 
     QPixmap pix;
     pix.loadFromData(bannerData);
@@ -212,6 +243,7 @@ void EditProfileDialog::onBannerUpload()
                                              Qt::SmoothTransformation));
     } else {
         bannerData.clear();
+        bannerMimeType.clear();
     }
 }
 
@@ -231,13 +263,15 @@ void EditProfileDialog::onSaveClicked()
     // Avatar (base64 data URI)
     if (!avatarData.isEmpty()) {
         QByteArray b64 = avatarData.toBase64();
-        payload["avatar"] = QStringLiteral("data:image/png;base64,") + QString::fromLatin1(b64);
+        payload["avatar"] = QStringLiteral("data:%1;base64,").arg(avatarMimeType)
+                            + QString::fromLatin1(b64);
     }
 
     // Banner (base64 data URI) -- requires premium, may fail
     if (!bannerData.isEmpty()) {
         QByteArray b64 = bannerData.toBase64();
-        payload["banner"] = QStringLiteral("data:image/png;base64,") + QString::fromLatin1(b64);
+        payload["banner"] = QStringLiteral("data:%1;base64,").arg(bannerMimeType)
+                            + QString::fromLatin1(b64);
     }
 
     // Accent color

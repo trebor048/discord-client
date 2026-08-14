@@ -210,13 +210,15 @@ Snowflake ReadStateManager::effectiveAckId(Snowflake channelId, Snowflake guildI
         auto gi = guildInfo.constFind(guildId);
         if (gi != guildInfo.constEnd() && gi->joinedAtMs > 0)
             return Snowflake::fromUnixMs(gi->joinedAtMs);
-        return Snowflake::fromUnixMs(QDateTime::currentMSecsSinceEpoch());
+        // join time unknown — ack of 0 means nothing is considered read,
+        // rather than marking everything up to now as read
+        return Snowflake(0);
     }
 
     if (channelId.isValid())
         return Snowflake::fromUnixMs(channelId.toDateTime().toMSecsSinceEpoch());
 
-    return Snowflake::fromUnixMs(QDateTime::currentMSecsSinceEpoch());
+    return Snowflake(0);
 }
 
 Discord::MessageNotificationLevel ReadStateManager::resolveMessageNotifications(Snowflake guildId,

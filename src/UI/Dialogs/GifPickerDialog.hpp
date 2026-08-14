@@ -99,6 +99,9 @@ private:
 
     bool m_loading = false;
     bool m_hasMore = false;
+    bool m_autoLoadPaused = false; // set past kAutoLoadGifLimit; cleared by "Load more"
+    int m_loadedCount = 0;
+    QPushButton *m_loadMoreButton = nullptr;
     int m_nextRow = 0;
     int m_nextCol = 0;
     int m_requestGeneration = 0; // Bumped on every clear; stale callbacks are discarded
@@ -107,6 +110,9 @@ private:
     static constexpr int kGridColumns = 3;
     static constexpr int kGridCellWidth = 180;
     static constexpr int kGridCellHeight = 130;
+    // Infinite scroll pauses past this many loaded results; the user resumes
+    // it with an explicit "Load more" click so grids can't grow without bound.
+    static constexpr int kAutoLoadGifLimit = 500;
 
     Discord::GifItem m_selected;
     QSet<QNetworkReply *> m_pendingThumbs;

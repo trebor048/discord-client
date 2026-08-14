@@ -23,17 +23,35 @@ PermissionManager::PermissionManager(Snowflake accountId, QObject *parent)
 {
 }
 
+void PermissionManager::insertIntoCache(const CacheKey &key, Discord::Permissions permissions)
+{
+    if (permissionCache.contains(key)) {
+        permissionCache.insert(key, permissions);
+        permissionCacheLru.removeOne(key);
+        permissionCacheLru.append(key);
+        return;
+    }
+
+    while (permissionCache.size() >= MaxPermissionCacheSize && !permissionCacheLru.isEmpty())
+        permissionCache.remove(permissionCacheLru.takeFirst());
+
+    permissionCache.insert(key, permissions);
+    permissionCacheLru.append(key);
+}
+
 Discord::Permissions PermissionManager::getChannelPermissions(Snowflake userId, Snowflake channelId)
 {
     auto cacheKey = qMakePair(userId, channelId);
-    if (permissionCache.contains(cacheKey))
-        return permissionCache.value(cacheKey);
+    auto it = permissionCache.constFind(cacheKey);
+    if (it != permissionCache.constEnd()) {
+        // touch: most recently used goes to the back
+        permissionCacheLru.removeOne(cacheKey);
+        permissionCacheLru.append(cacheKey);
+        return it.value();
+    }
 
     auto permissions = computeChannelPermissions(userId, channelId);
-
-    if (permissionCache.size() >= MaxPermissionCacheSize)
-        permissionCache.erase(permissionCache.begin());
-    permissionCache.insert(cacheKey, permissions);
+    insertIntoCache(cacheKey, permissions);
 
     return permissions;
 }
@@ -65,9 +83,7 @@ void PermissionManager::precomputeGuildPermissions(const Discord::Guild &guild,
                 overwrites);
 
         auto cacheKey = qMakePair(userId, channel.id.get());
-        if (permissionCache.size() >= MaxPermissionCacheSize)
-            permissionCache.erase(permissionCache.begin());
-        permissionCache.insert(cacheKey, permissions);
+        insertIntoCache(cacheKey, permissions);
     }
 }
 
@@ -125,10 +141,12 @@ void PermissionManager::invalidateChannelCache(Snowflake channelId)
 {
     auto it = permissionCache.begin();
     while (it != permissionCache.end()) {
-        if (it.key().second == channelId)
+        if (it.key().second == channelId) {
+            permissionCacheLru.removeOne(it.key());
             it = permissionCache.erase(it);
-        else
+        } else {
             ++it;
+        }
     }
 
     qCDebug(LogCore) << "Invalidated permission cache for channel:" << channelId;
@@ -149,6 +167,7 @@ void PermissionManager::invalidateUserGuildCache(Snowflake userId, Snowflake gui
     while (it != permissionCache.end()) {
         if (it.key().first == userId && channelIds.contains(it.key().second)) {
             invalidated.append(it.key().second);
+            permissionCacheLru.removeOne(it.key());
             it = permissionCache.erase(it);
         } else {
             ++it;

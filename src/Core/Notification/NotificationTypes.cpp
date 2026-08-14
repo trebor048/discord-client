@@ -61,6 +61,23 @@ NotificationSettings::NativeMode stringToNativeMode(const QString &str)
     return NotificationSettings::NativeMode::Never;
 }
 
+QString deliveryModeToString(NotificationSettings::DeliveryMode m)
+{
+    switch (m) {
+    case NotificationSettings::DeliveryMode::InApp: return "in-app";
+    case NotificationSettings::DeliveryMode::Native: return "native";
+    case NotificationSettings::DeliveryMode::Both: return "both";
+    }
+    return "in-app";
+}
+
+NotificationSettings::DeliveryMode stringToDeliveryMode(const QString &str)
+{
+    if (str == "native") return NotificationSettings::DeliveryMode::Native;
+    if (str == "both") return NotificationSettings::DeliveryMode::Both;
+    return NotificationSettings::DeliveryMode::InApp;
+}
+
 QColor generateBadgeColor(const QString &id)
 {
     // Generate a deterministic color from the ID using a hash
@@ -70,6 +87,31 @@ QColor generateBadgeColor(const QString &id)
     int hue = hashValue % 360;
     int sat = 55 + ((hashValue >> 8) % 20);
     int light = 48 + ((hashValue >> 16) % 12);
+
+    return QColor::fromHsl(hue, sat, light);
+}
+
+QColor colorForSnowflake(const QString &seed, ColorPalette palette)
+{
+    QByteArray hash = QCryptographicHash::hash(seed.toUtf8(), QCryptographicHash::Md5);
+    quint32 hashValue = *reinterpret_cast<const quint32 *>(hash.constData());
+
+    int hue = hashValue % 360;
+    int sat;
+    int light;
+
+    switch (palette) {
+    case ColorPalette::Channel:
+        // Channel chips are slightly more muted so they don't fight the author accent.
+        sat = 45 + ((hashValue >> 8) % 15);
+        light = 42 + ((hashValue >> 16) % 12);
+        break;
+    case ColorPalette::Avatar:
+    default:
+        sat = 55 + ((hashValue >> 8) % 20);
+        light = 48 + ((hashValue >> 16) % 12);
+        break;
+    }
 
     return QColor::fromHsl(hue, sat, light);
 }

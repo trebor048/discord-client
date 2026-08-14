@@ -187,6 +187,10 @@ enum class GatewayEvent {
     INTEGRATION_UPDATE,
     INTEGRATION_DELETE,
     CHANNEL_PINS_UPDATE,
+    GUILD_MEMBER_ADD,
+    GUILD_MEMBER_REMOVE,
+    MESSAGE_DELETE_BULK,
+    USER_UPDATE,
 };
 
 enum class RelationshipType {
@@ -265,6 +269,10 @@ inline GatewayEvent parseGatewayEvent(const QString &event)
         { "INTEGRATION_UPDATE", GatewayEvent::INTEGRATION_UPDATE },
         { "INTEGRATION_DELETE", GatewayEvent::INTEGRATION_DELETE },
         { "CHANNEL_PINS_UPDATE", GatewayEvent::CHANNEL_PINS_UPDATE },
+        { "GUILD_MEMBER_ADD", GatewayEvent::GUILD_MEMBER_ADD },
+        { "GUILD_MEMBER_REMOVE", GatewayEvent::GUILD_MEMBER_REMOVE },
+        { "MESSAGE_DELETE_BULK", GatewayEvent::MESSAGE_DELETE_BULK },
+        { "USER_UPDATE", GatewayEvent::USER_UPDATE },
     };
 
     return events.value(event, GatewayEvent::UNKNOWN);

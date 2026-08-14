@@ -9,8 +9,10 @@
 #include <QPushButton>
 #include <QVBoxLayout>
 
+#include "Core/ImageManager.hpp"
 #include "Core/Result.hpp"
 #include "Core/Snowflake.hpp"
+#include "Discord/CdnUrls.hpp"
 #include "Discord/Client.hpp"
 
 namespace Acheron {
@@ -47,7 +49,19 @@ AuthorizedAppsPage::AuthorizedAppsPage(QWidget *parent)
 void AuthorizedAppsPage::setClient(Discord::Client *c)
 {
     client = c;
-    refreshApps();
+    if (imageManager)
+        refreshApps();
+    else
+        pendingRefresh = true;
+}
+
+void AuthorizedAppsPage::setImageManager(Core::ImageManager *manager)
+{
+    imageManager = manager;
+    if (client && pendingRefresh) {
+        pendingRefresh = false;
+        refreshApps();
+    }
 }
 
 void AuthorizedAppsPage::refreshApps()
@@ -85,35 +99,60 @@ void AuthorizedAppsPage::refreshApps()
 
 void AuthorizedAppsPage::addAppEntry(const QJsonObject &app)
 {
-    // OAuth2 token structure: { access_token, client_id, scopes: [...], ... }
-    QString clientId = app.value("client_id").toString();
+    // OAuth2 token structure: { id, application: { id, name, icon, description, ... }, scopes: [...], ... }
+    QJsonObject application = app.value("application").toObject();
+    QString clientId = application.value("id").toString();
+    if (clientId.isEmpty())
+        clientId = app.value("client_id").toString();
+
+    QString name = application.value("name").toString();
+    if (name.isEmpty())
+        name = clientId;
+    QString description = application.value("description").toString();
+    QString iconHash = application.value("icon").toString();
+
+    bool ok = false;
+    quint64 appId = clientId.toULongLong(&ok);
+
     QList<QVariant> scopesVariant = app.value("scopes").toVariant().toList();
     QStringList scopes;
     for (const auto &s : scopesVariant)
         scopes << s.toString();
 
     auto *item = new QListWidgetItem(appsList);
-    item->setData(Qt::UserRole, clientId);
+    item->setData(Qt::UserRole, appId);
 
     auto *widget = new QWidget(this);
     auto *rowLayout = new QHBoxLayout(widget);
     rowLayout->setContentsMargins(4, 4, 4, 4);
 
+    auto *iconLabel = new QLabel(widget);
+    iconLabel->setFixedSize(40, 40);
+    iconLabel->setAlignment(Qt::AlignCenter);
+    rowLayout->addWidget(iconLabel, 0, Qt::AlignTop);
+
     auto *infoLabel = new QLabel(widget);
-    QString displayText = QStringLiteral("<b>%1</b><br><span style=\"color: gray;\">Scopes: %2</span>")
-                             .arg(clientId, scopes.join(", "));
+    QString displayText = QStringLiteral("<b>%1</b>").arg(name.toHtmlEscaped());
+    if (!description.isEmpty())
+        displayText += QStringLiteral("<br>%1").arg(description.toHtmlEscaped());
+    displayText += QStringLiteral("<br><span style=\"color: gray;\">Scopes: %1</span>")
+                           .arg(scopes.join(", ").toHtmlEscaped());
     infoLabel->setText(displayText);
     infoLabel->setTextFormat(Qt::RichText);
+    infoLabel->setWordWrap(true);
     rowLayout->addWidget(infoLabel, 1);
+
+    // Load the app icon via the shared image cache
+    QUrl iconUrl = ok ? Discord::Cdn::applicationIcon(Core::Snowflake(appId), iconHash, 80)
+                      : QUrl();
+    if (imageManager && iconUrl.isValid())
+        imageManager->assign(iconLabel, iconUrl, QSize(40, 40));
 
     auto *revokeBtn = new QPushButton(tr("Revoke Access"), widget);
     revokeBtn->setProperty("client_id", clientId);
     rowLayout->addWidget(revokeBtn);
 
-    connect(revokeBtn, &QPushButton::clicked, this, [this, clientId]() {
-        // client_id may be a snowflake
-        bool ok = false;
-        quint64 appId = clientId.toULongLong(&ok);
+    connect(revokeBtn, &QPushButton::clicked, this, [this, clientId, appId, ok]() {
         if (ok)
             onRevokeApp(appId);
         else
@@ -133,10 +172,9 @@ void AuthorizedAppsPage::onRevokeApp(quint64 appId)
         if (!guard)
             return;
         if (result.success()) {
-            QString idStr = QString::number(appId);
             for (int i = 0; i < appsList->count(); ++i) {
                 QListWidgetItem *item = appsList->item(i);
-                if (item->data(Qt::UserRole).toString() == idStr) {
+                if (item->data(Qt::UserRole).toULongLong() == appId) {
                     delete appsList->takeItem(i);
                     break;
                 }

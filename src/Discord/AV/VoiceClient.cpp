@@ -197,6 +197,8 @@ void VoiceClient::onGatewayDisconnected(VoiceCloseCode code, const QString &reas
 {
     qCWarning(LogVoice) << "Voice gateway disconnected, code:" << code << "reason:" << reason;
 
+    // the gateway only reports terminal disconnects here - resumable reconnects
+    // keep the transport and session state alive so RESUME can pick them back up
     cleanupTransport();
 
     // done if not reconnected
@@ -571,6 +573,22 @@ void VoiceClient::onGatewayResumed()
 
     // assume session intact if we could resume
     if (localSsrc != 0 && !sessionKey.isEmpty()) {
+        // if the transport was torn down while the gateway was away,
+        // re-run the discovery/select-protocol path with the stored Ready data
+        if (!udpTransport && !serverIp.isEmpty()) {
+            qCWarning(LogVoice) << "UDP transport missing after resume, re-running IP discovery";
+
+            setState(State::DiscoveringIP);
+
+            udpTransport = new UdpTransport(this);
+            connect(udpTransport, &UdpTransport::ipDiscovered, this, &VoiceClient::onIpDiscovered);
+            connect(udpTransport, &UdpTransport::ipDiscoveryFailed, this, &VoiceClient::onIpDiscoveryFailed);
+            connect(udpTransport, &UdpTransport::datagramReceived, this, &VoiceClient::onDatagram);
+
+            udpTransport->startIpDiscovery(serverIp, serverPort, localSsrc);
+            return;
+        }
+
         rtpEpoch = std::chrono::steady_clock::now();
         setState(State::Connected);
 

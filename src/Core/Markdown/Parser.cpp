@@ -5,6 +5,8 @@
 
 #include <QRegularExpression>
 
+#include <algorithm>
+
 using Acheron::Core::countUnicodeEmojisSegmented;
 
 namespace Acheron {
@@ -40,6 +42,11 @@ QList<AstNode> Parser::parse(QString source, ParseState state)
             if (state.excludedRules.contains(rule.name))
                 continue;
 
+            // Cheap pre-filter: skip rules whose anchored regex cannot
+            // possibly match the current starting character.
+            if (!rule.firstChars.isEmpty() && !rule.firstChars.contains(source.at(0)))
+                continue;
+
             if (foundMatch && rule.order > currentBestOrder)
                 break;
 
@@ -58,6 +65,13 @@ QList<AstNode> Parser::parse(QString source, ParseState state)
                     quality = rule.quality(capture, state, state.prevCapture);
                 }
 
+                // Tie-breaking: on equal quality the later rule within the
+                // same order wins (>=). Rules sharing an order (e.g. order 21:
+                // user/channel/customEmoji/strong/u) must therefore be
+                // mutually exclusive at any given position - the mention and
+                // emoji rules are disambiguated by their distinct '<@', '<#',
+                // '<a?:name:' prefixes, and strong ('**') vs u ('__') never
+                // overlap - so no ambiguity remains.
                 if (!foundMatch || quality >= bestQuality) {
                     bestRule = &rule;
                     bestCapture = capture;
@@ -384,7 +398,8 @@ void Parser::setupDefaultRules()
     MarkdownRule channel;
     channel.name = "channel";
     channel.order = 21;
-    channel.regex = QRegularExpression(R"(^<#?([0-9]+)>)");
+    // Discord only treats <#id> as a channel mention; bare <id> is plain text.
+    channel.regex = QRegularExpression(R"(^<#([0-9]+)>)");
     channel.match = anyScopeRegex(channel.regex);
     channel.parse = [](const Capture &match, NestedParseFn nestedParse, ParseState state) -> AstNode {
         AstNode node;
@@ -483,15 +498,20 @@ void Parser::setupDefaultRules()
     MarkdownRule inlineCode;
     inlineCode.name = "inlineCode";
     inlineCode.order = 23;
-    inlineCode.regex = QRegularExpression(R"(^(`+)([\s\S]*?[^`])\1(?!`))");
+    // Content may be empty (``) or a single space (` `); the lazy body plus
+    // backreference handles both without requiring a non-backtick char.
+    inlineCode.regex = QRegularExpression(R"(^(`+)([\s\S]*?)\1(?!`))");
     inlineCode.match = inlineRegex(inlineCode.regex);
     inlineCode.parse = [](const Capture &match, NestedParseFn nestedParse,
                           ParseState state) -> AstNode {
         AstNode node;
         node.type = "inlineCode";
         node.content = match.captured(2);
-        // Strip one leading and one trailing space if both are present
-        if (node.content.startsWith(' ') && node.content.endsWith(' '))
+        // CommonMark: strip one leading and one trailing space only when both
+        // are present and the content is not entirely spaces.
+        bool allSpaces = std::all_of(node.content.begin(), node.content.end(),
+                                     [](QChar c) { return c == QLatin1Char(' '); });
+        if (!allSpaces && node.content.startsWith(' ') && node.content.endsWith(' '))
             node.content = node.content.mid(1, node.content.size() - 2);
         return node;
     };
@@ -535,6 +555,25 @@ void Parser::setupDefaultRules()
 
 void Parser::sortRules()
 {
+    // Possible starting characters per rule, used by the parse loop's
+    // pre-filter. Rules not listed here (currently only "text") are attempted
+    // at every position. Keep in sync with the regexes in setupDefaultRules().
+    static const QMap<QString, QString> ruleFirstChars = {
+        { "newline", "\n" },    { "escape", "\\" },   { "codeBlock", "`" },
+        { "url", "h" },         { "link", "[" },      { "em", "_*" },
+        { "user", "<" },        { "channel", "<" },   { "customEmoji", "<" },
+        { "strong", "*" },      { "u", "_" },         { "strike", "~" },
+        { "inlineCode", "`" },  { "br", "\n" },
+    };
+
+    for (auto &rule : rules) {
+        auto it = ruleFirstChars.constFind(rule.name);
+        if (it != ruleFirstChars.constEnd()) {
+            for (QChar c : it.value())
+                rule.firstChars.insert(c);
+        }
+    }
+
     std::sort(rules.begin(), rules.end(),
               [](const MarkdownRule &a, const MarkdownRule &b) { return a.order < b.order; });
 

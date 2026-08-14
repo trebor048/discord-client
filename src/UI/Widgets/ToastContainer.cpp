@@ -5,6 +5,7 @@
 #include <QGuiApplication>
 #include <QPropertyAnimation>
 #include <QEasingCurve>
+#include <QCursor>
 
 namespace Acheron {
 namespace UI {
@@ -41,17 +42,52 @@ void ToastContainer::addNotification(ToastNotification *notification)
     m_notifications.append(notification);
     notification->setParent(this);
     notification->setScale(m_scale);
-    notification->setOpacity(m_opacity / 100.0);
-    notification->move(calculateStartPosition());
-    notification->show();
+    notification->setSlideEdge(slideEdge());
 
     connect(notification, &ToastNotification::clicked, this, &ToastContainer::notificationClicked);
     connect(notification, &ToastNotification::iconClicked, this, &ToastContainer::notificationIconClicked);
+    connect(notification, &ToastNotification::actionTriggered, this, &ToastContainer::notificationActionTriggered);
+    connect(notification, &ToastNotification::replySubmitted, this, &ToastContainer::replySubmitted);
+    connect(notification, &ToastNotification::groupEntryClicked, this, &ToastContainer::groupEntryClicked);
     connect(notification, &ToastNotification::dismissed, this, [this, notification]() {
         removeNotification(notification);
     });
+    connect(notification, &ToastNotification::contentResized, this, [this]() {
+        repositionNotifications();
+    });
 
+    // The overlay must be visible for its child toasts to render; it stays
+    // hidden whenever the stack is empty.
+    if (!isVisible())
+        show();
+
+    // Start off-screen beyond the toast edge so the entry animation slides in.
+    const int newIndex = m_notifications.size() - 1;
+    notification->move(m_animationsEnabled ? entryPositionFor(newIndex)
+                                           : calculateNextPosition(newIndex));
+    m_justAdded = true;
+
+    notification->showNotification();
+
+    // Stagger the entry slide so a burst of toasts cascades instead of
+    // jumping in lockstep; existing toasts reflow immediately.
     repositionNotifications();
+    if (m_animationsEnabled) {
+        animateNotification(notification, calculateNextPosition(newIndex),
+                            newIndex * 60, true);
+    }
+}
+
+ToastNotification *ToastContainer::findByGroupKey(const QString &groupKey) const
+{
+    if (groupKey.isEmpty())
+        return nullptr;
+
+    for (auto *notification : m_notifications) {
+        if (notification->groupKey() == groupKey)
+            return notification;
+    }
+    return nullptr;
 }
 
 void ToastContainer::removeNotification(ToastNotification *notification)
@@ -63,14 +99,16 @@ void ToastContainer::removeNotification(ToastNotification *notification)
     notification->setParent(nullptr);
     repositionNotifications();
 
-    if (m_notifications.isEmpty() && m_dismissingAll) {
-        m_dismissingAll = false;
+    if (m_notifications.isEmpty()) {
+        if (m_dismissingAll)
+            m_dismissingAll = false;
+        hide();
     }
 }
 
 void ToastContainer::dismissAll()
 {
-    if (m_dismissingAll) return;
+    if (m_dismissingAll || m_notifications.isEmpty()) return;
     m_dismissingAll = true;
 
     // Call dismiss() on all notifications to start their fade-out animations.
@@ -138,37 +176,148 @@ void ToastContainer::resizeEvent(QResizeEvent *event)
 
 void ToastContainer::repositionNotifications()
 {
-    QScreen *screen = QGuiApplication::primaryScreen();
+    QScreen *screen = currentScreen();
     if (!screen) return;
 
     QRect geometry = screen->availableGeometry();
-    setGeometry(geometry);
+    if (QWidget::geometry() != geometry)
+        setGeometry(geometry);
 
-    for (int i = 0; i < m_notifications.size(); ++i) {
-        QPoint targetPos = calculateNextPosition(i);
-        animateNotification(m_notifications[i], targetPos);
+    const int count = m_notifications.size();
+    if (count == 0) {
+        m_justAdded = false;
+        return;
     }
+
+    // Prefix heights: prefix[i] is the stacked offset of the i-th toast from
+    // the anchor edge, built in one linear pass so the layout loop is O(n).
+    QVector<int> prefix(count, 0);
+    for (int i = 1; i < count; ++i) {
+        prefix[i] = prefix[i - 1] + notificationHeight(i - 1) + m_spacing;
+    }
+    const int totalStack = prefix[count - 1] + notificationHeight(count - 1) + m_spacing;
+
+    QPoint start = calculateStartPosition();
+
+    for (int i = 0; i < count; ++i) {
+        // A fresh toast owns its entry animation (stagger + off-screen start);
+        // reflowing it here would fight that animation.
+        if (m_animationsEnabled && i == count - 1 && m_justAdded)
+            continue;
+
+        int x = start.x();
+        int y = start.y();
+        switch (m_position) {
+        case NotificationPosition::TopLeft:
+        case NotificationPosition::TopRight:
+            y = start.y() + prefix[i];
+            break;
+        case NotificationPosition::BottomLeft:
+        case NotificationPosition::BottomRight:
+            y = start.y() - prefix[i] - notificationHeight(i);
+            break;
+        case NotificationPosition::Center:
+            y = start.y() + prefix[i] - totalStack / 2;
+            break;
+        }
+        animateNotification(m_notifications[i], QPoint(x, y));
+    }
+    m_justAdded = false;
 }
 
-void ToastContainer::animateNotification(ToastNotification *notification, const QPoint &targetPos)
+void ToastContainer::animateNotification(ToastNotification *notification, const QPoint &targetPos,
+                                         int delayMs, bool isEntry)
 {
     if (!notification) return;
 
-    QPropertyAnimation *anim = new QPropertyAnimation(notification, "pos", this);
-    anim->setDuration(250);
+    if (!m_animationsEnabled) {
+        notification->move(targetPos);
+        return;
+    }
+
+    auto *anim = new QPropertyAnimation(notification, "pos", notification);
+    anim->setDuration(isEntry ? 300 : 250);
     anim->setStartValue(notification->pos());
     anim->setEndValue(targetPos);
-    anim->setEasingCurve(QEasingCurve::OutCubic);
+    // Entries get a gentle overshoot settle; reflows stay smooth and plain.
+    QEasingCurve curve(isEntry ? QEasingCurve::OutBack : QEasingCurve::OutCubic);
+    if (isEntry)
+        curve.setOvershoot(1.2);
+    anim->setEasingCurve(curve);
+
+    if (delayMs > 0) {
+        // Context-bound: if the toast is dismissed before its stagger slot,
+        // the pending animation is dropped with it.
+        QTimer::singleShot(delayMs, notification, [anim]() {
+            anim->start(QAbstractAnimation::DeleteWhenStopped);
+        });
+        return;
+    }
     anim->start(QAbstractAnimation::DeleteWhenStopped);
+}
+
+QPoint ToastContainer::entryPositionFor(int index) const
+{
+    QPoint target = calculateNextPosition(index);
+    const int width = qRound(ToastNotification::defaultWidth() * m_scale);
+
+    switch (slideEdge()) {
+    case Qt::LeftEdge:
+        return target + QPoint(-(width + m_edgeOffset + 40), 0);
+    case Qt::RightEdge:
+        return target + QPoint(width + m_edgeOffset + 40, 0);
+    case Qt::TopEdge:
+        return target + QPoint(0, -(notificationHeight(index) + m_edgeOffset + 40));
+    default:
+        return target + QPoint(0, notificationHeight(index) + m_edgeOffset + 40);
+    }
+}
+
+Qt::Edge ToastContainer::slideEdge() const
+{
+    switch (m_position) {
+    case NotificationPosition::TopLeft:
+    case NotificationPosition::BottomLeft:
+        return Qt::LeftEdge;
+    case NotificationPosition::TopRight:
+    case NotificationPosition::BottomRight:
+        return Qt::RightEdge;
+    case NotificationPosition::Center:
+        return Qt::TopEdge;
+    }
+    return Qt::LeftEdge;
+}
+
+QScreen *ToastContainer::currentScreen() const
+{
+    if (m_cachedScreen && QGuiApplication::screens().contains(m_cachedScreen))
+        return m_cachedScreen;
+
+    if (QScreen *s = screen()) {
+        m_cachedScreen = s;
+        return s;
+    }
+    if (QScreen *s = QGuiApplication::screenAt(QCursor::pos())) {
+        m_cachedScreen = s;
+        return s;
+    }
+
+    m_cachedScreen = QGuiApplication::primaryScreen();
+    return m_cachedScreen;
 }
 
 QPoint ToastContainer::calculateStartPosition() const
 {
-    QScreen *screen = QGuiApplication::primaryScreen();
+    QScreen *screen = currentScreen();
     if (!screen) return QPoint();
 
     QRect geometry = screen->availableGeometry();
-    QSize notifSize = ToastNotification::defaultSize() * m_scale;
+    const int width = qRound(ToastNotification::defaultWidth() * m_scale);
+
+    // Children are positioned in container-local coordinates; the container
+    // itself covers the screen's available geometry.
+    const int originX = geometry.left();
+    const int originY = geometry.top();
 
     int x = 0, y = 0;
 
@@ -178,30 +327,42 @@ QPoint ToastContainer::calculateStartPosition() const
         y = geometry.top() + m_edgeOffset;
         break;
     case NotificationPosition::TopRight:
-        x = geometry.right() - notifSize.width() - m_edgeOffset;
+        x = geometry.right() - width - m_edgeOffset;
         y = geometry.top() + m_edgeOffset;
         break;
     case NotificationPosition::BottomLeft:
         x = geometry.left() + m_edgeOffset;
-        y = geometry.bottom() - notifSize.height() - m_edgeOffset;
+        y = geometry.bottom() - m_edgeOffset;
         break;
     case NotificationPosition::BottomRight:
-        x = geometry.right() - notifSize.width() - m_edgeOffset;
-        y = geometry.bottom() - notifSize.height() - m_edgeOffset;
+        x = geometry.right() - width - m_edgeOffset;
+        y = geometry.bottom() - m_edgeOffset;
         break;
     case NotificationPosition::Center:
-        x = geometry.center().x() - notifSize.width() / 2;
-        y = geometry.center().y() - notifSize.height() / 2;
+        x = geometry.center().x() - width / 2;
+        y = geometry.center().y();
         break;
     }
 
-    return QPoint(x, y);
+    return QPoint(x - originX, y - originY);
+}
+
+int ToastContainer::notificationHeight(int index) const
+{
+    if (index < 0 || index >= m_notifications.size())
+        return ToastNotification::defaultSize().height() * m_scale;
+
+    const int height = m_notifications[index]->height();
+    if (height > 0)
+        return height;
+    return qRound(ToastNotification::defaultSize().height() * m_scale);
 }
 
 QPoint ToastContainer::calculateNextPosition(int index) const
 {
+    // Stack from the anchor edge outward using each toast's real height, so
+    // toasts with thumbnails or action rows don't overlap their neighbors.
     QPoint start = calculateStartPosition();
-    QSize notifSize = ToastNotification::defaultSize() * m_scale;
 
     int x = start.x();
     int y = start.y();
@@ -209,14 +370,24 @@ QPoint ToastContainer::calculateNextPosition(int index) const
     switch (m_position) {
     case NotificationPosition::TopLeft:
     case NotificationPosition::TopRight:
-        y += index * (notifSize.height() + m_spacing);
+        for (int i = 0; i < index; ++i)
+            y += notificationHeight(i) + m_spacing;
         break;
     case NotificationPosition::BottomLeft:
     case NotificationPosition::BottomRight:
-        y -= index * (notifSize.height() + m_spacing);
+        y -= notificationHeight(index);
+        for (int i = 0; i < index; ++i)
+            y -= notificationHeight(i) + m_spacing;
         break;
     case NotificationPosition::Center:
-        y += (index - m_notifications.size() / 2) * (notifSize.height() + m_spacing);
+        for (int i = 0; i < index; ++i)
+            y += notificationHeight(i) + m_spacing;
+        {
+            int total = 0;
+            for (int i = 0; i < m_notifications.size(); ++i)
+                total += notificationHeight(i) + m_spacing;
+            y -= total / 2;
+        }
         break;
     }
 

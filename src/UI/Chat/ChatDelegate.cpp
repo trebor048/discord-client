@@ -38,6 +38,19 @@ static void registerEmojiResources(QTextDocument &doc, const QString &html,
     }
 }
 
+static void drawImageErrorBox(QPainter *painter, const QRect &rect,
+                              const QStyleOptionViewItem &option, const QString &text)
+{
+    painter->fillRect(rect, QColor(60, 60, 60));
+    painter->setPen(QPen(option.palette.mid().color(), 1));
+    painter->drawRect(rect);
+    painter->setPen(option.palette.placeholderText().color());
+    QFont errorFont = option.font;
+    errorFont.setPointSize(errorFont.pointSize() - 1);
+    painter->setFont(errorFont);
+    painter->drawText(rect.adjusted(8, 0, -8, 0), Qt::AlignCenter, text);
+}
+
 static void drawUploadProgress(QPainter *painter, const QRect &barRect, qint64 sent, qint64 total, const QPalette &palette)
 {
     qreal fraction = total > 0 ? qBound(0.0, qreal(sent) / qreal(total), 1.0) : 0.0;
@@ -454,6 +467,12 @@ void ChatDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
         }
 
         if (!att.pixmap.isNull()) {
+            if (!att.proxyUrl.isLocalFile() &&
+                chatModel->hasImageFailed(att.proxyUrl, att.displaySize)) {
+                drawImageErrorBox(painter, imgLayout.rect, option,
+                                  tr("Image failed to load"));
+                continue;
+            }
             QPixmap displayPixmap = att.pixmap;
 
             if (showBlurred)
@@ -708,11 +727,39 @@ void ChatDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
         const auto &embed = embeds[embedIdx];
 
         if (embed.type == EmbedType::Gifv) {
-            if (!embedLayout.imagesRect.isNull() && !embed.thumbnail.isNull()) {
+            const QRect imgRect = embedLayout.imagesRect;
+
+            // Try to play the GIF itself (the gifv thumbnail URL points at the
+            // animated source via the media proxy) instead of a static frame.
+            Core::GifAnimation *gifAnim = nullptr;
+            if (!embed.thumbnailUrl.isEmpty())
+                gifAnim = chatModel->ensureGifAnimation(embed.thumbnailUrl, index.row());
+
+            const bool thumbnailFailed =
+                    !embed.thumbnailUrl.isEmpty() &&
+                    chatModel->hasImageFailed(embed.thumbnailUrl, embed.thumbnailSize);
+
+            if (gifAnim && gifAnim->isReady() && !imgRect.isNull()) {
+                QPixmap frame = gifAnim->currentFrame();
+                if (!frame.isNull()) {
+                    QPixmap scaledFrame = frame.scaled(imgRect.size(), Qt::KeepAspectRatio,
+                                                       Qt::SmoothTransformation);
+                    painter->drawPixmap(imgRect.topLeft(), scaledFrame);
+                }
+            } else if (gifAnim && gifAnim->isLoading() && !imgRect.isNull() &&
+                       embed.thumbnail.isNull()) {
+                painter->fillRect(imgRect, QColor(60, 60, 60));
+                painter->setPen(option.palette.placeholderText().color());
+                painter->drawText(imgRect, Qt::AlignCenter, tr("Loading GIF..."));
+            } else if (thumbnailFailed && !imgRect.isNull()) {
+                drawImageErrorBox(painter, imgRect, option, tr("GIF failed to load"));
+            } else if (!imgRect.isNull() && !embed.thumbnail.isNull()) {
+                // Static first frame while the animation loads (or as fallback
+                // when the animation itself failed but the still image worked).
                 QPixmap scaledThumb = embed.thumbnail.scaled(
                         embed.thumbnailSize * embed.thumbnail.devicePixelRatio(),
                         Qt::KeepAspectRatio, Qt::SmoothTransformation);
-                painter->drawPixmap(embedLayout.imagesRect.topLeft(), scaledThumb);
+                painter->drawPixmap(imgRect.topLeft(), scaledThumb);
             }
 
             QFont gifFont = option.font;
@@ -728,6 +775,12 @@ void ChatDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
         }
 
         if (embed.type == EmbedType::Image) {
+            if (!embedLayout.imagesRect.isNull() &&
+                chatModel->hasImageFailed(embed.thumbnailUrl, embed.thumbnailSize)) {
+                drawImageErrorBox(painter, embedLayout.imagesRect, option,
+                                  tr("Image failed to load"));
+                continue;
+            }
             if (!embedLayout.imagesRect.isNull() && !embed.thumbnail.isNull()) {
                 QPixmap scaledThumb = embed.thumbnail.scaled(
                         embed.thumbnailSize * embed.thumbnail.devicePixelRatio(),
@@ -1101,11 +1154,12 @@ QSize ChatDelegate::sizeHint(const QStyleOptionViewItem &option, const QModelInd
 
     QSize size(viewportWidth, height);
 
-    if (!isEditing) {
-        auto model = const_cast<QAbstractItemModel *>(index.model());
+    if (!isEditing && chatModel) {
+        // Write the size cache without emitting dataChanged, which would
+        // re-enter layout/paint from within the view's layout pass.
         const auto prevSize = index.data(ChatModel::CachedSizeRole).toSize();
         if (size != prevSize)
-            model->setData(index, size, ChatModel::CachedSizeRole);
+            chatModel->setCachedSize(index, size);
     }
 
     return size;

@@ -48,11 +48,15 @@ Client::Client(const QString &token, const QString &gatewayUrl, const QString &b
     connect(gateway, &Gateway::connected, this, &Client::onConnected);
     connect(gateway, &Gateway::disconnected, this, &Client::onDisconnected);
 
+    connect(gateway, &Gateway::gatewayHello, this, [] {
+        qCInfo(LogDiscord) << "Gateway hello received, handshaking";
+    });
     connect(gateway, &Gateway::gatewayReady, this, &Client::onGatewayReady);
     connect(gateway, &Gateway::gatewayReadySupplemental, this, &Client::onGatewayReadySupplemental);
     connect(gateway, &Gateway::gatewayMessageCreate, this, &Client::onGatewayMessageCreate);
     connect(gateway, &Gateway::gatewayMessageUpdate, this, &Client::onGatewayMessageUpdate);
     connect(gateway, &Gateway::gatewayMessageDelete, this, &Client::onGatewayMessageDelete);
+    connect(gateway, &Gateway::gatewayMessageDeleteBulk, this, &Client::messagesDeletedBulk);
     connect(gateway, &Gateway::gatewayTypingStart, this, &Client::typingStart);
     connect(gateway, &Gateway::gatewayChannelCreate, this, &Client::onGatewayChannelCreate);
     connect(gateway, &Gateway::gatewayChannelUpdate, this, &Client::onGatewayChannelUpdate);
@@ -68,6 +72,9 @@ Client::Client(const QString &token, const QString &gatewayUrl, const QString &b
     connect(gateway, &Gateway::gatewayGuildDelete, this, &Client::onGatewayGuildDelete);
     connect(gateway, &Gateway::gatewayGuildMembersChunk, this, &Client::guildMembersChunk);
     connect(gateway, &Gateway::gatewayGuildMemberUpdate, this, &Client::guildMemberUpdated);
+    connect(gateway, &Gateway::gatewayGuildMemberAdd, this, &Client::guildMemberAdded);
+    connect(gateway, &Gateway::gatewayGuildMemberRemove, this, &Client::guildMemberRemoved);
+    connect(gateway, &Gateway::gatewayUserUpdate, this, &Client::onGatewayUserUpdate);
     connect(gateway, &Gateway::gatewayGuildRoleCreate, this, &Client::onGatewayGuildRoleCreate);
     connect(gateway, &Gateway::gatewayGuildRoleUpdate, this, &Client::onGatewayGuildRoleUpdate);
     connect(gateway, &Gateway::gatewayGuildRoleDelete, this, &Client::onGatewayGuildRoleDelete);
@@ -177,6 +184,25 @@ void Client::fetchHistory(Snowflake channelId, Snowflake beforeId, int limit,
         for (const QJsonValue &val : arr)
             results.append(Message::fromJson(val.toObject()));
 
+        callback({ results });
+    });
+}
+
+void Client::fetchMessage(Snowflake channelId, Snowflake messageId, MessagesCallback callback)
+{
+    QString endpoint = "/channels/" + QString::number(channelId) + "/messages/" +
+                       QString::number(messageId);
+
+    httpClient->get(endpoint, QUrlQuery{}, [this, channelId, messageId, callback](const HttpResponse &response) {
+        if (!response.success) {
+            qCWarning(LogDiscord) << "Failed to fetch message" << messageId << "in channel"
+                                  << channelId << ":" << response.error;
+            callback({ {}, "Failed to fetch message: " + response.error });
+            return;
+        }
+
+        QList<Message> results;
+        results.append(Message::fromJson(QJsonDocument::fromJson(response.body).object()));
         callback({ results });
     });
 }
@@ -583,9 +609,9 @@ void Client::fetchForumPostData(Snowflake forumId, const QList<Snowflake> &threa
 
 void Client::onConnected()
 {
-    qInfo() << "Connected to gateway";
-
-    setState(Core::ConnectionState::Connected);
+    // TCP/WebSocket connect only — the session is not usable until READY.
+    // Stay in Connecting so the UI doesn't show a premature connected state.
+    qCInfo(LogDiscord) << "Gateway socket connected, waiting for READY";
 }
 
 void Client::onDisconnected(CloseCode code, const QString &reason)
@@ -643,6 +669,8 @@ void Client::onGatewayReady(const Ready &data)
 
     me = data.user;
 
+    setState(Core::ConnectionState::Connected);
+
     emit ready(data);
 }
 
@@ -664,6 +692,13 @@ void Client::onGatewayMessageUpdate(const Message &msg)
 void Client::onGatewayMessageDelete(const MessageDelete &event)
 {
     emit messageDeleted(event);
+}
+
+void Client::onGatewayUserUpdate(const User &user)
+{
+    me = user;
+
+    emit ownUserUpdated(user);
 }
 
 void Client::onGatewayChannelCreate(const ChannelCreate &event)
@@ -986,7 +1021,12 @@ void Client::cleanupUploadedSlots(const std::shared_ptr<UploadState> &state)
     for (int i = 0; i < state->uploaded.size(); i++) {
         if (!state->uploaded[i] || state->uploadFilenames[i].isEmpty())
             continue;
-        httpClient->delete_("/attachments/" + state->uploadFilenames[i], [](const auto &) {});
+        const QString filename = state->uploadFilenames[i];
+        httpClient->delete_("/attachments/" + filename, [filename](const HttpResponse &response) {
+            if (!response.success)
+                qCWarning(LogDiscord) << "Failed to clean up uploaded attachment slot" << filename
+                                      << ":" << response.error << "Status:" << response.statusCode;
+        });
     }
 }
 
@@ -1049,18 +1089,26 @@ void Client::pinMessage(Snowflake channelId, Snowflake messageId)
     });
 }
 
-void Client::unpinMessage(Snowflake channelId, Snowflake messageId)
+void Client::unpinMessage(Snowflake channelId, Snowflake messageId,
+                          std::function<void(bool success)> completion)
 {
     QString endpoint = "/channels/" + QString::number(channelId) + "/pins/" +
                        QString::number(messageId);
 
-    httpClient->delete_(endpoint, [this, channelId, messageId](const HttpResponse &response) {
-        if (!response.success)
-            qCWarning(LogDiscord) << "Failed to unpin message" << messageId << "in channel"
-                                  << channelId << ":" << response.error;
-        else
-            qCInfo(LogDiscord) << "Message" << messageId << "unpinned from channel" << channelId;
-    });
+    httpClient->delete_(endpoint,
+                        [this, channelId, messageId, completion = std::move(completion)](
+                                const HttpResponse &response) {
+                            if (!response.success)
+                                qCWarning(LogDiscord)
+                                        << "Failed to unpin message" << messageId << "in channel"
+                                        << channelId << ":" << response.error;
+                            else
+                                qCInfo(LogDiscord)
+                                        << "Message" << messageId << "unpinned from channel"
+                                        << channelId;
+                            if (completion)
+                                completion(response.success);
+                        });
 }
 
 void Client::getPinnedMessages(Snowflake channelId, const MessagesCallback &callback)

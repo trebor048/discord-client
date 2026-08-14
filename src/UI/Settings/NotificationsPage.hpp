@@ -61,6 +61,11 @@ private:
 
     QTabWidget *m_tabWidget = nullptr;
 
+    // General
+    QCheckBox *m_enabledCheck = nullptr;
+    QComboBox *m_deliveryCombo = nullptr;
+    QCheckBox *m_groupingCheck = nullptr;
+
     // Appearance
     QComboBox *m_positionCombo = nullptr;
     QSpinBox *m_maxNotificationsSpin = nullptr;
@@ -70,6 +75,9 @@ private:
     QDoubleSpinBox *m_scaleSpin = nullptr;
     QCheckBox *m_pauseOnHoverCheck = nullptr;
     QCheckBox *m_renderImagesCheck = nullptr;
+    QCheckBox *m_animationsCheck = nullptr;
+    QCheckBox *m_progressBarCheck = nullptr;
+    QCheckBox *m_coloredAccentsCheck = nullptr;
 
     // Notification Types
     QCheckBox *m_mentionsCheck = nullptr;
@@ -112,6 +120,7 @@ private:
     QPushButton *m_testNotificationBtn = nullptr;
     QPushButton *m_dismissAllBtn = nullptr;
 
+    bool m_loadingSettings = false;
     Core::NotificationManager *m_notificationManager = nullptr;
     QListWidget *m_notifyForList = nullptr;
     QListWidget *m_ignoreUsersList = nullptr;
