@@ -32,7 +32,9 @@ PushToTalkListener::PushToTalkListener(QObject *parent)
     applyKey(QSettings().value("voice/ptt_key", kDefaultPttKey).toString());
 
     pollTimer.setInterval(25);
+#ifdef Q_OS_WIN
     connect(&pollTimer, &QTimer::timeout, this, &PushToTalkListener::pollHotKeyState);
+#endif
 
     if (auto *app = QCoreApplication::instance()) {
         app->installEventFilter(this);
@@ -139,20 +141,18 @@ void PushToTalkListener::refreshGlobalHotKey()
 #endif
 }
 
+#ifdef Q_OS_WIN
 void PushToTalkListener::unregisterGlobalHotKey()
 {
-#ifdef Q_OS_WIN
     if (hotKeyRegistered) {
         UnregisterHotKey(nullptr, kGlobalHotKeyId);
         hotKeyRegistered = false;
     }
     vk = 0;
-#endif
 }
 
 void PushToTalkListener::pollHotKeyState()
 {
-#ifdef Q_OS_WIN
     if (vk == 0) {
         pollTimer.stop();
         return;
@@ -162,8 +162,8 @@ void PushToTalkListener::pollHotKeyState()
     setHeld(down);
     if (!down)
         pollTimer.stop();
-#endif
 }
+#endif
 
 bool PushToTalkListener::nativeEventFilter(const QByteArray &eventType, void *message, qintptr *result)
 {
