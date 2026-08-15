@@ -70,7 +70,7 @@ networkinformation/
 platforms/
 sqldrivers/
 styles/
-tls/
+/tls/
 
 # === Local tools / scratch ===
 .qwen/
