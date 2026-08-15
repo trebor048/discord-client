@@ -132,7 +132,9 @@ struct TypingStart : Core::JsonUtils::JsonObject
         get(obj, "guild_id", typingStart.guildId);
         get(obj, "user_id", typingStart.userId);
         get(obj, "member", typingStart.member);
-        typingStart.timestamp = QDateTime::fromSecsSinceEpoch(obj["timestamp"].toVariant().toLongLong());
+        // Discord sends this as Unix time in milliseconds (all Discord
+        // timestamps use ms); fromSecsSinceEpoch would shift it by 1000x.
+        typingStart.timestamp = QDateTime::fromMSecsSinceEpoch(obj["timestamp"].toVariant().toLongLong());
         return typingStart;
     }
 };

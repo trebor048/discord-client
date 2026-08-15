@@ -224,14 +224,14 @@ ClientInstance::ClientInstance(const AccountInfo &info,
                         Storage::DatabaseManager::instance().getCacheConnectionName(account.id);
                 QSqlDatabase db = QSqlDatabase::database(connName);
 
-                if (!db.transaction()) {
+                Storage::Transaction txn(db);
+                if (!txn.ownsTransaction()) {
                     qCWarning(LogCore) << "Failed to start READY_SUPPLEMENTAL cache transaction";
                     return;
                 }
 
                 if (!data.guilds.hasValue() || !data.mergedMembers.hasValue()) {
                     qCWarning(LogCore) << "READY_SUPPLEMENTAL payload missing guild or member data";
-                    db.rollback();
                     return;
                 }
 
@@ -239,7 +239,6 @@ ClientInstance::ClientInstance(const AccountInfo &info,
                     qCWarning(LogCore) << "READY_SUPPLEMENTAL payload guild/member array size mismatch:"
                                        << data.guilds->size() << "guilds vs"
                                        << data.mergedMembers->size() << "member groups";
-                    db.rollback();
                     return;
                 }
 
@@ -249,13 +248,12 @@ ClientInstance::ClientInstance(const AccountInfo &info,
 
                     for (const auto &member : members)
                         if (!memberRepo.saveMember(guild.id, member.userId.get(), member))
-                            goto rollback;
+                            return;
                 }
 
-                if (!db.commit()) {
+                if (!txn.commit()) {
                     qCWarning(LogCore) << "Failed to commit READY_SUPPLEMENTAL cache transaction:"
                                        << db.lastError().text();
-                    db.rollback();
                     return;
                 }
 
@@ -270,10 +268,6 @@ ClientInstance::ClientInstance(const AccountInfo &info,
                     }
                 }
 #endif
-                return;
-
-rollback:
-                db.rollback();
                 return;
             });
 
@@ -490,13 +484,16 @@ void ClientInstance::onGuildCreated(const Discord::GatewayGuild &guild)
     QString connName = Storage::DatabaseManager::instance().getCacheConnectionName(account.id);
     QSqlDatabase db = QSqlDatabase::database(connName);
 
-    db.transaction();
+    // Use Storage::Transaction (not raw db.transaction()) so the connection is
+    // registered as active; ChannelRepository::savePermissionOverwrites checks
+    // Transaction::isActive() and would otherwise fail its nested BEGIN.
+    Storage::Transaction txn(db);
     saveGuild(
             guild,
             guild.members.hasValue() ? &guild.members.get() : nullptr,
             client->getMe().id.get(),
             db);
-    db.commit();
+    txn.commit();
 
     initGuildReadState(guild);
 
@@ -558,7 +555,9 @@ void ClientInstance::onChannelCreated(const Discord::ChannelCreate &event)
     QString connName = Storage::DatabaseManager::instance().getCacheConnectionName(account.id);
     QSqlDatabase db = QSqlDatabase::database(connName);
 
-    db.transaction();
+    // Storage::Transaction registers the connection as active so nested
+    // repository BEGINs are skipped (see savePermissionOverwrites).
+    Storage::Transaction txn(db);
 
     channelRepo.saveChannel(channel, db);
 
@@ -580,8 +579,7 @@ void ClientInstance::onChannelCreated(const Discord::ChannelCreate &event)
             channelRepo.saveChannelRecipients(channelId, recipientIds, db);
     }
 
-    db.commit();
-
+    txn.commit();
     if (channel.type == Discord::ChannelType::DM || channel.type == Discord::ChannelType::GROUP_DM) {
         Snowflake lastMsg = channel.lastMessageId.hasValue()
                                     ? channel.lastMessageId.get()
@@ -612,14 +610,14 @@ void ClientInstance::onChannelUpdated(const Discord::ChannelUpdate &event)
     QString connName = Storage::DatabaseManager::instance().getCacheConnectionName(account.id);
     QSqlDatabase db = QSqlDatabase::database(connName);
 
-    db.transaction();
+    Storage::Transaction txn(db);
 
     channelRepo.saveChannel(channel, db);
 
     if (channel.permissionOverwrites.hasValue())
         channelRepo.savePermissionOverwrites(channelId, channel.permissionOverwrites.get(), db);
 
-    db.commit();
+    txn.commit();
 
     permissionManager->invalidateChannelCache(channelId);
     forumParentCache.remove(channelId);
@@ -640,11 +638,11 @@ void ClientInstance::onChannelDeleted(const Discord::ChannelDelete &event)
     QString connName = Storage::DatabaseManager::instance().getCacheConnectionName(account.id);
     QSqlDatabase db = QSqlDatabase::database(connName);
 
-    db.transaction();
+    Storage::Transaction txn(db);
 
     channelRepo.deleteChannel(channelId, db);
 
-    db.commit();
+    txn.commit();
 
     permissionManager->invalidateChannelCache(channelId);
     forumParentCache.remove(channelId);
@@ -879,16 +877,16 @@ bool ClientInstance::runInCacheTransaction(const char *what,
     QString connName = Storage::DatabaseManager::instance().getCacheConnectionName(account.id);
     QSqlDatabase db = QSqlDatabase::database(connName);
 
-    if (!db.transaction()) {
+    Storage::Transaction txn(db);
+    if (!txn.ownsTransaction()) {
         qCWarning(LogCore) << "Failed to start transaction for" << what;
         return false;
     }
 
     op(db);
 
-    if (!db.commit()) {
+    if (!txn.commit()) {
         qCWarning(LogCore) << "Failed to commit" << what << ":" << db.lastError().text();
-        db.rollback();
         return false;
     }
     return true;

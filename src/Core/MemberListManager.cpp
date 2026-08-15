@@ -413,16 +413,20 @@ void MemberListManager::handleMemberRemoved(Snowflake guildId, Snowflake userId)
 
         // Rebuild the materialized map with indices shifted down for every
         // removed row, keeping the model consistent instead of leaving holes.
+        // Iterate keys in ascending order: QHash iteration order is arbitrary
+        // (and per-process seeded), so the monotonic removedIndex shift is only
+        // correct when keys are visited sorted.
         QHash<int, MemberListItem> newItems;
         newItems.reserve(ld.items.size() - removedKeys.size());
+        QList<int> sortedKeys = ld.items.keys();
+        std::sort(sortedKeys.begin(), sortedKeys.end());
         int removedIndex = 0;
-        for (auto iit = ld.items.constBegin(); iit != ld.items.constEnd(); ++iit) {
-            int key = iit.key();
+        for (int key : sortedKeys) {
             while (removedIndex < removedKeys.size() && removedKeys[removedIndex] < key)
                 ++removedIndex;
             if (removedIndex < removedKeys.size() && removedKeys[removedIndex] == key)
                 continue;
-            newItems[key - removedIndex] = iit.value();
+            newItems[key - removedIndex] = ld.items.value(key);
         }
         ld.items = std::move(newItems);
     }

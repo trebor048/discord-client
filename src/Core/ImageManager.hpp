@@ -30,13 +30,6 @@ enum class PinGroup {
     ChatView,
 };
 
-/// Maximum number of decoded frames cached per animated GIF.
-/// Frames are decoded on-demand in a sliding window around the current frame.
-static constexpr int kMaxGifFrames = 30;
-
-/// Window size for pre-decoding frames ahead of the current position.
-static constexpr int kGifDecodeWindow = 5;
-
 /// Maximum width in pixels for an animated GIF (container width cap).
 static constexpr int kGifMaxWidth = 400;
 
@@ -69,8 +62,6 @@ inline int pixmapCost(const QPixmap &pixmap)
  * Manages playback of a single animated GIF.
  *
  * Wraps QMovie with:
- *   - Frame cache to avoid re-decoding on scroll
- *   - Hard frame limit (kMaxGifFrames) to prevent memory bombs
  *   - Automatic downscaling to fit container width (kGifMaxWidth)
  *   - Pause/resume support for hover-to-pause
  *   - Progress callback for network loading
@@ -140,9 +131,6 @@ signals:
 
 private:
     void onMovieFrameChanged(int frameNum);
-    void ensureFrameCached(int frameNum) const;
-    void decodeFrameWindow(int frameNum) const;
-    void evictDistantFrames(int currentFrame) const;
 
     // Computes the downscaled display size for a source of the given size.
     QSize computeDisplaySize(const QSize &originalSize) const;
@@ -155,9 +143,6 @@ private:
     // (e.g. a static webp/png poster served for a gifv embed thumbnail).
     QImage m_staticImage;
     mutable QPixmap m_staticScaled;
-    mutable QMap<int, QPixmap> m_frameCache;
-    mutable bool m_decodePending = false;
-    mutable int m_lastAccessedFrame = 0;
     bool m_playing = false;
     bool m_loading = false;
     int m_loadProgress = -1;

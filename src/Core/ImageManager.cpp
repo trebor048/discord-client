@@ -112,9 +112,6 @@ void GifAnimation::load(const QUrl &url, int containerWidth)
         m_displaySize = computeDisplaySize(m_movie->currentImage().size());
         m_movie->setScaledSize(m_displaySize);
 
-        // Pre-cache only the first frame; remaining frames decoded on demand
-        ensureFrameCached(0);
-
         // Connect frame changes
         connect(m_movie, &QMovie::frameChanged, this, &GifAnimation::onMovieFrameChanged);
 
@@ -134,75 +131,6 @@ QSize GifAnimation::computeDisplaySize(const QSize &originalSize) const
     return QSize(m_containerWidth, size.height() * m_containerWidth / size.width());
 }
 
-void GifAnimation::ensureFrameCached(int frameNum) const
-{
-    if (!m_movie || frameNum < 0)
-        return;
-
-    int totalFrames = m_movie->frameCount();
-    if (frameNum >= totalFrames)
-        return;
-
-    if (m_frameCache.contains(frameNum))
-        return;
-
-    if (m_decodePending)
-        return;
-
-    m_decodePending = true;
-    QTimer::singleShot(0, this, [this, frameNum]() {
-        m_decodePending = false;
-        decodeFrameWindow(frameNum);
-    });
-}
-
-void GifAnimation::decodeFrameWindow(int frameNum) const
-{
-    if (!m_movie || frameNum < 0)
-        return;
-
-    int totalFrames = m_movie->frameCount();
-    if (frameNum >= totalFrames)
-        return;
-
-    // Decode a sliding window of frames around the requested frame
-    int windowStart = qMax(0, frameNum - kGifDecodeWindow);
-    int windowEnd = qMin(totalFrames - 1, frameNum + kGifDecodeWindow);
-
-    for (int i = windowStart; i <= windowEnd; ++i) {
-        if (m_frameCache.contains(i))
-            continue;
-
-        m_movie->jumpToFrame(i);
-        QImage img = m_movie->currentImage();
-        if (!img.isNull())
-            m_frameCache.insert(i, QPixmap::fromImage(img));
-    }
-
-    // Evict frames far from the current position
-    evictDistantFrames(frameNum);
-
-    // Reset to the requested frame position
-    m_movie->jumpToFrame(frameNum);
-}
-
-void GifAnimation::evictDistantFrames(int currentFrame) const
-{
-    if (m_frameCache.size() <= kMaxGifFrames)
-        return;
-
-    // Evict frames that are outside a generous window
-    int evictionThreshold = kMaxGifFrames / 2;
-    auto it = m_frameCache.begin();
-    while (it != m_frameCache.end()) {
-        if (qAbs(it.key() - currentFrame) > evictionThreshold) {
-            it = m_frameCache.erase(it);
-        } else {
-            ++it;
-        }
-    }
-}
-
 QPixmap GifAnimation::currentFrame() const
 {
     if (!m_staticImage.isNull()) {
@@ -217,19 +145,9 @@ QPixmap GifAnimation::currentFrame() const
     }
 
     if (m_movie) {
-        int frame = m_movie->currentFrameNumber();
-
-        // Decode on demand if not cached
-        if (!m_frameCache.contains(frame))
-            ensureFrameCached(frame);
-
-        m_lastAccessedFrame = frame;
-
-        auto it = m_frameCache.constFind(frame);
-        if (it != m_frameCache.constEnd())
-            return it.value();
-
-        // Fallback: get directly from movie
+        // QMovie keeps the current frame decoded and, with setScaledSize(),
+        // already downscaled — no extra frame cache is needed (and jumping
+        // around to pre-decode frames disrupts smooth playback).
         QImage img = m_movie->currentImage();
         if (!img.isNull())
             return QPixmap::fromImage(img);
@@ -251,8 +169,6 @@ qint64 GifAnimation::memoryCost() const
     qint64 cost = m_buffer ? m_buffer->size() : 0;
     if (!m_staticImage.isNull())
         cost += qint64(m_staticImage.width()) * m_staticImage.height() * 4;
-    for (const auto &frame : m_frameCache)
-        cost += qint64(frame.width()) * frame.height() * 4;
     return cost;
 }
 
@@ -269,7 +185,6 @@ void GifAnimation::unload()
         m_buffer->deleteLater();
         m_buffer = nullptr;
     }
-    m_frameCache.clear();
     m_staticImage = QImage();
     m_staticScaled = QPixmap();
 }
@@ -326,16 +241,12 @@ void GifAnimation::setContainerWidth(int width)
     if (newSize != m_displaySize) {
         m_displaySize = newSize;
         m_movie->setScaledSize(m_displaySize);
-        // Clear cache since scaled size changed — frames will be decoded on demand
-        m_frameCache.clear();
     }
 }
 
 void GifAnimation::onMovieFrameChanged(int frameNum)
 {
-    // Decode the frame on demand if not already cached
-    ensureFrameCached(frameNum);
-
+    Q_UNUSED(frameNum);
     QPixmap frame = currentFrame();
     if (!frame.isNull())
         emit frameChanged(frame);

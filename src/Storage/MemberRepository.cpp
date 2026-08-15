@@ -4,6 +4,7 @@
 #include <QJsonDocument>
 
 #include "DatabaseManager.hpp"
+#include "Transaction.hpp"
 #include "Core/Logging.hpp"
 
 namespace Acheron {
@@ -86,9 +87,14 @@ bool MemberRepository::saveMembers(Core::Snowflake guildId, const QList<Discord:
         return true;
 
     auto db = getDb();
-    if (!db.transaction()) {
-        qCWarning(LogDB) << "MemberRepository: failed to start transaction";
-        return false;
+    // Guard against nested transactions (see MessageRepository::saveMessages).
+    bool ownsTransaction = false;
+    if (!Transaction::isActive(db.connectionName())) {
+        if (!db.transaction()) {
+            qCWarning(LogDB) << "MemberRepository: failed to start transaction";
+            return false;
+        }
+        ownsTransaction = true;
     }
     for (const auto &member : members) {
         if (!member.user.hasValue() || !member.user->id.hasValue())
@@ -96,7 +102,7 @@ bool MemberRepository::saveMembers(Core::Snowflake guildId, const QList<Discord:
         if (!saveMember(guildId, member.user->id.get(), member, db))
             goto rollback;
     }
-    if (!db.commit()) {
+    if (ownsTransaction && !db.commit()) {
         qCWarning(LogDB) << "MemberRepository: failed to commit transaction";
         db.rollback();
         return false;
@@ -104,7 +110,8 @@ bool MemberRepository::saveMembers(Core::Snowflake guildId, const QList<Discord:
     return true;
 
 rollback:
-    db.rollback();
+    if (ownsTransaction)
+        db.rollback();
     return false;
 }
 

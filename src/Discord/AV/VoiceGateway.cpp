@@ -211,7 +211,6 @@ void VoiceGateway::handleHello(const QJsonObject &data)
     else
         identify();
 
-    reconnectAttempts = 0;
     isResuming = false;
 
     if (hello.heartbeatInterval <= 0) {
@@ -233,6 +232,10 @@ void VoiceGateway::handleReady(const QJsonObject &data)
 {
     VoiceReady ready = VoiceReady::fromJson(data);
     canResume = true;
+    // Only reset the reconnect cap on a genuinely established session. HELLO
+    // fires on every reconnect (even during a broken resume loop), so resetting
+    // there would let reconnectAttempts never reach maxReconnectAttempts.
+    reconnectAttempts = 0;
     emit readyReceived(ready);
 }
 

@@ -556,14 +556,14 @@ if(HAS_CURL_IMPERSONATE)
     target_compile_definitions(${PROJECT_NAME} PRIVATE HAS_CURL_IMPERSONATE)
     target_include_directories(${PROJECT_NAME} BEFORE PRIVATE ${CURL_INCLUDE_DIRS})
     message(STATUS "curl-impersonate detected - browser TLS fingerprinting enabled")
-elseif(ALLOW_PLAIN_CURL)
-    message(WARNING "curl_easy_impersonate not found, building against plain libcurl")
-else()
+elseif(WIN32 AND NOT ALLOW_PLAIN_CURL)
     message(FATAL_ERROR
         "curl_easy_impersonate not found in the curl headers at:\n"
         "  ${CURL_INCLUDE_DIRS}\n"
         "Point CURL_INCLUDE_DIR at curl-impersonate's headers, or pass "
         "-DALLOW_PLAIN_CURL=ON to build against plain libcurl anyway.")
+else()
+    message(STATUS "curl-impersonate not found; building against plain libcurl (browser TLS fingerprinting disabled)")
 endif()
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/certs/cacert.pem")

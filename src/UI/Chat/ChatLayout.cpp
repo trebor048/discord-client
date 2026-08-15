@@ -270,8 +270,7 @@ EmbedLayout calculateEmbedLayout(const EmbedData &embed, const QFont &font, int 
         return layout;
     }
 
-    layout.hasThumbnail =
-            !embed.thumbnail.isNull() || (!embed.videoThumbnail.isNull() && embed.images.isEmpty());
+    layout.hasThumbnail = !embed.thumbnail.isNull();
     if (layout.hasThumbnail)
         contentWidth -= (thumbnailSize() + embedPadding());
 

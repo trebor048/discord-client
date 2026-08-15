@@ -375,6 +375,10 @@ void NotificationManager::setSettings(const Notification::NotificationSettings &
 
 void NotificationManager::showNotification(const Notification::ToastNotificationData &data)
 {
+    // Master switch: disables all notification output (toasts, native, sound).
+    if (!m_settings.enabled)
+        return;
+
     // Do Not Disturb: suppress notification noise (toast, sound, and native
     // popups) while the user's own presence status is "dnd". Mentions and DMs
     // are still processed elsewhere; only the audible/visual noise is muted.
@@ -453,7 +457,7 @@ void NotificationManager::showNotification(const Notification::ToastNotification
                 if (!customUrl.isEmpty()) {
                     m_soundManager.playUrl(QUrl(customUrl), volume);
                 } else if (!customFileId.isEmpty() && m_soundManager.hasCachedSound(customFileId)) {
-                    m_soundManager.playNotificationSound(customFileId, volume);
+                    m_soundManager.playCachedSound(customFileId, volume);
                 } else if (!customFileId.isEmpty()) {
                     QFile f(customFileId);
                     if (f.open(QIODevice::ReadOnly)) {
@@ -474,11 +478,7 @@ void NotificationManager::showNotification(const Notification::ToastNotification
         }
     }
 
-    // Delivery: in-app toasts, OS-native tray messages, or both. The master
-    // enable switch gates all visual output (sounds are gated separately).
-    if (!m_settings.enabled)
-        return;
-
+    // Delivery: in-app toasts, OS-native tray messages, or both.
     using DeliveryMode = Notification::NotificationSettings::DeliveryMode;
     using NativeMode = Notification::NotificationSettings::NativeMode;
 

@@ -116,7 +116,11 @@ void ToastContainer::dismissAll()
     // call removeNotification() after the animation completes, removing it
     // from the list naturally. Clearing immediately would orphan the widgets
     // and make the count check in addNotification() transiently inaccurate.
-    for (auto *notification : m_notifications) {
+    // Iterate a copy: with animations disabled, dismiss() synchronously emits
+    // dismissed -> removeNotification(), which mutates m_notifications while
+    // the loop is running.
+    const QList<ToastNotification *> snapshots(m_notifications);
+    for (auto *notification : snapshots) {
         notification->dismiss();
     }
 }

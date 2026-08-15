@@ -35,6 +35,7 @@ public:
     void cacheSound(const QString &soundId, const QByteArray &data, const QString &format);
     bool hasCachedSound(const QString &soundId) const;
     void clearCache();
+    void playCachedSound(const QString &soundId, int volume = 100);
 
     // Built-in sound IDs
     static constexpr const char *DefaultNotification = "notification_default";

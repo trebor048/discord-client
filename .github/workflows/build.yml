@@ -171,3 +171,83 @@ jobs:
           path: acheron-windows
           if-no-files-found: error
           retention-days: 1
+
+  build-linux:
+    name: Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Initialize submodules
+        run: git submodule update --init --recursive
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build pkg-config \
+            autoconf automake libtool perl \
+            libgl1-mesa-dev libegl1-mesa libfontconfig1-dev \
+            libxkbcommon-x11-0 libxkbcommon-dev libx11-xcb1 libdbus-1-3 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
+            libxcb-xkb1 libxrender1 libxi6 libsm6 libice6 libxext6 \
+            libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 libpulse0 \
+            zlib1g-dev
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4.3.1
+        with:
+          version: ${{ env.QT_VERSION }}
+          modules: qtimageformats qtmultimedia
+          cache: true
+          setup-python: false
+
+      - name: Set up vcpkg
+        run: |
+          vcpkgRoot="$RUNNER_TEMP/vcpkg"
+          # Full clone (NOT --depth 1): vcpkg.json pins a builtin-baseline that
+          # must exist locally to be checked out.
+          git clone https://github.com/microsoft/vcpkg.git "$vcpkgRoot"
+          git -C "$vcpkgRoot" checkout "$VCPKG_BASELINE"
+          "$vcpkgRoot/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=$vcpkgRoot" >> "$GITHUB_ENV"
+
+      - name: Cache vcpkg packages
+        uses: actions/cache@v6
+        with:
+          path: build-linux/vcpkg_installed
+          key: >-
+            vcpkg-${{ runner.os }}-x64-linux-${{ env.VCPKG_BASELINE }}-${{
+            hashFiles('vcpkg.json', 'vcpkg-overlay-ports/mlspp/**') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-x64-linux-${{ env.VCPKG_BASELINE }}-
+
+      - name: Configure
+        run: |
+          qt6Dir="$QT_ROOT_DIR/lib/cmake/Qt6"
+          if [ ! -f "$qt6Dir/Qt6Config.cmake" ]; then
+            echo "Qt6Config.cmake not found at $qt6Dir" >&2
+            exit 1
+          fi
+          cmake --preset linux \
+            "-DQt6_DIR=$qt6Dir" \
+            "-DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+
+      - name: Build
+        run: cmake --build --preset linux --parallel
+
+      - name: Test
+        run: ctest --preset linux --output-on-failure
+
+      - name: Upload artifact
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        uses: actions/upload-artifact@v7
+        with:
+          name: acheron-linux
+          path: build-linux/acheron
+          if-no-files-found: error
+          retention-days: 1

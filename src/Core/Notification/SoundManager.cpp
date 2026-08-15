@@ -133,7 +133,10 @@ QByteArray SoundManager::audioBufferToWav(const QAudioBuffer& buffer)
     const int bitsPerSample = 16;
     const int byteRate = sampleRate * channels * bitsPerSample / 8;
     const int blockAlign = channels * bitsPerSample / 8;
-    const int dataSize = buffer.byteCount();
+    // buffer.byteCount() is the interleaved float size (frames*channels*4); we
+    // write 16-bit PCM (frames*channels*2), so the data chunk must match the
+    // actual bytes written or players truncate/misread the file.
+    const int dataSize = static_cast<int>(buffer.frameCount()) * channels * bitsPerSample / 8;
     const int fileSize = 36 + dataSize;
 
     // RIFF header
@@ -266,6 +269,25 @@ bool SoundManager::hasCachedSound(const QString &soundId) const
 {
     QMutexLocker locker(&m_cacheMutex);
     return m_soundCache.contains(soundId);
+}
+
+void SoundManager::playCachedSound(const QString &soundId, int volume)
+{
+    if (!m_initialized || m_globalVolume == 0 || volume == 0)
+        return;
+
+    CachedSound cached;
+    {
+        QMutexLocker locker(&m_cacheMutex);
+        auto it = m_soundCache.constFind(soundId);
+        if (it == m_soundCache.constEnd())
+            return;
+        cached = it.value();
+    }
+
+    ensurePlayer();
+    playFromBuffer(cached.data, cached.format, volume);
+    emit soundPlayed(soundId);
 }
 
 void SoundManager::clearCache()

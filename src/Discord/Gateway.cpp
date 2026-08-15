@@ -138,7 +138,9 @@ void Gateway::onPayloadReceived(const QJsonObject &root)
         shouldReconnect = true;
         break;
     case OpCode::INVALID_SESSION: {
-        bool resumable = msg.data.toBool();
+        // Discord defaults the resumable flag to true when `d` is absent.
+        const bool resumable =
+                msg.data.isUndefined() ? true : msg.data.toBool();
         qCInfo(LogDiscord) << "Invalid session, resumable:" << resumable;
         if (!resumable) {
             canResume = false;
@@ -897,8 +899,16 @@ void Gateway::networkLoop()
                 continue;
             }
 
-            if (!meta)
-                continue;
+            if (!meta) {
+                // Any other error (e.g. CURLE_RECV_ERROR after the TCP socket
+                // drops) leaves meta == nullptr. Treat it as a dead connection:
+                // break out and reconnect instead of busy-looping at 100% CPU.
+                qCWarning(LogDiscord) << "Gateway recv error" << res
+                                      << "- treating as connection failure";
+                if (!wantToClose)
+                    shouldReconnect = true;
+                break;
+            }
 
             if (meta->flags & CURLWS_CLOSE) {
                 int closeCode = 1000;
@@ -914,7 +924,9 @@ void Gateway::networkLoop()
                                    << "reason:" << closeReason;
                 CloseCode cc = static_cast<CloseCode>(closeCode);
                 emit disconnected(cc, closeReason);
-                if (!wantToClose && !isFatalCloseCode(cc) && canResume)
+                // Reconnect even before READY (canResume false): a network blip
+                // while identifying must not permanently kill the gateway.
+                if (!wantToClose && !isFatalCloseCode(cc))
                     shouldReconnect = true;
                 break;
             }

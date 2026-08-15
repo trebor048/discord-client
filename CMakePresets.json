@@ -18,6 +18,18 @@
         "BUILD_TESTS": "ON",
         "ENABLE_RNNOISE": "OFF"
       }
+    },
+    {
+      "name": "linux",
+      "displayName": "Linux x64 (Ninja, RelWithDebInfo)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-linux",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "VCPKG_TARGET_TRIPLET": "x64-linux",
+        "BUILD_TESTS": "ON",
+        "ENABLE_RNNOISE": "OFF"
+      }
     }
   ],
   "buildPresets": [
@@ -25,6 +37,10 @@
       "name": "windows",
       "configurePreset": "windows",
       "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "linux",
+      "configurePreset": "linux"
     }
   ],
   "testPresets": [
@@ -32,6 +48,13 @@
       "name": "windows",
       "configurePreset": "windows",
       "configuration": "RelWithDebInfo",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux",
+      "configurePreset": "linux",
       "output": {
         "outputOnFailure": true
       }

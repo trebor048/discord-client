@@ -2,6 +2,7 @@
 
 #include <QWidget>
 #include <QPropertyAnimation>
+#include <QPointer>
 #include <QTimer>
 #include <QElapsedTimer>
 #include <QLabel>
@@ -137,7 +138,9 @@ private:
     bool m_groupExpanded = false;
     static constexpr int MaxGroupEntries = 10;
 
-    QPropertyAnimation *m_fadeAnimation = nullptr;
+    // QPointer: the animations use DeleteWhenStopped, so the raw pointer would
+    // dangle after the animation finishes; QPointer auto-nulls on deletion.
+    QPointer<QPropertyAnimation> m_fadeAnimation;
     QTimer *m_countdownTimer = nullptr;
     QTimer *m_resizeDebouncer = nullptr;
     QElapsedTimer m_countdownElapsed;

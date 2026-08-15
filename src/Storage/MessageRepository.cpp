@@ -4,6 +4,7 @@
 #include <QJsonArray>
 
 #include "DatabaseManager.hpp"
+#include "Transaction.hpp"
 
 #include "Core/Logging.hpp"
 
@@ -33,9 +34,15 @@ void MessageRepository::saveMessages(const QList<Discord::Message> &messages, QS
     if (messages.isEmpty())
         return;
 
-    if (!db.transaction()) {
-        qCWarning(LogDB) << "MessageRepository: failed to start transaction:";
-        return;
+    // Guard against nested transactions: if the caller already opened one via
+    // Storage::Transaction, a second BEGIN would fail and silently drop data.
+    bool ownsTransaction = false;
+    if (!Transaction::isActive(db.connectionName())) {
+        if (!db.transaction()) {
+            qCWarning(LogDB) << "MessageRepository: failed to start transaction:";
+            return;
+        }
+        ownsTransaction = true;
     }
     QSqlQuery qMsg(db);
     qMsg.prepare(R"(
@@ -136,14 +143,15 @@ void MessageRepository::saveMessages(const QList<Discord::Message> &messages, QS
     for (qint64 channelId : touchedChannels)
         pruneChannel(channelId, db);
 
-    if (!db.commit()) {
+    if (ownsTransaction && !db.commit()) {
         qCWarning(LogDB) << "MessageRepository: failed to commit transaction:";
         db.rollback();
     }
     return;
 
 rollback:
-    db.rollback();
+    if (ownsTransaction)
+        db.rollback();
 }
 
 void MessageRepository::pruneChannel(qint64 channelId, QSqlDatabase &db)

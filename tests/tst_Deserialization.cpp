@@ -18,6 +18,7 @@ private slots:
     void testChannelThreadMetadata();
     void testChannelForumTags();
     void testUser();
+    void testMessageBotEmbed();
     void testEmoji();
     void testEmojiUnicode();
     void testGuildDelete();
@@ -176,6 +177,72 @@ void TestDeserialization::testUser()
     QCOMPARE(static_cast<quint64>(user.id.get()), 123ull);
     QCOMPARE(user.username.get(), QString("testuser"));
     QCOMPARE(user.avatar.get(), QString("abc123"));
+}
+
+void TestDeserialization::testMessageBotEmbed()
+{
+    QJsonObject author;
+    author["name"] = "ModBot";
+
+    QJsonObject footer;
+    footer["text"] = "Acme Bot";
+
+    QJsonObject field;
+    field["name"] = "Reason";
+    field["value"] = "Spam";
+    field["inline"] = true;
+
+    QJsonArray fields;
+    fields.append(field);
+
+    QJsonObject embed;
+    embed["type"] = "rich";
+    embed["title"] = "Warning";
+    embed["description"] = "You have been warned.";
+    embed["color"] = 15158332;
+    embed["author"] = author;
+    embed["footer"] = footer;
+    embed["fields"] = fields;
+
+    QJsonArray embeds;
+    embeds.append(embed);
+
+    QJsonObject user;
+    user["id"] = "789";
+    user["username"] = "botuser";
+
+    QJsonObject obj;
+    obj["id"] = "123";
+    obj["channel_id"] = "456";
+    obj["author"] = user;
+    obj["content"] = "";
+    obj["type"] = 0;
+    obj["embeds"] = embeds;
+
+    Message msg = Message::fromJson(obj);
+
+    QVERIFY(msg.embeds.hasValue());
+    QCOMPARE(msg.embeds->size(), 1);
+
+    const Embed &e = msg.embeds->at(0);
+    // Bot embeds carry no top-level URL; they must still be parsed intact.
+    QVERIFY(!e.url.hasValue());
+    QCOMPARE(e.type.get(), QString("rich"));
+    QCOMPARE(e.title.get(), QString("Warning"));
+    QCOMPARE(e.description.get(), QString("You have been warned."));
+    QCOMPARE(e.color.get(), 15158332);
+
+    QVERIFY(e.author.hasValue());
+    QCOMPARE(e.author->name.get(), QString("ModBot"));
+
+    QVERIFY(e.footer.hasValue());
+    QCOMPARE(e.footer->text.get(), QString("Acme Bot"));
+
+    QVERIFY(e.fields.hasValue());
+    QCOMPARE(e.fields->size(), 1);
+    QCOMPARE(e.fields->at(0).name.get(), QString("Reason"));
+    QCOMPARE(e.fields->at(0).value.get(), QString("Spam"));
+    QCOMPARE(e.fields->at(0).isInline.get(), true);
 }
 
 void TestDeserialization::testEmoji()

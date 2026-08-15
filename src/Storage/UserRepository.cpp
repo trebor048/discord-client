@@ -1,6 +1,7 @@
 #include "UserRepository.hpp"
 
 #include "DatabaseManager.hpp"
+#include "Transaction.hpp"
 #include "Core/Logging.hpp"
 
 namespace Acheron {
@@ -46,16 +47,21 @@ bool UserRepository::saveUsers(const QList<Discord::User> &users, QSqlDatabase &
     if (users.isEmpty())
         return true;
 
-    if (!db.transaction()) {
-        qCWarning(LogDB) << "UserRepository: failed to start transaction";
-        return false;
+    // Guard against nested transactions (see MessageRepository::saveMessages).
+    bool ownsTransaction = false;
+    if (!Transaction::isActive(db.connectionName())) {
+        if (!db.transaction()) {
+            qCWarning(LogDB) << "UserRepository: failed to start transaction";
+            return false;
+        }
+        ownsTransaction = true;
     }
 
     for (const auto &user : users)
         if (!saveUser(user, db))
             goto rollback;
 
-    if (!db.commit()) {
+    if (ownsTransaction && !db.commit()) {
         qCWarning(LogDB) << "UserRepository: failed to commit transaction";
         db.rollback();
         return false;
@@ -63,7 +69,8 @@ bool UserRepository::saveUsers(const QList<Discord::User> &users, QSqlDatabase &
     return true;
 
 rollback:
-    db.rollback();
+    if (ownsTransaction)
+        db.rollback();
     return false;
 }
 

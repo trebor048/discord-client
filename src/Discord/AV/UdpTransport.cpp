@@ -125,9 +125,16 @@ void UdpTransport::parseIpDiscoveryResponse(const QByteArray &data)
     if (discoveryTimer)
         discoveryTimer->stop();
 
-    // null terminated
-    const char *ipStart = data.constData() + 8;
-    QString discoveredIp = QString::fromUtf8(ipStart);
+    // The address field is 64 bytes at offset 8 (NUL-terminated per protocol).
+    // Bounded read: fromUtf8(const char*) would read past the buffer if the
+    // field is not NUL-terminated or the datagram is malformed.
+    static constexpr int ipAddressFieldSize = 64;
+    QString discoveredIp;
+    if (data.size() >= 8 + ipAddressFieldSize) {
+        const QByteArray ipField = data.mid(8, ipAddressFieldSize);
+        const int nul = ipField.indexOf('\0');
+        discoveredIp = QString::fromUtf8(nul >= 0 ? ipField.left(nul) : ipField);
+    }
 
     quint16 discoveredPort;
     memcpy(&discoveredPort, data.constData() + 72, 2);

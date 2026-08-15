@@ -288,6 +288,8 @@ void ChatView::mouseMoveEvent(QMouseEvent *event)
 
     bool inSelectionDrag = (event->buttons() & Qt::LeftButton) && selectionAnchor.isValid();
     if (inSelectionDrag) {
+        if (!model())
+            return;
         int currentRow = idx.isValid() ? idx.row() : (model()->rowCount() - 1);
         if (currentRow < 0)
             return;

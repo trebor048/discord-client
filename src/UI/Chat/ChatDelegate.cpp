@@ -321,8 +321,10 @@ void ChatDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
         painter->fillRect(option.rect, newMsgGlow);
     }
 
-    if (!chatModel)
+    if (!chatModel) {
+        painter->restore();
         return;
+    }
 
     QFont bodyFont = option.font;
     if (ctx.isSystemMessage)

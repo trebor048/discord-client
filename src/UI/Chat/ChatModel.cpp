@@ -123,6 +123,9 @@ ChatModel::ChatModel(Core::ImageManager *imageManager, QObject *parent)
                         if (row < 0)
                             continue;
                         invalidateDocCacheForMessage(id);
+                        // The doc grew after the emoji image loaded; drop the
+                        // cached row height so the row re-measures.
+                        sizeCache.remove(id);
                         QModelIndex idx = index(row, 0);
                         emit dataChanged(idx, idx, { HtmlRole, EmbedsRole, CachedSizeRole });
                     }
@@ -131,6 +134,7 @@ ChatModel::ChatModel(Core::ImageManager *imageManager, QObject *parent)
                         const int row = messageRowById.value(id, -1);
                         if (row < 0)
                             continue;
+                        reactionCache.remove(id);
                         sizeCache.remove(id);
                         QModelIndex idx = index(row, 0);
                         emit dataChanged(idx, idx, { ReactionsRole, CachedSizeRole });
@@ -175,6 +179,9 @@ void ChatModel::notifyImageSettled(const QUrl &url)
         if (row < 0)
             continue;
         invalidateDocCacheForMessage(id);
+        // The doc grew after the emoji image loaded; drop the cached row
+        // height so the row re-measures.
+        sizeCache.remove(id);
         QModelIndex idx = index(row, 0);
         emit dataChanged(idx, idx, { HtmlRole, EmbedsRole, CachedSizeRole });
     }
@@ -183,6 +190,7 @@ void ChatModel::notifyImageSettled(const QUrl &url)
         const int row = messageRowById.value(id, -1);
         if (row < 0)
             continue;
+        reactionCache.remove(id);
         sizeCache.remove(id);
         QModelIndex idx = index(row, 0);
         emit dataChanged(idx, idx, { ReactionsRole, CachedSizeRole });
@@ -201,6 +209,7 @@ void ChatModel::notifyImageSettled(const QUrl &url)
         const int row = messageRowById.value(id, -1);
         if (row < 0)
             continue;
+        attachmentCache.remove(id);
         embedCache.remove(id);
         sizeCache.remove(id);
         invalidateDocCacheForMessage(id);
@@ -380,11 +389,17 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
             return QVariant();
 
         auto it = attachmentCache.find(msg.id);
-        if (it == attachmentCache.end()) {
-            QList<AttachmentData> data = buildAttachmentData(msg);
-            it = attachmentCache.insert(msg.id, std::move(data));
-        }
-        return QVariant::fromValue(*it);
+        if (it != attachmentCache.end())
+            return QVariant::fromValue(*it);
+
+        QList<AttachmentData> data = buildAttachmentData(msg);
+        // Do not cache during the sizeHint pass: it runs with
+        // suppressImageFetch set, so only getIfCached() placeholders would be
+        // stored. Caching those freezes the gray box and stops the paint pass
+        // from ever issuing the real network fetch.
+        if (!suppressImageFetch)
+            attachmentCache.insert(msg.id, data);
+        return QVariant::fromValue(data);
     }
     case EmbedsRole: {
         if (!msg.embeds.hasValue() || msg.embeds->isEmpty())
@@ -434,7 +449,8 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
 
                 bool hasAnything = embed.title.hasValue() || embed.description.hasValue() ||
                                    embed.timestamp.hasValue() || embed.color.hasValue() ||
-                                   embed.author.hasValue() || embed.footer.hasValue() || hasImage;
+                                   embed.author.hasValue() || embed.footer.hasValue() ||
+                                   embed.provider.hasValue() || embed.video.hasValue() || hasImage;
 
                 data.type = embedTypeFromString(embed.type.hasValue() ? *embed.type : QString());
                 data.title = embed.title.hasValue() ? *embed.title : QString();
@@ -502,6 +518,7 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
                 // take the thumbnail so the GIF/preview can render.
                 const bool isFullBleedEmbed =
                         data.type == EmbedType::Gifv || data.type == EmbedType::Image;
+                const bool isVideoEmbed = data.type == EmbedType::Video;
                 if (embed.thumbnail.hasValue() && embed.thumbnail->proxyUrl.hasValue() &&
                     (embed.thumbnail->width > 0 || isFullBleedEmbed)) {
                     hasAnything = true;
@@ -510,17 +527,26 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
                     if (embed.thumbnail->width.hasValue() && embed.thumbnail->height.hasValue())
                         origSize = QSize(*embed.thumbnail->width, *embed.thumbnail->height);
 
-                    if (data.type == EmbedType::Gifv || data.type == EmbedType::Image)
+                    // Video embeds render the full-bleed preview from
+                    // videoThumbnail below, so skip the small side thumbnail
+                    // (which would otherwise reserve a thumbnail gutter).
+                    if (data.type == EmbedType::Gifv || data.type == EmbedType::Image) {
                         data.thumbnailSize = Core::ImageManager::calculateDisplaySize(origSize);
-                    else
+                        data.thumbnail =
+                                suppressImageFetch
+                                        ? imageManager->getIfCached(data.thumbnailUrl,
+                                                                    data.thumbnailSize)
+                                        : imageManager->get(data.thumbnailUrl, data.thumbnailSize);
+                    } else if (!isVideoEmbed) {
                         data.thumbnailSize = origSize.isValid()
                                                      ? origSize.scaled(80, 80, Qt::KeepAspectRatio)
                                                      : QSize(80, 80);
-                    data.thumbnail =
-                            suppressImageFetch
-                                    ? imageManager->getIfCached(data.thumbnailUrl,
-                                                                data.thumbnailSize)
-                                    : imageManager->get(data.thumbnailUrl, data.thumbnailSize);
+                        data.thumbnail =
+                                suppressImageFetch
+                                        ? imageManager->getIfCached(data.thumbnailUrl,
+                                                                    data.thumbnailSize)
+                                        : imageManager->get(data.thumbnailUrl, data.thumbnailSize);
+                    }
                 }
 
                 if (hasImage) {
@@ -593,18 +619,25 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
                     }
                 }
 
-                if (!embedUrl.isEmpty())
-                    urlToEmbedIndex[embedUrl] = result.size();
+                // Bot-generated embeds (rich/link/gift/etc.) frequently have
+                // no top-level URL; they must still be rendered. Only the
+                // url-based image-merge bookkeeping is gated on a URL.
+                if (!hasAnything)
+                    continue;
 
-                if (hasAnything)
-                    result.append(data);
+                result.append(data);
+                if (!embedUrl.isEmpty())
+                    urlToEmbedIndex[embedUrl] = result.size() - 1;
             }
         }
 
-        // Always cache the parse result — suppressImageFetch only suppresses
-        // the image fetch above, not the (expensive) markdown re-parse.
-        embedCache[msg.id] = result;
         indexEmbedEmojiUrls(msg.id, result);
+        // Only cache when images are actually being fetched. The sizeHint pass
+        // sets suppressImageFetch, which fills this result with placeholders;
+        // caching then would stop the paint pass from ever triggering a real
+        // fetch, leaving embed images as gray boxes forever.
+        if (!suppressImageFetch)
+            embedCache[msg.id] = result;
         return QVariant::fromValue(result);
     }
     case IsPendingRole:
@@ -620,11 +653,13 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
             return QVariant();
 
         auto it = reactionCache.find(msg.id);
-        if (it == reactionCache.end()) {
-            QList<ReactionData> data = buildReactionData(msg);
-            it = reactionCache.insert(msg.id, std::move(data));
-        }
-        return QVariant::fromValue(*it);
+        if (it != reactionCache.end())
+            return QVariant::fromValue(*it);
+
+        QList<ReactionData> data = buildReactionData(msg);
+        if (!suppressImageFetch)
+            reactionCache.insert(msg.id, data);
+        return QVariant::fromValue(data);
     }
     case StickersRole: {
         if (!msg.stickerItems.hasValue() || msg.stickerItems->isEmpty())
@@ -657,8 +692,20 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
                         const_cast<ChatModel *>(this)->stickerMovie(data.id, data.cdnUrl, data.formatType);
                         auto &rows = stickerMovieRows[data.id];
                         QPersistentModelIndex persistentIndex(index);
-                        if (!rows.contains(persistentIndex))
+                        if (!rows.contains(persistentIndex)) {
+                            // Row shifts (history/jump) move persistent indexes
+                            // to point at different messages, so `contains` may
+                            // miss and the list would grow unbounded. Prune
+                            // entries that no longer resolve to this message.
+                            for (int i = rows.size() - 1; i >= 0; --i) {
+                                const QModelIndex idx = rows[i];
+                                if (!idx.isValid()
+                                    || idx.data(MessageIdRole).toULongLong()
+                                               != static_cast<quint64>(msg.id.get()))
+                                    rows.removeAt(i);
+                            }
                             rows.append(persistentIndex);
+                        }
                     }
                 }
             }
@@ -918,6 +965,7 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
     case Discord::Client::MessageLoadType::Latest: {
         beginResetModel();
         sizeCache.clear();
+        attachmentCache.clear();
         embedCache.clear();
         reactionCache.clear();
         docCache.clear();
@@ -1074,6 +1122,7 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
             indexMessageEmojiUrls(messages[row]);
 
             sizeCache.remove(incomingMsg.id);
+            attachmentCache.remove(incomingMsg.id);
             embedCache.remove(incomingMsg.id);
             reactionCache.remove(incomingMsg.id);
             invalidateDocCacheForMessage(incomingMsg.id);
@@ -1104,6 +1153,7 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
             indexMessageEmojiUrls(messages[row]);
 
             sizeCache.remove(incomingMsg.id);
+            attachmentCache.remove(incomingMsg.id);
             embedCache.remove(incomingMsg.id);
             reactionCache.remove(incomingMsg.id);
             invalidateDocCacheForMessage(incomingMsg.id);
@@ -1136,12 +1186,20 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
 
             const int row = it.value();
             prunePreviewCaches(messages[row]); // drop the pending preview's pixmaps
-            unindexMessageEmojiUrls(messages[row].id);
+            const Snowflake oldId = messages[row].id;
+            unindexMessageEmojiUrls(oldId);
             messages[row] = incomingMsg;
             indexMessageEmojiUrls(messages[row]);
             pendingNonces.remove(nonce);
             uploadProgress.remove(nonce);
+            // Drop caches keyed by the old placeholder id — they can never be
+            // hit again after the ID changes and would leak for the session.
+            sizeCache.remove(oldId);
+            attachmentCache.remove(oldId);
+            embedCache.remove(oldId);
+            reactionCache.remove(oldId);
             reactionCache.remove(incomingMsg.id);
+            attachmentCache.remove(incomingMsg.id);
             messageRowIndexDirty = true; // message ID changed
             QModelIndex idx = index(row, 0);
             emit dataChanged(idx, idx);
@@ -1210,6 +1268,7 @@ void ChatModel::handleMessageDeleted(Snowflake channelId, Snowflake messageId)
             prunePreviewCaches(messages[i]); // cancelled/deleted preview won't render again
             beginRemoveRows({}, i, i);
             sizeCache.remove(messageId);
+            attachmentCache.remove(messageId);
             embedCache.remove(messageId);
             reactionCache.remove(messageId);
             invalidateDocCacheForMessage(messageId);
@@ -1223,6 +1282,7 @@ void ChatModel::handleMessageDeleted(Snowflake channelId, Snowflake messageId)
                 const auto &nextMessage = messages[i];
 
                 sizeCache.remove(nextMessage.id);
+                attachmentCache.remove(nextMessage.id);
                 embedCache.remove(nextMessage.id);
                 invalidateDocCacheForMessage(nextMessage.id);
 
@@ -1491,6 +1551,7 @@ void ChatModel::trimOldestMessagesIfNeeded()
         }
         prunePreviewCaches(msg);
         sizeCache.remove(msg.id);
+        attachmentCache.remove(msg.id);
         embedCache.remove(msg.id);
         reactionCache.remove(msg.id);
         invalidateDocCacheForMessage(msg.id);
@@ -1535,6 +1596,7 @@ void ChatModel::setActiveChannel(Snowflake channelId, Snowflake guildId)
     beginResetModel();
     messages.clear();
     sizeCache.clear();
+    attachmentCache.clear();
     embedCache.clear();
     reactionCache.clear();
     docCache.clear();
@@ -1668,8 +1730,16 @@ QMovie *ChatModel::stickerMovie(Snowflake stickerId, const QUrl &cdnUrl,
     QNetworkRequest request(cdnUrl);
     request.setTransferTimeout(15000);
     QNetworkReply *reply = stickerNetworkManager->get(request);
-    connect(reply, &QNetworkReply::finished, this, [this, movie, reply, stickerId]() {
+    // Capture the movie via QPointer: qDeleteAll() on channel switch/reset
+    // deletes movies whose fetch replies may still be in flight. QPointer
+    // auto-nulls, so a late finished() cannot touch a freed QMovie.
+    QPointer<QMovie> movieGuard(movie);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, stickerId, movieGuard]() {
         reply->deleteLater();
+
+        QMovie *movie = movieGuard.data();
+        if (!movie)
+            return; // movie was deleted by a channel switch/reset
 
         if (reply->error() != QNetworkReply::NoError) {
             if (stickerMovies.value(stickerId) == movie)
@@ -1770,8 +1840,18 @@ Core::GifAnimation *ChatModel::ensureGifAnimation(const QUrl &url, int row) cons
     if (it != gifAttachmentAnimations.constEnd() && it.value()) {
         auto &rows = gifAnimationRows[url];
         QPersistentModelIndex persistentIndex(index(row, 0));
-        if (!rows.contains(persistentIndex))
+        if (!rows.contains(persistentIndex)) {
+            // Row shifts move persistent indexes to different messages; prune
+            // stale entries so the row list does not grow unbounded.
+            const quint64 msgId =
+                    row < messages.size() ? static_cast<quint64>(messages[row].id.get()) : quint64(0);
+            for (int i = rows.size() - 1; i >= 0; --i) {
+                const QModelIndex idx = rows[i];
+                if (!idx.isValid() || idx.data(MessageIdRole).toULongLong() != msgId)
+                    rows.removeAt(i);
+            }
             rows.append(persistentIndex);
+        }
         it.value()->play();
         return it.value();
     }

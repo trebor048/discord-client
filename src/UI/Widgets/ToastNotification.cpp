@@ -106,6 +106,7 @@ void ToastNotification::setupUi()
     m_iconLabel->setStyleSheet(QStringLiteral("border-radius: 20px; background-color: %1;")
                                        .arg(m_borderColor.name()));
     m_iconLabel->setCursor(Qt::PointingHandCursor);
+    m_iconLabel->installEventFilter(this);
     mainLayout->addWidget(m_iconLabel, 0, Qt::AlignTop);
 
     // Content area
@@ -803,6 +804,13 @@ void ToastNotification::mousePressEvent(QMouseEvent *event)
 
 bool ToastNotification::eventFilter(QObject *watched, QEvent *event)
 {
+    if (watched == m_iconLabel && event->type() == QEvent::MouseButtonRelease) {
+        auto *mouseEvent = static_cast<QMouseEvent *>(event);
+        if (mouseEvent->button() == Qt::LeftButton) {
+            emit iconClicked(m_data);
+            return true;
+        }
+    }
     if (watched == m_replyEdit && event->type() == QEvent::KeyPress) {
         auto *keyEvent = static_cast<QKeyEvent *>(event);
         if (keyEvent->key() == Qt::Key_Escape) {
