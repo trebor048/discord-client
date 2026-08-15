@@ -450,9 +450,13 @@ if(BUILD_TESTS)
             ProtoReaderTests
             EmojiSegmenterTests
             MemberListTests
-            RuntimeSmoke
             PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORM_PLUGIN_PATH=${QT_INSTALL_PREFIX}/plugins/platforms"
         )
+        if(NOT WIN32)
+            set_tests_properties(RuntimeSmoke PROPERTIES
+                ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORM_PLUGIN_PATH=${QT_INSTALL_PREFIX}/plugins/platforms"
+            )
+        endif()
     endif()
 endif()
 
