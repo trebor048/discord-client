@@ -196,7 +196,7 @@ jobs:
             libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
             libxcb-xkb1 libxrender1 libxi6 libsm6 libice6 libxext6 \
             libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 libpulse0 \
-            zlib1g-dev
+            zlib1g-dev libsecret-1-dev
 
       - name: Install Qt
         uses: jurplel/install-qt-action@v4.3.1
