@@ -122,6 +122,15 @@ if(NOT TARGET Qt::ZlibPrivate)
     target_link_libraries(QtZlibCompat INTERFACE ZLIB::ZLIB)
 endif()
 
+# Unified zlib target: Qt's private zlib when available, else the system-zlib
+# shim above. Headers like IngestThread.hpp do #include <QtZlib/zlib.h>, so any
+# target compiling them needs this on its include path.
+if(TARGET Qt::ZlibPrivate)
+    set(ACHERON_ZLIB_TARGET Qt::ZlibPrivate)
+else()
+    set(ACHERON_ZLIB_TARGET QtZlibCompat)
+endif()
+
 find_package(Qt6Keychain QUIET)
 if(Qt6Keychain_FOUND)
     message(STATUS "Using system-installed QtKeychain")
@@ -376,7 +385,7 @@ if(BUILD_TESTS)
         tests/tst_Linkification.cpp
         src/UI/Chat/ChatLinkification.cpp
     )
-    target_link_libraries(TestLinkification PRIVATE Qt::Core Qt::Gui Qt::Widgets Qt::Network Qt::Sql Qt::Test CURL::libcurl)
+    target_link_libraries(TestLinkification PRIVATE Qt::Core Qt::Gui Qt::Widgets Qt::Network Qt::Sql Qt::Test CURL::libcurl ${ACHERON_ZLIB_TARGET})
     target_include_directories(TestLinkification PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CURL_INCLUDE_DIRS}
@@ -525,11 +534,7 @@ if(ENABLE_VOICE)
         target_compile_definitions(${PROJECT_NAME} PRIVATE ACHERON_HAVE_RNNOISE)
     endif()
 endif()
-if(TARGET Qt::ZlibPrivate)
-    target_link_libraries(${PROJECT_NAME} PRIVATE Qt::ZlibPrivate)
-else()
-    target_link_libraries(${PROJECT_NAME} PRIVATE QtZlibCompat)
-endif()
+target_link_libraries(${PROJECT_NAME} PRIVATE ${ACHERON_ZLIB_TARGET})
 if(USE_PCH)
     target_precompile_headers(${PROJECT_NAME} PUBLIC src/pch.h)
 endif()
