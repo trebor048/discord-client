@@ -72,6 +72,9 @@ sqldrivers/
 styles/
 /tls/
 
+# === Release artifacts (published via GitHub Releases, not committed) ===
+/releases/
+
 # === Local tools / scratch ===
 .qwen/
 .opencode/
