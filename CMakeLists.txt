@@ -442,6 +442,7 @@ if(BUILD_TESTS)
             LinkificationTests
             ProtoReaderTests
             EmojiSegmenterTests
+            MemberListTests
             RuntimeSmoke
             PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORM_PLUGIN_PATH=${QT_INSTALL_PREFIX}/plugins/platforms"
         )
