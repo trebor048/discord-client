@@ -134,6 +134,21 @@ jobs:
         run: |
           cmake --build --preset windows --config RelWithDebInfo --parallel
 
+      - name: Copy runtime DLLs for smoke test
+        shell: pwsh
+        run: |
+          # The ctest RuntimeSmoke test runs the build-tree acheron.exe directly,
+          # but opus and curl-impersonate are dynamic imports that only the
+          # deploy step normally places beside it. Copy them now so the exe can
+          # start (Qt DLLs are already on PATH via install-qt-action).
+          $exeDir = Join-Path $env:GITHUB_WORKSPACE 'build\RelWithDebInfo'
+          $curlDll = Join-Path $env:GITHUB_WORKSPACE 'curl-impersonate\lib\libcurl-impersonate.dll'
+          $opusDll = Join-Path $env:GITHUB_WORKSPACE 'build\vcpkg_installed\x64-windows-static-md\bin\opus.dll'
+          if (-not (Test-Path $curlDll)) { throw "curl-impersonate DLL not found: $curlDll" }
+          Copy-Item -Path $curlDll -Destination $exeDir -Force
+          if (Test-Path $opusDll) { Copy-Item -Path $opusDll -Destination $exeDir -Force }
+          Write-Host "Copied runtime DLLs into $exeDir"
+
       - name: Test
         shell: pwsh
         run: |
