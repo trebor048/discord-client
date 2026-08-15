@@ -134,13 +134,12 @@ jobs:
         run: |
           cmake --build --preset windows --config RelWithDebInfo --parallel
 
-      - name: Copy runtime DLLs for smoke test
+      - name: Copy runtime DLLs
         shell: pwsh
         run: |
-          # The ctest RuntimeSmoke test runs the build-tree acheron.exe directly,
-          # but opus and curl-impersonate are dynamic imports that only the
-          # deploy step normally places beside it. Copy them now so the exe can
-          # start (Qt DLLs are already on PATH via install-qt-action).
+          # opus.dll and libcurl-impersonate.dll are dynamic imports that the
+          # deploy step expects beside the built executable (opus.dll is listed
+          # in DeployQtRuntime.cmake's REQUIRED_RUNTIME_FILES).
           $exeDir = Join-Path $env:GITHUB_WORKSPACE 'build\RelWithDebInfo'
           $curlDll = Join-Path $env:GITHUB_WORKSPACE 'curl-impersonate\lib\libcurl-impersonate.dll'
           $opusDll = Join-Path $env:GITHUB_WORKSPACE 'build\vcpkg_installed\x64-windows-static-md\bin\opus.dll'
@@ -162,6 +161,18 @@ jobs:
           # files (e.g. opus.dll, a direct exec import that windeployqt cannot
           # discover) into build/deploy/<Config>. See cmake/DeployQtRuntime.cmake.
           cmake --build --preset windows --config RelWithDebInfo --target acheron_deploy
+
+      - name: Smoke test
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        shell: pwsh
+        run: |
+          # Validate the deployed app actually starts. windeployqt copies the Qt
+          # runtime and DeployQtRuntime.cmake copies opus.dll; curl-impersonate
+          # is copied here because it is not a Qt dependency.
+          $deployDir = Join-Path $env:GITHUB_WORKSPACE 'build\deploy\RelWithDebInfo'
+          $curlDll = Join-Path $env:GITHUB_WORKSPACE 'curl-impersonate\lib\libcurl-impersonate.dll'
+          Copy-Item -Path $curlDll -Destination $deployDir -Force
+          & "$env:GITHUB_WORKSPACE\scripts\windows-runtime-smoke.ps1" -DeploymentDirectory $deployDir
 
       - name: Prepare artifact
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')

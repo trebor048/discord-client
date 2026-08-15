@@ -424,12 +424,19 @@ if(BUILD_TESTS)
     target_include_directories(TestMemberList PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME MemberListTests COMMAND TestMemberList)
 
-    add_test(NAME RuntimeSmoke COMMAND $<TARGET_FILE:${PROJECT_NAME}> --runtime-smoke)
-    set_tests_properties(RuntimeSmoke PROPERTIES
-        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
-        PASS_REGULAR_EXPRESSION "ACHERON_RUNTIME_SMOKE_READY"
-        TIMEOUT 15
-    )
+    # The CTest smoke test runs the build-tree executable, which on Windows
+    # depends on runtime DLLs (Qt, opus, curl-impersonate) that are only
+    # assembled beside it by the deploy step; running it here would hang on a
+    # missing-DLL loader dialog. Windows smoke testing is done against the
+    # deployed app instead (see build.yml).
+    if(NOT WIN32)
+        add_test(NAME RuntimeSmoke COMMAND $<TARGET_FILE:${PROJECT_NAME}> --runtime-smoke)
+        set_tests_properties(RuntimeSmoke PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+            PASS_REGULAR_EXPRESSION "ACHERON_RUNTIME_SMOKE_READY"
+            TIMEOUT 15
+        )
+    endif()
 
     if(DEFINED Qt6_DIR)
         get_filename_component(QT_INSTALL_PREFIX "${Qt6_DIR}/../../.." ABSOLUTE)
