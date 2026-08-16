@@ -39,6 +39,9 @@ public:
     void requestForumUnreads(Core::Snowflake guildId, Core::Snowflake forumId,
                              const QList<QPair<Core::Snowflake, Core::Snowflake>> &threads);
     void sendVoiceStateUpdate(Core::Snowflake guildId, Core::Snowflake channelId, bool selfMute, bool selfDeaf);
+    void sendPresenceUpdate(const QString &status);
+    // Current gateway session id (needed to send interactions). Thread-safe.
+    [[nodiscard]] QString gatewaySessionId() const;
 
 #ifndef QT_NO_DEBUG
     // Debug: simulate a server RECONNECT opcode

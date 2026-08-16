@@ -78,6 +78,23 @@ NotificationSettings::DeliveryMode stringToDeliveryMode(const QString &str)
     return NotificationSettings::DeliveryMode::InApp;
 }
 
+QString toastPlacementToString(NotificationSettings::ToastPlacement p)
+{
+    switch (p) {
+    case NotificationSettings::ToastPlacement::InWindow: return "in-window";
+    case NotificationSettings::ToastPlacement::Monitor: return "monitor";
+    case NotificationSettings::ToastPlacement::Auto: return "auto";
+    }
+    return "monitor";
+}
+
+NotificationSettings::ToastPlacement stringToToastPlacement(const QString &str)
+{
+    if (str == "in-window") return NotificationSettings::ToastPlacement::InWindow;
+    if (str == "auto") return NotificationSettings::ToastPlacement::Auto;
+    return NotificationSettings::ToastPlacement::Monitor;
+}
+
 QColor generateBadgeColor(const QString &id)
 {
     // Generate a deterministic color from the ID using a hash

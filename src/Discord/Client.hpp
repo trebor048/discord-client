@@ -6,6 +6,8 @@
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QPointer>
+#include <QTimer>
 #include <QUrlQuery>
 
 #include <optional>
@@ -56,6 +58,20 @@ public:
                       MessagesCallback callback);
     void fetchMessage(Core::Snowflake channelId, Core::Snowflake messageId,
                       MessagesCallback callback);
+
+    using ApplicationCommandsCallback = std::function<void(const Core::Result<QList<ApplicationCommand>> &)>;
+    // Fetches CHAT_INPUT application commands available in a channel (the search
+    // endpoint the Discord client uses for slash-command autocomplete).
+    void fetchApplicationCommands(Core::Snowflake channelId, const QString &query,
+                                  ApplicationCommandsCallback callback);
+
+    // Sends a chat-input interaction (slash command) to the semi-internal
+    // /interactions endpoint. `options` are the parsed values matching the
+    // command's option tree (see InteractionOptionValue).
+    void sendApplicationCommandInteraction(Core::Snowflake channelId, Core::Snowflake guildId,
+                                           const ApplicationCommand &command,
+                                           const QList<InteractionOptionValue> &options,
+                                           const QString &nonce = QString());
 
     using ProfileCallback = std::function<void(const Core::Result<UserProfile> &)>;
     void fetchUserProfile(Core::Snowflake userId, Core::Snowflake guildId, ProfileCallback callback);
@@ -145,6 +161,13 @@ public:
     void removeReaction(Core::Snowflake channelId, Core::Snowflake messageId, const QString &emoji,
                         bool isBurst = false);
 
+    // Votes on a message poll. `pollId` is the message id in practice (the
+    // poll entity on a message has no distinct id). The successful response is
+    // the updated message, so the caller can refresh its poll results.
+    using PollVoteCallback = std::function<void(const Core::Result<Message> &)>;
+    void votePoll(Core::Snowflake channelId, Core::Snowflake messageId, Core::Snowflake pollId,
+                  const QList<int> &answerIds, PollVoteCallback callback = {});
+
     struct AckEntry
     {
         Core::Snowflake channelId;
@@ -156,6 +179,8 @@ public:
     void ackBulk(const QList<AckEntry> &entries);
 
     void sendVoiceStateUpdate(Core::Snowflake guildId, Core::Snowflake channelId, bool selfMute, bool selfDeaf);
+    // Sets own presence status ("online", "idle", "dnd", "invisible", "offline").
+    void setPresenceStatus(const QString &status);
 
     void leaveGuild(Snowflake guildId);
 
@@ -184,6 +209,20 @@ public:
     using BansCallback = std::function<void(const Core::Result<QList<BanEntry>> &)>;
     void fetchGuildBans(Core::Snowflake guildId, BansCallback callback);
     void unbanMember(Core::Snowflake guildId, Core::Snowflake userId);
+    void banMember(Core::Snowflake guildId, Core::Snowflake userId,
+                   int deleteMessageSeconds = 0, const QString &reason = QString());
+    void kickMember(Core::Snowflake guildId, Core::Snowflake userId,
+                    const QString &reason = QString());
+    void tempBanMember(Core::Snowflake guildId, Core::Snowflake userId,
+                       int deleteMessageSeconds, const QString &reason, int durationSeconds);
+    void setMemberMute(Core::Snowflake guildId, Core::Snowflake userId, bool muted,
+                       const QString &reason = QString());
+    void setMemberDeaf(Core::Snowflake guildId, Core::Snowflake userId, bool deafened,
+                       const QString &reason = QString());
+    // Times out a member (communication_disabled_until). `durationSeconds <= 0`
+    // removes the timeout.
+    void setMemberTimeout(Core::Snowflake guildId, Core::Snowflake userId, int durationSeconds,
+                          const QString &reason = QString());
 
     // Invites
     using InvitesCallback = std::function<void(const Core::Result<QList<InviteData>> &)>;
@@ -361,6 +400,12 @@ private:
     void cleanupUploadedSlots(const std::shared_ptr<UploadState> &state);
     void settleUpload(const std::shared_ptr<UploadState> &state);
 
+    // Persisted temp-ban unbans (survive app restart).
+    void restorePendingUnbans();
+    void schedulePendingUnban(Snowflake guildId, Snowflake userId, qint64 unbanAtMs);
+    void removePendingUnban(Snowflake guildId, Snowflake userId);
+    QHash<QPair<Snowflake, Snowflake>, QPointer<QTimer>> m_pendingUnbanTimers;
+
 private:
     Core::ConnectionState state = Core::ConnectionState::Disconnected;
 
@@ -378,6 +423,7 @@ private:
 
     Proto::PreloadedUserSettings settings;
     User me;
+    QString m_lastPresenceStatus; // re-applied after reconnect/identify
 };
 
 } // namespace Discord

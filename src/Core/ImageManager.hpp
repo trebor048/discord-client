@@ -59,12 +59,14 @@ inline int pixmapCost(const QPixmap &pixmap)
 }
 
 /**
- * Manages playback of a single animated GIF.
+ * Manages playback of a single animated GIF, webp or avif image.
  *
  * Wraps QMovie with:
  *   - Automatic downscaling to fit container width (kGifMaxWidth)
  *   - Pause/resume support for hover-to-pause
  *   - Progress callback for network loading
+ *   - Honors the "ui/gifAutoplay" QSettings key (default on): when disabled the
+ *     first frame is shown statically and playback is never auto-started.
  */
 class GifAnimation : public QObject
 {
@@ -205,6 +207,17 @@ public:
     /// Attaches download-size guards (Content-Length + accumulated bytes) to
     /// a reply, aborting it past kMaxDownloadBytes. Also used by GifAnimation.
     static void guardReply(QNetworkReply *reply);
+
+    /// Returns true if @p url's suffix or @p mime (e.g. "image/webp") identifies
+    /// an animated image (.gif/.webp/.avif) that the runtime Qt imageformats
+    /// plugins can decode. Formats with no plugin support report false so
+    /// callers can fall back to a static render.
+    [[nodiscard]] static bool isSupportedAnimatedImage(const QUrl &url,
+                                                       const QString &mime = QString());
+
+    /// Reads the GIF/webp autoplay preference from QSettings ("ui/gifAutoplay",
+    /// default on). When false, animations show their first frame statically.
+    [[nodiscard]] static bool gifAutoplayEnabled();
 
     /// Returns true if the last fetch for this url+size failed (network or
     /// decode). Failed requests are not re-issued until clearFailedRequests().

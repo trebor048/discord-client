@@ -127,6 +127,11 @@ struct NotificationSettings {
     enum class DeliveryMode { InApp, Native, Both };
     DeliveryMode deliveryMode = DeliveryMode::InApp;
 
+    // Where in-app toasts are anchored: inside the main window, on the monitor,
+    // or auto (in-window while the app is focused, monitor while unfocused).
+    enum class ToastPlacement { InWindow, Monitor, Auto };
+    ToastPlacement toastPlacement = ToastPlacement::Monitor;
+
     // Grouping: collapse multiple messages from the same conversation into one toast
     bool groupingEnabled = true;
 
@@ -150,6 +155,11 @@ struct NotificationSettings {
     bool notifyFriendServerMessages = true;
     bool notifyFriendRequests = true;
     bool respectServerSettings = true;
+
+    // Quiet hours: suppress toasts between start and end (HH:mm).
+    bool quietHoursEnabled = false;
+    QString quietHoursStart = QStringLiteral("22:00");
+    QString quietHoursEnd = QStringLiteral("07:00");
 
     // Privacy & Streaming
     bool disableInStreamerMode = true;
@@ -187,6 +197,8 @@ QString nativeModeToString(NotificationSettings::NativeMode m);
 NotificationSettings::NativeMode stringToNativeMode(const QString &str);
 QString deliveryModeToString(NotificationSettings::DeliveryMode m);
 NotificationSettings::DeliveryMode stringToDeliveryMode(const QString &str);
+QString toastPlacementToString(NotificationSettings::ToastPlacement p);
+NotificationSettings::ToastPlacement stringToToastPlacement(const QString &str);
 
 QColor generateBadgeColor(const QString &id);
 

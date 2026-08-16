@@ -731,6 +731,110 @@ struct Reaction : Core::JsonUtils::JsonObject
     }
 };
 
+struct PollMedia : Core::JsonUtils::JsonObject
+{
+    Field<QString, true> text;
+    Field<Emoji, false, true> emoji; // null for emoji-less answers
+
+    static PollMedia fromJson(const QJsonObject &obj)
+    {
+        PollMedia media;
+        get(obj, "text", media.text);
+        get(obj, "emoji", media.emoji);
+        return media;
+    }
+};
+
+struct PollQuestion : Core::JsonUtils::JsonObject
+{
+    Field<QString, true> text;
+    Field<Emoji, false, true> emoji;
+
+    static PollQuestion fromJson(const QJsonObject &obj)
+    {
+        PollQuestion question;
+        get(obj, "text", question.text);
+        get(obj, "emoji", question.emoji);
+        return question;
+    }
+};
+
+struct PollAnswer : Core::JsonUtils::JsonObject
+{
+    Field<int, true> answerId;
+    Field<PollMedia, true> pollMedia;
+
+    static PollAnswer fromJson(const QJsonObject &obj)
+    {
+        PollAnswer answer;
+        get(obj, "answer_id", answer.answerId);
+        get(obj, "poll_media", answer.pollMedia);
+        return answer;
+    }
+};
+
+struct PollAnswerCount : Core::JsonUtils::JsonObject
+{
+    Field<int> id;
+    Field<int> count;
+
+    static PollAnswerCount fromJson(const QJsonObject &obj)
+    {
+        PollAnswerCount count;
+        get(obj, "id", count.id);
+        get(obj, "count", count.count);
+        return count;
+    }
+};
+
+struct PollResults : Core::JsonUtils::JsonObject
+{
+    Field<bool, true> isFinalized;
+    Field<QList<PollAnswerCount>, true> answerCounts;
+
+    static PollResults fromJson(const QJsonObject &obj)
+    {
+        PollResults results;
+        get(obj, "is_finalized", results.isFinalized);
+        get(obj, "answer_counts", results.answerCounts);
+        return results;
+    }
+};
+
+struct Poll : Core::JsonUtils::JsonObject
+{
+    Field<PollQuestion, true> question;
+    Field<QList<PollAnswer>, true> answers;
+    // ISO-8601 timestamp with timezone offset; null when the poll never expires.
+    Field<QString, true, true> expiry;
+    Field<bool, true> allowMultiselect;
+    Field<int, true> layoutType;
+    Field<PollResults, true> results;
+    Field<QList<int>, true> myAnswers;
+
+    static Poll fromJson(const QJsonObject &obj)
+    {
+        Poll poll;
+        get(obj, "question", poll.question);
+        get(obj, "answers", poll.answers);
+        get(obj, "expiry", poll.expiry);
+        get(obj, "allow_multiselect", poll.allowMultiselect);
+        get(obj, "layout_type", poll.layoutType);
+        get(obj, "results", poll.results);
+        get(obj, "my_answers", poll.myAnswers);
+        return poll;
+    }
+
+    // The message id doubles as the poll id for the voting REST endpoint.
+    [[nodiscard]] bool isExpired(QDateTime now = QDateTime::currentDateTimeUtc()) const
+    {
+        if (!expiry.hasValue() || expiry.isNull())
+            return false;
+        const QDateTime expiryTime = QDateTime::fromString(*expiry, Qt::ISODate);
+        return expiryTime.isValid() && expiryTime.toUTC() <= now;
+    }
+};
+
 struct MessageReference : Core::JsonUtils::JsonObject
 {
     Field<int, true> type;
@@ -768,6 +872,8 @@ struct Message : Core::JsonUtils::JsonObject
     Field<QList<Sticker>, true> stickerItems;
 
     Field<MessageReference, true> messageReference;
+
+    Field<Poll, true> poll;
 
     // tri-state for referenced_message:
     //   nullptr + referencedMessageNull=false  -> backend didn't fetch (unknown)
@@ -814,6 +920,7 @@ struct Message : Core::JsonUtils::JsonObject
         get(obj, "reactions", message.reactions);
         get(obj, "sticker_items", message.stickerItems);
         get(obj, "message_reference", message.messageReference);
+        get(obj, "poll", message.poll);
         get(obj, "guild_id", message.guildId);
         get(obj, "channel_type", message.channelType);
 
@@ -865,6 +972,9 @@ struct Message : Core::JsonUtils::JsonObject
             attachments = update.attachments;
         if (present.contains(QStringLiteral("message_reference")))
             messageReference = update.messageReference;
+
+        if (present.contains(QStringLiteral("poll")))
+            poll = update.poll;
 
         if (present.contains(QStringLiteral("embeds"))) {
             embeds = update.embeds;
@@ -1324,6 +1434,88 @@ struct AuditLogData : Core::JsonUtils::JsonObject
         }
         return a;
     }
+};
+
+struct ApplicationCommandOptionChoice : Core::JsonUtils::JsonObject
+{
+    Field<QString> name;
+    // Discord allows string, integer, or boolean choice values; stringify them
+    // so the autocomplete UI can present a single consistent representation.
+    Field<QString> value;
+
+    static ApplicationCommandOptionChoice fromJson(const QJsonObject &obj)
+    {
+        ApplicationCommandOptionChoice c;
+        get(obj, "name", c.name);
+        const QJsonValue v = obj.value("value");
+        // Discord allows string, integer, or boolean choice values. The generic
+        // QString `get` uses toString() which returns empty for non-strings, so
+        // coerce explicitly to keep the "stringified" representation consistent.
+        c.value = v.isString() ? v.toString() : v.toVariant().toString();
+        return c;
+    }
+};
+
+struct ApplicationCommandOption : Core::JsonUtils::JsonObject
+{
+    Field<ApplicationCommandOptionType> type;
+    Field<QString> name;
+    Field<QString, true> description;
+    Field<bool, true> required;
+    Field<QList<ApplicationCommandOptionChoice>, true> choices;
+    // Nested options (sub-command parameters / sub-command group members).
+    Field<QList<ApplicationCommandOption>, true> options;
+
+    static ApplicationCommandOption fromJson(const QJsonObject &obj)
+    {
+        ApplicationCommandOption o;
+        get(obj, "type", o.type);
+        get(obj, "name", o.name);
+        get(obj, "description", o.description);
+        get(obj, "required", o.required);
+        get(obj, "choices", o.choices);
+        get(obj, "options", o.options);
+        return o;
+    }
+};
+
+struct ApplicationCommand : Core::JsonUtils::JsonObject
+{
+    Field<Core::Snowflake> id;
+    Field<ApplicationCommandType> type;
+    Field<Core::Snowflake> applicationId;
+    Field<Core::Snowflake, true> guildId;
+    Field<QString> name;
+    Field<QString, true> description;
+    Field<QList<ApplicationCommandOption>, true> options;
+    Field<QString, true> version;
+
+    static ApplicationCommand fromJson(const QJsonObject &obj)
+    {
+        ApplicationCommand c;
+        get(obj, "id", c.id);
+        get(obj, "type", c.type);
+        get(obj, "application_id", c.applicationId);
+        get(obj, "guild_id", c.guildId);
+        get(obj, "name", c.name);
+        get(obj, "description", c.description);
+        get(obj, "options", c.options);
+        get(obj, "version", c.version);
+        return c;
+    }
+};
+
+// Resolved value for a single application-command option, used when sending a
+// chat-input interaction. Scalar options carry a `value`; sub-commands and
+// sub-command groups carry nested `options` instead.
+struct InteractionOptionValue
+{
+    int type = 0; // ApplicationCommandOptionType
+    QString name;
+    QJsonValue value; // scalar value; undefined for sub-command/group
+    QList<InteractionOptionValue> options;
+
+    [[nodiscard]] bool isScalar() const { return !value.isUndefined(); }
 };
 
 } // namespace Discord

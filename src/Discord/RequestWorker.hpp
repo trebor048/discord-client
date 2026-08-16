@@ -3,6 +3,7 @@
 #include <QByteArray>
 #include <QFile>
 #include <QList>
+#include <QPair>
 #include <QPointer>
 #include <QString>
 
@@ -37,6 +38,7 @@ struct RequestDescriptor
     QString contentType; // external Content-Type
     QString uploadFilePath; // stream from disk
     QList<FileUpload> files; // multipart
+    QList<QPair<QString, QString>> extraHeaders; // additional request headers
     HttpCallback callback;
     std::function<void(qint64 sent, qint64 total)> progressCallback; // worker thread!
     std::shared_ptr<std::atomic<bool>> cancelFlag;

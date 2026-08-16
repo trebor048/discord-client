@@ -32,6 +32,9 @@ signals:
 private:
     QCheckBox *inMemoryCacheCheckbox;
     QCheckBox *notificationSoundsCheckbox;
+    QCheckBox *developerModeCheckbox;
+    QCheckBox *autoplayGifsCheckbox;
+    QCheckBox *autoplayVideosCheckbox;
     QComboBox *newTabBehaviorCombo;
     QPushButton *editProfileBtn;
     CustomStatusEdit *customStatusWidget;

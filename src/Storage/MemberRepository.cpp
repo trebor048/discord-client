@@ -157,5 +157,23 @@ std::optional<Discord::Member> MemberRepository::getMember(Core::Snowflake guild
     return member;
 }
 
+QList<Core::Snowflake> MemberRepository::getMemberUserIds(Core::Snowflake guildId)
+{
+    auto db = getDb();
+    QList<Core::Snowflake> ids;
+    QSqlQuery q(db);
+    q.prepare("SELECT user_id FROM members WHERE guild_id = :guild_id "
+              "ORDER BY joined_at LIMIT 200");
+    q.bindValue(":guild_id", static_cast<qint64>(guildId));
+    if (!q.exec()) {
+        qCWarning(LogDB) << "MemberRepository: failed to fetch member ids";
+        return ids;
+    }
+    ids.reserve(q.size() > 0 ? q.size() : 0);
+    while (q.next())
+        ids.append(static_cast<Core::Snowflake>(q.value(0).toLongLong()));
+    return ids;
+}
+
 } // namespace Storage
 } // namespace Acheron

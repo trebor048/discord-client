@@ -15,9 +15,13 @@
 #include "Core/ClientInstance.hpp"
 #include "Core/UserManager.hpp"
 #include "Core/ImageManager.hpp"
+#include "Core/Settings.hpp"
+#include "Core/Notification/NotificationManager.hpp"
 #include "Input/MessageInput.hpp"
 #include "Dialogs/UserProfilePopup.hpp"
+#include "Dialogs/ModerateMemberDialog.hpp"
 #include "Discord/CdnUrls.hpp"
+#include "Discord/Client.hpp"
 
 using namespace Acheron::Core;
 
@@ -114,10 +118,12 @@ void ContextMenuFactory::showUserContextMenu(Snowflake userId, Snowflake guildId
         m_window->messageInput->insertText(QStringLiteral("<@%1>").arg(quint64(userId)));
     });
 
-    QAction *copyIdAction = menu.addAction(tr("Copy ID"));
-    connect(copyIdAction, &QAction::triggered, m_window, [userId]() {
-        QGuiApplication::clipboard()->setText(QString::number(static_cast<qulonglong>(userId)));
-    });
+    if (Core::isDeveloperModeEnabled()) {
+        QAction *copyIdAction = menu.addAction(tr("Copy ID"));
+        connect(copyIdAction, &QAction::triggered, m_window, [userId]() {
+            QGuiApplication::clipboard()->setText(QString::number(static_cast<qulonglong>(userId)));
+        });
+    }
 
     QAction *openDmAction = menu.addAction(tr("Open DM"));
     std::optional<Snowflake> dmChannelId;
@@ -130,7 +136,164 @@ void ContextMenuFactory::showUserContextMenu(Snowflake userId, Snowflake guildId
         openDmAction->setEnabled(false);
     }
 
+    // "Listen to toasts" — add/remove this user from the notification listen list.
+    if (m_window->notificationController) {
+        if (auto *notif = m_window->notificationController->manager()) {
+            const QString userIdStr = QString::number(static_cast<quint64>(userId));
+            const bool listened = notif->notifyForList().contains(userIdStr);
+            menu.addSeparator();
+            QAction *listenAction = menu.addAction(listened ? tr("Stop listening to toasts")
+                                                            : tr("Listen to toasts"));
+            // The manager is deleteLater'd on instance teardown; guard with
+            // QPointer in case the modal menu's nested loop outlives it.
+            const QPointer<Core::NotificationManager> notifGuard(notif);
+            connect(listenAction, &QAction::triggered, m_window,
+                    [notifGuard, userIdStr, listened]() {
+                        if (notifGuard.isNull())
+                            return;
+                        if (listened)
+                            notifGuard->removeFromNotifyList(userIdStr);
+                        else
+                            notifGuard->addToNotifyList(userIdStr);
+                    });
+        }
+    }
+
     if (guildId.isValid() && m_window->currentInstance) {
+        // KICK/BAN/MUTE/DEAFEN are guild-level (base) permissions; evaluate them
+        // without the current channel's overwrites which could wrongly strip them.
+        const bool canKick = m_window->currentInstance->hasGuildPermission(
+                guildId, Discord::Permission::KICK_MEMBERS);
+        const bool canBan = m_window->currentInstance->hasGuildPermission(
+                guildId, Discord::Permission::BAN_MEMBERS);
+        const bool canTimeout = m_window->currentInstance->hasGuildPermission(
+                guildId, Discord::Permission::MODERATE_MEMBERS);
+
+        // Role hierarchy / self guard: a non-owner can't moderate themselves,
+        // the guild owner, or anyone with a role position equal or higher.
+        bool canModerateTarget = true;
+        const Snowflake selfId = m_window->currentInstance->accountId();
+        if (userId == selfId) {
+            canModerateTarget = false;
+        } else {
+            auto selfGuild = m_window->currentInstance->getGuild(guildId);
+            if (selfGuild && selfGuild->ownerId.get() == userId) {
+                canModerateTarget = false;
+            } else if (selfGuild && selfGuild->ownerId.get() != selfId) {
+                const auto selfRoles = m_window->currentInstance->getMemberRolesSorted(guildId, selfId);
+                const auto targetRoles = m_window->currentInstance->getMemberRolesSorted(guildId, userId);
+                const int selfTop = selfRoles.isEmpty() ? 0 : selfRoles.first().position.get();
+                const int targetTop = targetRoles.isEmpty() ? 0 : targetRoles.first().position.get();
+                if (targetTop >= selfTop)
+                    canModerateTarget = false;
+            }
+        }
+
+        if (canKick || canBan || canTimeout) {
+            // Capture the instance at menu-build time; `currentInstance` can
+            // become dangling while the modal dialog's nested event loop runs
+            // (e.g. account disconnect), so re-check before every deref.
+            auto *instanceAtBuild = m_window->currentInstance;
+            auto runModeration = [this, instanceAtBuild, userId, guildId](ModerateMemberDialog::Action initial) {
+                if (!m_window->currentInstance || m_window->currentInstance != instanceAtBuild)
+                    return;
+                const QString name = m_window->currentInstance->users()->getDisplayName(userId, guildId);
+                ModerateMemberDialog dialog(name, initial, m_window);
+                if (dialog.exec() != QDialog::Accepted)
+                    return;
+                if (!m_window->currentInstance || m_window->currentInstance != instanceAtBuild)
+                    return;
+                const auto r = dialog.result();
+                auto *client = m_window->currentInstance->discord();
+                switch (r.action) {
+                case ModerateMemberDialog::Action::Kick:
+                    client->kickMember(guildId, userId, r.reason);
+                    break;
+                case ModerateMemberDialog::Action::Ban:
+                    client->banMember(guildId, userId, r.deleteMessageSeconds, r.reason);
+                    break;
+                case ModerateMemberDialog::Action::TempBan:
+                    client->tempBanMember(guildId, userId, r.deleteMessageSeconds, r.reason,
+                                          r.durationSeconds);
+                    break;
+                case ModerateMemberDialog::Action::Timeout:
+                    client->setMemberTimeout(guildId, userId, r.durationSeconds, r.reason);
+                    break;
+                }
+            };
+
+            QMenu *moderationMenu = menu.addMenu(tr("Moderation"));
+            if (canKick) {
+                QAction *kickAction = moderationMenu->addAction(tr("Kick"));
+                kickAction->setEnabled(canModerateTarget);
+                connect(kickAction, &QAction::triggered, m_window,
+                        [runModeration]() { runModeration(ModerateMemberDialog::Action::Kick); });
+            }
+            if (canBan) {
+                QAction *banAction = moderationMenu->addAction(tr("Ban"));
+                banAction->setEnabled(canModerateTarget);
+                connect(banAction, &QAction::triggered, m_window,
+                        [runModeration]() { runModeration(ModerateMemberDialog::Action::Ban); });
+            }
+            if (canTimeout) {
+                QAction *timeoutAction = moderationMenu->addAction(tr("Timeout"));
+                timeoutAction->setEnabled(canModerateTarget);
+                connect(timeoutAction, &QAction::triggered, m_window,
+                        [runModeration]() { runModeration(ModerateMemberDialog::Action::Timeout); });
+            }
+        }
+
+        const bool canMute = m_window->currentInstance->hasGuildPermission(
+                guildId, Discord::Permission::MUTE_MEMBERS);
+        const bool canDeafen = m_window->currentInstance->hasGuildPermission(
+                guildId, Discord::Permission::DEAFEN_MEMBERS);
+
+        if (canMute || canDeafen) {
+            QMenu *voiceMenu = menu.addMenu(tr("Voice"));
+            // Resolve the client at trigger time (menu.exec runs a nested event
+            // loop during which the account may be torn down); re-check before
+            // each call.
+            auto *instanceAtBuild = m_window->currentInstance;
+            auto callClient = [this, instanceAtBuild](auto action) {
+                if (!m_window->currentInstance || m_window->currentInstance != instanceAtBuild)
+                    return;
+                if (auto *client = m_window->currentInstance->discord())
+                    action(client);
+            };
+            if (canMute) {
+                QAction *muteAction = voiceMenu->addAction(tr("Mute"));
+                connect(muteAction, &QAction::triggered, m_window,
+                        [callClient, guildId, userId]() {
+                            callClient([guildId, userId](Discord::Client *c) {
+                                c->setMemberMute(guildId, userId, true);
+                            });
+                        });
+                QAction *unmuteAction = voiceMenu->addAction(tr("Unmute"));
+                connect(unmuteAction, &QAction::triggered, m_window,
+                        [callClient, guildId, userId]() {
+                            callClient([guildId, userId](Discord::Client *c) {
+                                c->setMemberMute(guildId, userId, false);
+                            });
+                        });
+            }
+            if (canDeafen) {
+                QAction *deafenAction = voiceMenu->addAction(tr("Deafen"));
+                connect(deafenAction, &QAction::triggered, m_window,
+                        [callClient, guildId, userId]() {
+                            callClient([guildId, userId](Discord::Client *c) {
+                                c->setMemberDeaf(guildId, userId, true);
+                            });
+                        });
+                QAction *undeafenAction = voiceMenu->addAction(tr("Undeafen"));
+                connect(undeafenAction, &QAction::triggered, m_window,
+                        [callClient, guildId, userId]() {
+                            callClient([guildId, userId](Discord::Client *c) {
+                                c->setMemberDeaf(guildId, userId, false);
+                            });
+                        });
+            }
+        }
+
         QMenu *rolesMenu = menu.addMenu(tr("Roles"));
         const auto memberRoles = m_window->currentInstance->getMemberRolesSorted(guildId, userId);
         if (memberRoles.isEmpty()) {

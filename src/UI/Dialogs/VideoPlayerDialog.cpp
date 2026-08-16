@@ -7,6 +7,8 @@
 #include <QLabel>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QKeyEvent>
+#include <QSettings>
 
 namespace Acheron {
 namespace UI {
@@ -34,7 +36,8 @@ VideoPlayerDialog::VideoPlayerDialog(const QUrl &source, QWidget *parent)
 
     player = new QMediaPlayer(this);
     audioOutput = new QAudioOutput(this);
-    audioOutput->setVolume(0.8);
+    const int savedVolume = QSettings().value("media/volume", 100).toInt();
+    audioOutput->setVolume(qreal(savedVolume) / 100.0);
     player->setAudioOutput(audioOutput);
 
     videoWidget = new QVideoWidget(this);
@@ -54,19 +57,23 @@ VideoPlayerDialog::VideoPlayerDialog(const QUrl &source, QWidget *parent)
 
     playButton = new QPushButton(QStringLiteral("▶"), this);
     playButton->setFixedSize(40, 32);
+    playButton->setToolTip(tr("Play / Pause (Space)"));
     controls->addWidget(playButton);
 
     positionSlider = new QSlider(Qt::Horizontal, this);
     positionSlider->setRange(0, 0);
+    positionSlider->setToolTip(tr("Seek (Left / Right to jump 5s)"));
     controls->addWidget(positionSlider, 1);
 
-    timeLabel = new QLabel(QStringLiteral("0:00 / 0:00"), this);
+    timeLabel = new QLabel(QStringLiteral("00:00 / 00:00"), this);
+    timeLabel->setToolTip(tr("Current time / total time"));
     controls->addWidget(timeLabel);
 
     volumeSlider = new QSlider(Qt::Horizontal, this);
     volumeSlider->setRange(0, 100);
-    volumeSlider->setValue(80);
+    volumeSlider->setValue(savedVolume);
     volumeSlider->setFixedWidth(90);
+    volumeSlider->setToolTip(tr("Volume"));
     controls->addWidget(volumeSlider);
 
     root->addLayout(controls);
@@ -79,9 +86,12 @@ VideoPlayerDialog::VideoPlayerDialog(const QUrl &source, QWidget *parent)
     connect(positionSlider, &QSlider::sliderMoved, this, [this](int pos) {
         timeLabel->setText(formatTime(pos) + QStringLiteral(" / ") +
                            formatTime(player->duration()));
+        player->setPosition(pos);
     });
-    connect(volumeSlider, &QSlider::valueChanged, this,
-            [this](int value) { audioOutput->setVolume(qreal(value) / 100.0); });
+    connect(volumeSlider, &QSlider::valueChanged, this, [this](int value) {
+        audioOutput->setVolume(qreal(value) / 100.0);
+        QSettings().setValue("media/volume", value);
+    });
 
     connect(player, &QMediaPlayer::positionChanged, this,
             &VideoPlayerDialog::onPositionChanged);
@@ -98,7 +108,13 @@ VideoPlayerDialog::VideoPlayerDialog(const QUrl &source, QWidget *parent)
             });
 
     player->setSource(source);
-    player->play();
+    const bool autoplay = QSettings().value("ui/videoAutoplay", true).toBool();
+    if (autoplay) {
+        player->play();
+    } else {
+        updatePlayPauseIcon();
+        statusLabel->setText(tr("Paused — press Play to start"));
+    }
 }
 
 void VideoPlayerDialog::togglePlayPause()
@@ -107,6 +123,42 @@ void VideoPlayerDialog::togglePlayPause()
         player->pause();
     else
         player->play();
+}
+
+void VideoPlayerDialog::keyPressEvent(QKeyEvent *event)
+{
+    switch (event->key()) {
+    case Qt::Key_Space:
+        togglePlayPause();
+        event->accept();
+        return;
+    case Qt::Key_Left:
+        seekRelative(-5000);
+        event->accept();
+        return;
+    case Qt::Key_Right:
+        seekRelative(5000);
+        event->accept();
+        return;
+    case Qt::Key_Escape:
+        close();
+        event->accept();
+        return;
+    default:
+        break;
+    }
+    QDialog::keyPressEvent(event);
+}
+
+void VideoPlayerDialog::seekRelative(qint64 delta)
+{
+    qint64 target = player->position() + delta;
+    const qint64 duration = player->duration();
+    if (duration > 0)
+        target = qBound<qint64>(0, target, duration);
+    else
+        target = qMax<qint64>(0, target);
+    player->setPosition(target);
 }
 
 void VideoPlayerDialog::seekSliderPressed()
@@ -183,7 +235,8 @@ QString VideoPlayerDialog::formatTime(qint64 ms)
     const qint64 totalSecs = ms / 1000;
     const qint64 mins = totalSecs / 60;
     const qint64 secs = totalSecs % 60;
-    return QString("%1:%2").arg(mins).arg(secs, 2, 10, QLatin1Char('0'));
+    return QString("%1:%2").arg(mins, 2, 10, QLatin1Char('0'))
+                           .arg(secs, 2, 10, QLatin1Char('0'));
 }
 
 } // namespace UI

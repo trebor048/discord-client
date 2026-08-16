@@ -123,6 +123,9 @@ static ChatLayout::LayoutContext buildLayoutContext(const QStyleOptionViewItem &
     ctx.embeds = index.data(ChatModel::EmbedsRole).value<QList<EmbedData>>();
     ctx.stickers = index.data(ChatModel::StickersRole).value<QList<StickerData>>();
     ctx.reactions = index.data(ChatModel::ReactionsRole).value<QList<ReactionData>>();
+    ctx.hasPoll = index.data(ChatModel::PollRole).isValid();
+    if (ctx.hasPoll)
+        ctx.poll = index.data(ChatModel::PollRole).value<PollData>();
     ctx.replyData = index.data(ChatModel::ReplyDataRole).value<ReplyData>();
     ctx.isSystemMessage = index.data(ChatModel::IsSystemMessageRole).toBool();
     ctx.compactMode = option.widget && option.widget->property("compactMode").toBool();
@@ -136,6 +139,168 @@ static ChatLayout::LayoutContext buildLayoutContext(const QStyleOptionViewItem &
     }
 
     return ctx;
+}
+
+static void drawPollBlock(QPainter *painter, const QStyleOptionViewItem &option,
+                          const QModelIndex &index, const ChatLayout::MessageLayout &layout,
+                          const ChatLayout::LayoutContext &ctx, const ChatModel *chatModel)
+{
+    if (layout.pollLayouts.isEmpty())
+        return;
+
+    using ChatLayout::pollBorderWidth;
+    using ChatLayout::pollRadius;
+
+    const ChatLayout::PollLayout &pollLayout = layout.pollLayouts.first();
+    const PollData &poll = ctx.poll;
+
+    painter->save();
+
+    // Block background + border
+    painter->setPen(QPen(option.palette.mid().color(), pollBorderWidth()));
+    painter->setBrush(option.palette.alternateBase().color());
+    painter->setRenderHint(QPainter::Antialiasing, true);
+    painter->drawRoundedRect(pollLayout.pollRect, pollRadius(), pollRadius());
+    painter->setRenderHint(QPainter::Antialiasing, false);
+
+    // Question (bold, wrapped, cached like embed titles)
+    if (!pollLayout.questionRect.isNull() && !poll.question.isEmpty()) {
+        QFont questionFont = option.font;
+        questionFont.setBold(true);
+        DocCacheKey questionKey =
+                pollQuestionDocKey(index.data(ChatModel::MessageIdRole).toULongLong());
+        QTextDocument *questionDoc = chatModel->getCachedDocument(questionKey);
+        if (!questionDoc) {
+            questionDoc = new QTextDocument;
+            questionDoc->setDefaultFont(questionFont);
+            questionDoc->setTextWidth(pollLayout.questionRect.width());
+            questionDoc->setHtml(poll.question.toHtmlEscaped());
+            chatModel->cacheDocument(questionKey, questionDoc);
+        } else if (int(questionDoc->textWidth()) != pollLayout.questionRect.width()) {
+            questionDoc->setTextWidth(pollLayout.questionRect.width());
+        }
+
+        painter->save();
+        painter->translate(pollLayout.questionRect.topLeft());
+        QAbstractTextDocumentLayout::PaintContext questionCtx;
+        questionCtx.palette.setColor(QPalette::Text, option.palette.text().color());
+        questionDoc->documentLayout()->draw(painter, questionCtx);
+        painter->restore();
+    }
+
+    for (const auto &answerLayout : pollLayout.answerLayouts) {
+        if (answerLayout.answerIndex >= poll.answers.size())
+            continue;
+        const PollAnswerData &answer = poll.answers[answerLayout.answerIndex];
+        const QRect &optionRect = answerLayout.optionRect;
+
+        // Row background + border; highlight the user's own vote.
+        QColor rowBg = option.palette.base().color();
+        QColor borderColor = option.palette.mid().color();
+        if (answer.me) {
+            rowBg = option.palette.highlight().color();
+            rowBg.setAlpha(24);
+            borderColor = option.palette.highlight().color();
+        }
+        painter->setPen(QPen(borderColor, 1));
+        painter->setBrush(rowBg);
+        painter->setRenderHint(QPainter::Antialiasing, true);
+        painter->drawRoundedRect(optionRect, 6, 6);
+        painter->setRenderHint(QPainter::Antialiasing, false);
+
+        // Label (emoji prefix when the answer carries one)
+        QFont labelFont = option.font;
+        labelFont.setPointSizeF(labelFont.pointSizeF() * 0.95);
+        painter->setFont(labelFont);
+        painter->setPen(option.palette.text().color());
+        QFontMetrics labelFm(labelFont);
+
+        QString label = answer.text;
+        if (!answer.emojiName.isEmpty())
+            label = (answer.emojiId.isValid() ? QStringLiteral(":%1:").arg(answer.emojiName)
+                                              : answer.emojiName) +
+                    QLatin1Char(' ') + label;
+
+        // Right-side affordance: "Vote" prompt or checkmark for own vote.
+        QFont affordFont = option.font;
+        affordFont.setPointSizeF(affordFont.pointSizeF() * 0.9);
+        if (answer.me)
+            affordFont.setBold(true);
+        QFontMetrics affordFm(affordFont);
+        const QString afford = answer.me ? QStringLiteral("✓") : ChatDelegate::tr("Vote");
+        const int affordWidth = affordFm.horizontalAdvance(afford) + 4;
+
+        // Vote tally between label and affordance.
+        QFont statFont = option.font;
+        statFont.setPointSizeF(statFont.pointSizeF() * 0.85);
+        QFontMetrics statFm(statFont);
+        QString stats;
+        if (poll.isFinalized || answer.me || answer.count > 0)
+            stats = QStringLiteral("%1% · %2").arg(qRound(answer.percent)).arg(answer.count);
+        const int statsWidth = stats.isEmpty() ? 0 : statFm.horizontalAdvance(stats) + 12;
+
+        const int textLeft = optionRect.left() + 10;
+        const int labelMaxWidth = optionRect.width() - 20 - affordWidth - statsWidth;
+        painter->setFont(labelFont);
+        painter->setPen(option.palette.text().color());
+        painter->drawText(QRect(textLeft, optionRect.top(), qMax(0, labelMaxWidth),
+                                optionRect.height()),
+                          Qt::AlignLeft | Qt::AlignVCenter,
+                          labelFm.elidedText(label, Qt::ElideRight, qMax(0, labelMaxWidth)));
+
+        if (!stats.isEmpty()) {
+            painter->setFont(statFont);
+            painter->setPen(option.palette.placeholderText().color());
+            painter->drawText(QRect(textLeft + labelMaxWidth, optionRect.top(), statsWidth,
+                                    optionRect.height()),
+                              Qt::AlignLeft | Qt::AlignVCenter, stats);
+        }
+
+        painter->setFont(affordFont);
+        painter->setPen(answer.me ? option.palette.highlight().color()
+                                  : option.palette.placeholderText().color());
+        painter->drawText(QRect(optionRect.right() - affordWidth - 6, optionRect.top(),
+                                affordWidth, optionRect.height()),
+                          Qt::AlignRight | Qt::AlignVCenter, afford);
+
+        // Progress bar below the row.
+        const QRect &barRect = answerLayout.barRect;
+        if (barRect.width() >= 8) {
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(option.palette.mid().color().darker(120));
+            painter->setRenderHint(QPainter::Antialiasing, true);
+            painter->drawRoundedRect(barRect, barRect.height() / 2, barRect.height() / 2);
+            if (answer.percent > 0.0) {
+                QRect fillRect = barRect;
+                fillRect.setWidth(
+                        qMax(barRect.height(), qRound(barRect.width() * answer.percent / 100.0)));
+                painter->setBrush(option.palette.highlight().color());
+                painter->drawRoundedRect(fillRect, fillRect.height() / 2, fillRect.height() / 2);
+            }
+            painter->setRenderHint(QPainter::Antialiasing, false);
+        }
+    }
+
+    // Footer: multiselect hint / final / expired state.
+    if (!pollLayout.footerRect.isNull()) {
+        QFont footerFont = option.font;
+        footerFont.setPointSize(footerFont.pointSize() - 2);
+        painter->setFont(footerFont);
+        painter->setPen(option.palette.placeholderText().color());
+
+        QString footerText;
+        if (poll.isFinalized)
+            footerText = ChatDelegate::tr("Final results");
+        else if (poll.isExpired)
+            footerText = ChatDelegate::tr("Vote ended");
+        else if (poll.allowMultiselect)
+            footerText = ChatDelegate::tr("Select multiple options");
+
+        if (!footerText.isEmpty())
+            painter->drawText(pollLayout.footerRect, Qt::AlignLeft | Qt::AlignVCenter, footerText);
+    }
+
+    painter->restore();
 }
 
 void ChatDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
@@ -1109,6 +1274,10 @@ void ChatDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
         painter->drawText(reactionLayout.countRect, Qt::AlignLeft | Qt::AlignVCenter,
                           QString::number(reaction.count));
     }
+
+    // --- Poll ---
+    if (ctx.hasPoll)
+        drawPollBlock(painter, option, index, layout, ctx, chatModel);
 
     // Quick-reaction hover bar — a floating overlay shown only on the hovered row.
     if (isHoveredRow && !layout.hasSeparator && !ctx.isSystemMessage)

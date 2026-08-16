@@ -1,5 +1,6 @@
 #include "StickerPickerDialog.hpp"
 
+#include "StickerPreferences.hpp"
 #include "Core/AnimationUtils.hpp"
 
 #include <QApplication>
@@ -107,8 +108,12 @@ void StickerPickerDialog::setStickerPacks(const QList<StickerPackGroup> &sticker
         }
     }
 
-    buildAllTab();
+    // Order matters: buildPackTabs() aborts pendingRequests, so the All tab's
+    // thumbnail requests must be started AFTER it (otherwise the first batch is
+    // cancelled before it ever renders).
     buildPackTabs();
+    buildAllTab();
+    buildRecentsTab();
 }
 
 void StickerPickerDialog::setGuildIconProvider(
@@ -245,6 +250,52 @@ void StickerPickerDialog::buildPackTab(QWidget *tab, const StickerPackGroup &gro
     scroll->setWidget(gridWidget);
     layout->addWidget(scroll, 1);
     Acheron::Core::AnimationUtils::fadeIn(tab, 200);
+}
+
+void StickerPickerDialog::buildRecentsTab()
+{
+    const QStringList recents = StickerPreferences::recents();
+    if (recents.isEmpty())
+        return;
+
+    StickerPackGroup recentsGroup;
+    recentsGroup.guildId = Core::Snowflake::Invalid;
+    recentsGroup.guildName = tr("Recently Used");
+
+    for (const QString &idStr : recents) {
+        bool ok = false;
+        const quint64 raw = idStr.toULongLong(&ok);
+        if (!ok || raw == 0)
+            continue;
+        const Core::Snowflake id(raw);
+        bool found = false;
+        for (const auto &pack : packs) {
+            for (const auto &sticker : pack.stickers) {
+                if (sticker.id.get() == id) {
+                    recentsGroup.stickers.append(sticker);
+                    found = true;
+                    break;
+                }
+            }
+            if (found)
+                break;
+        }
+    }
+
+    if (recentsGroup.stickers.isEmpty())
+        return;
+
+    auto *tab = new QWidget(this);
+    auto *layout = new QVBoxLayout(tab);
+    layout->setContentsMargins(0, 0, 0, 0);
+    auto *scroll = new QScrollArea(tab);
+    scroll->setWidgetResizable(true);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setWidget(buildStickerGrid({ recentsGroup }));
+    layout->addWidget(scroll, 1);
+
+    // Insert right after the "All" tab for visibility.
+    packTabs->insertTab(1, tab, tr("Recents"));
 }
 
 QWidget *StickerPickerDialog::buildStickerGrid(const QList<StickerPackGroup> &gridPacks)
@@ -650,6 +701,7 @@ void StickerPickerDialog::onSearchChanged(const QString &query)
 void StickerPickerDialog::onStickerClicked(Core::Snowflake stickerId)
 {
     currentStickerId = stickerId;
+    StickerPreferences::addRecent(QString::number(static_cast<quint64>(stickerId)));
     emit stickerSelected(stickerId);
     accept();
 }

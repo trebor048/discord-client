@@ -55,6 +55,7 @@ private:
     void renderMutualServers();
     void renderMutualFriends();
     void renderFriendStatus();
+    void updatePresenceIcon();
     void applyView();
 
     void loadCachedNote();
@@ -94,6 +95,7 @@ private:
 
     QLabel *displayNameLabel = nullptr;
     QLabel *handleLabel = nullptr;
+    QLabel *presenceIconLabel = nullptr;
     QLabel *botBadgeLabel = nullptr;
 
     QWidget *badgesRow = nullptr;

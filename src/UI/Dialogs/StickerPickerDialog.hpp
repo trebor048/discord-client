@@ -77,6 +77,7 @@ private:
     void buildAllTab();
     void buildPackTabs();
     void buildPackTab(QWidget *tab, const StickerPackGroup &group);
+    void buildRecentsTab();
     QWidget *buildStickerGrid(const QList<StickerPackGroup> &packs);
     void loadStickerThumbnail(QToolButton *button, const StickerGridEntry &entry, int size);
     void startHoverAnimation(QToolButton *button, const StickerGridEntry &entry);

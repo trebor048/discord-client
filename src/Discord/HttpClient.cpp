@@ -53,11 +53,27 @@ void HttpClient::patch(const QString &endpoint, const QJsonArray &body, HttpCall
     executeRequest(Method::PATCH, url, data, callback);
 }
 
+void HttpClient::patch(const QString &endpoint, const QJsonObject &body,
+                       const QList<QPair<QString, QString>> &headers, HttpCallback callback)
+{
+    QString url = baseUrl + endpoint;
+    QByteArray data = QJsonDocument(body).toJson(QJsonDocument::Compact);
+    executeRequest(Method::PATCH, url, data, headers, callback);
+}
+
 void HttpClient::put(const QString &endpoint, const QJsonObject &body, HttpCallback callback)
 {
     QString url = baseUrl + endpoint;
     QByteArray data = QJsonDocument(body).toJson(QJsonDocument::Compact);
     executeRequest(Method::PUT, url, data, callback);
+}
+
+void HttpClient::put(const QString &endpoint, const QJsonObject &body,
+                     const QList<QPair<QString, QString>> &headers, HttpCallback callback)
+{
+    QString url = baseUrl + endpoint;
+    QByteArray data = QJsonDocument(body).toJson(QJsonDocument::Compact);
+    executeRequest(Method::PUT, url, data, headers, callback);
 }
 
 void HttpClient::delete_(const QString &endpoint, HttpCallback callback)
@@ -71,6 +87,13 @@ void HttpClient::delete_(const QString &endpoint, const QJsonObject &body, HttpC
     QString url = baseUrl + endpoint;
     QByteArray data = QJsonDocument(body).toJson(QJsonDocument::Compact);
     executeRequest(Method::DELETE_, url, data, callback);
+}
+
+void HttpClient::delete_(const QString &endpoint, const QList<QPair<QString, QString>> &headers,
+                         HttpCallback callback)
+{
+    QString url = baseUrl + endpoint;
+    executeRequest(Method::DELETE_, url, {}, headers, callback);
 }
 
 void HttpClient::postMultipart(const QString &endpoint, const QJsonObject &jsonPayload,
@@ -130,6 +153,7 @@ void HttpClient::submitExternalPut(RequestDescriptor &descriptor,
 }
 
 void HttpClient::executeRequest(Method method, const QString &url, const QByteArray &data,
+                                const QList<QPair<QString, QString>> &headers,
                                 HttpCallback callback)
 {
     RequestDescriptor descriptor;
@@ -137,8 +161,15 @@ void HttpClient::executeRequest(Method method, const QString &url, const QByteAr
     descriptor.url = url.toStdString();
     descriptor.body = data;
     descriptor.multipart = false;
+    descriptor.extraHeaders = headers;
     descriptor.callback = std::move(callback);
     worker->submit(std::move(descriptor));
+}
+
+void HttpClient::executeRequest(Method method, const QString &url, const QByteArray &data,
+                                HttpCallback callback)
+{
+    executeRequest(method, url, data, {}, std::move(callback));
 }
 
 void HttpClient::executeMultipartRequest(const QString &url, const QByteArray &jsonData,

@@ -628,7 +628,7 @@ void VoiceManager::stopVoiceThread()
         vc->stop();
         ap->moveToThread(mainThread);
         vc->moveToThread(mainThread);
-        backend->moveToThread(mainThread); }, Qt::BlockingQueuedConnection);
+        backend->moveToThread(mainThread); }, Qt::QueuedConnection);
 
     voiceThread->quit();
     if (!voiceThread->wait(5000)) {

@@ -2,6 +2,8 @@
 
 #include <QWidget>
 #include <QTabWidget>
+#include <QHash>
+#include <QVector>
 
 class QCheckBox;
 class QSlider;
@@ -14,6 +16,7 @@ class QListWidget;
 class QGroupBox;
 class QScrollArea;
 class QSystemTrayIcon;
+class QTimeEdit;
 
 namespace Acheron {
 namespace Core {
@@ -44,6 +47,7 @@ private slots:
     void onSendTestNotification();
     void onDismissAllNotifications();
     void onRequestNativePermission();
+    void onNotifyIconFetched(const QUrl &url, const QSize &size, const QPixmap &pixmap);
 
 private:
     void setupUi();
@@ -64,6 +68,7 @@ private:
     // General
     QCheckBox *m_enabledCheck = nullptr;
     QComboBox *m_deliveryCombo = nullptr;
+    QComboBox *m_toastPlacementCombo = nullptr;
     QCheckBox *m_groupingCheck = nullptr;
 
     // Appearance
@@ -86,6 +91,9 @@ private:
     QCheckBox *m_friendServerMessagesCheck = nullptr;
     QCheckBox *m_friendRequestsCheck = nullptr;
     QCheckBox *m_respectServerSettingsCheck = nullptr;
+    QCheckBox *m_quietHoursCheck = nullptr;
+    QTimeEdit *m_quietStartEdit = nullptr;
+    QTimeEdit *m_quietEndEdit = nullptr;
 
     // Privacy
     QCheckBox *m_disableStreamerModeCheck = nullptr;
@@ -122,8 +130,11 @@ private:
 
     bool m_loadingSettings = false;
     Core::NotificationManager *m_notificationManager = nullptr;
+    QListWidget *m_notifyForFancyList = nullptr;
     QListWidget *m_notifyForList = nullptr;
     QListWidget *m_ignoreUsersList = nullptr;
+    // url string -> rows in m_notifyForFancyList awaiting that icon.
+    QHash<QString, QVector<int>> m_notifyIconRows;
 };
 
 } // namespace UI

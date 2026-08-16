@@ -1,8 +1,11 @@
 #include "Client.hpp"
 
 #include <QDebug>
+#include <QDateTime>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QSettings>
+#include <QTimer>
 
 #include "Enums.hpp"
 #include "Core/Logging.hpp"
@@ -44,6 +47,8 @@ Client::Client(const QString &token, const QString &gatewayUrl, const QString &b
 
     gateway = new Gateway(token, gatewayUrl, identity, this);
     httpClient = new HttpClient(baseUrl, token, identity, captchaResolver, this);
+
+    restorePendingUnbans();
 
     connect(gateway, &Gateway::connected, this, &Client::onConnected);
     connect(gateway, &Gateway::disconnected, this, &Client::onDisconnected);
@@ -246,6 +251,158 @@ void Client::fetchDMChannels(DMChannelsCallback callback)
             results.append(Channel::fromJson(val.toObject()));
 
         callback({ results });
+    });
+}
+
+void Client::fetchApplicationCommands(Snowflake channelId, const QString &query, ApplicationCommandsCallback callback)
+{
+    QUrlQuery q;
+    q.addQueryItem("type", "1"); // CHAT_INPUT
+    q.addQueryItem("limit", "25");
+    if (!query.isEmpty())
+        q.addQueryItem("query", query);
+
+    const QString endpoint =
+            QStringLiteral("/channels/%1/application-commands/search").arg(channelId.toString());
+    httpClient->get(endpoint, q, [callback](const HttpResponse &response) {
+        if (!response.success) {
+            qCWarning(LogDiscord) << "Failed to fetch application commands:" << response.error;
+            callback({ {}, "Failed to fetch application commands: " + response.error });
+            return;
+        }
+        QList<ApplicationCommand> results;
+        const QJsonDocument doc = QJsonDocument::fromJson(response.body);
+        // The search endpoint returns { "application_commands": [...] }; accept a
+        // bare array too for robustness.
+        QJsonArray arr;
+        if (doc.isArray()) {
+            arr = doc.array();
+        } else if (doc.isObject()) {
+            arr = doc.object().value(QStringLiteral("application_commands")).toArray();
+        }
+        for (const QJsonValue &val : arr)
+            results.append(ApplicationCommand::fromJson(val.toObject()));
+        callback({ results });
+    });
+}
+
+namespace {
+QJsonObject applicationCommandOptionToJson(const ApplicationCommandOption &opt)
+{
+    QJsonObject o;
+    o.insert("type", static_cast<int>(opt.type.get()));
+    o.insert("name", opt.name.get());
+    if (opt.description.hasValue())
+        o.insert("description", opt.description.get());
+    if (opt.required.hasValue())
+        o.insert("required", opt.required.get());
+    if (opt.choices.hasValue() && !opt.choices->isEmpty()) {
+        QJsonArray arr;
+        for (const auto &c : *opt.choices) {
+            QJsonObject co;
+            co.insert("name", c.name.get());
+            co.insert("value", c.value.get());
+            arr.append(co);
+        }
+        o.insert("choices", arr);
+    }
+    if (opt.options.hasValue() && !opt.options->isEmpty()) {
+        QJsonArray arr;
+        for (const auto &sub : *opt.options)
+            arr.append(applicationCommandOptionToJson(sub));
+        o.insert("options", arr);
+    }
+    return o;
+}
+
+QJsonObject applicationCommandToJson(const ApplicationCommand &cmd)
+{
+    QJsonObject o;
+    o.insert("id", cmd.id.get().toString());
+    o.insert("type", static_cast<int>(cmd.type.get()));
+    o.insert("application_id", cmd.applicationId.get().toString());
+    if (cmd.guildId.hasValue())
+        o.insert("guild_id", cmd.guildId->toString());
+    o.insert("name", cmd.name.get());
+    if (cmd.description.hasValue())
+        o.insert("description", cmd.description.get());
+    if (cmd.options.hasValue() && !cmd.options->isEmpty()) {
+        QJsonArray arr;
+        for (const auto &opt : *cmd.options)
+            arr.append(applicationCommandOptionToJson(opt));
+        o.insert("options", arr);
+    }
+    if (cmd.version.hasValue())
+        o.insert("version", cmd.version.get());
+    return o;
+}
+
+QJsonObject interactionOptionToJson(const InteractionOptionValue &opt)
+{
+    QJsonObject o;
+    o.insert("type", opt.type);
+    o.insert("name", opt.name);
+    if (opt.isScalar())
+        o.insert("value", opt.value);
+    if (!opt.options.isEmpty()) {
+        QJsonArray arr;
+        for (const auto &sub : opt.options)
+            arr.append(interactionOptionToJson(sub));
+        o.insert("options", arr);
+    }
+    return o;
+}
+} // namespace
+
+void Client::sendApplicationCommandInteraction(Snowflake channelId, Snowflake guildId,
+                                               const ApplicationCommand &command,
+                                               const QList<InteractionOptionValue> &options,
+                                               const QString &nonce)
+{
+    // Guard against invalid/unpopulated ids — otherwise they'd serialize as
+    // "18446744073709551615" and the interaction would be rejected.
+    if (!command.id.get().isValid() || !command.applicationId.get().isValid()) {
+        qCWarning(LogDiscord) << "Refusing to send slash command" << command.name.get()
+                              << "with invalid command/application id";
+        return;
+    }
+
+    QJsonObject data;
+    data.insert("id", command.id.get().toString());
+    data.insert("name", command.name.get());
+    data.insert("type", 1);
+    if (command.version.hasValue())
+        data.insert("version", command.version.get());
+    if (!options.isEmpty()) {
+        QJsonArray arr;
+        for (const auto &opt : options)
+            arr.append(interactionOptionToJson(opt));
+        data.insert("options", arr);
+    }
+    data.insert("application_command", applicationCommandToJson(command));
+
+    QJsonObject payload;
+    payload.insert("type", 2);
+    payload.insert("application_id", command.applicationId.get().toString());
+    payload.insert("channel_id", channelId.toString());
+    if (guildId.isValid())
+        payload.insert("guild_id", guildId.toString());
+    const QString session = gateway ? gateway->gatewaySessionId() : QString();
+    if (session.isEmpty()) {
+        // Without a gateway session_id the /interactions endpoint rejects the
+        // payload; don't send an invalid request.
+        qCWarning(LogDiscord) << "Refusing to send slash command" << command.name.get()
+                              << "before gateway READY (no session_id)";
+        return;
+    }
+    payload.insert("session_id", session);
+    payload.insert("data", data);
+    payload.insert("nonce", nonce.isEmpty() ? QString::number(Snowflake::generateNonce()) : nonce);
+
+    httpClient->post("/interactions", payload, [command](const HttpResponse &response) {
+        if (!response.success)
+            qCWarning(LogDiscord) << "Failed to send slash command" << command.name.get() << ":"
+                                  << response.error;
     });
 }
 
@@ -670,6 +827,11 @@ void Client::onGatewayReady(const Ready &data)
     me = data.user;
 
     setState(Core::ConnectionState::Connected);
+
+    // identify() resets presence to "unknown"; re-apply the user's chosen status
+    // (e.g. after a reconnect that fell back to a fresh identify).
+    if (!m_lastPresenceStatus.isEmpty())
+        gateway->sendPresenceUpdate(m_lastPresenceStatus);
 
     emit ready(data);
 }
@@ -1166,6 +1328,54 @@ void Client::removeReaction(Snowflake channelId, Snowflake messageId, const QStr
     });
 }
 
+void Client::votePoll(Core::Snowflake channelId, Core::Snowflake messageId, Core::Snowflake pollId,
+                      const QList<int> &answerIds, PollVoteCallback callback)
+{
+    // Discord treats the message id as the poll id: the message entity's poll
+    // object carries no separate identifier.
+    const Snowflake effectivePollId = pollId.isValid() ? pollId : messageId;
+
+    QJsonArray answerIdArray;
+    for (int answerId : answerIds) {
+        QJsonObject entry;
+        entry["answer_id"] = answerId;
+        answerIdArray.append(entry);
+    }
+
+    QJsonObject body;
+    body["answer_ids"] = answerIdArray;
+
+    QString endpoint = "/channels/" + QString::number(channelId) + "/messages/" +
+                       QString::number(messageId) + "/polls/" +
+                       QString::number(effectivePollId) + "/answers";
+
+    httpClient->post(endpoint, body,
+                     [this, channelId, messageId, callback = std::move(callback)](
+                             const HttpResponse &response) {
+                         if (!response.success) {
+                             qCWarning(LogDiscord) << "Failed to vote on poll on message"
+                                                   << messageId << "in channel" << channelId
+                                                   << ":" << response.error;
+                             if (callback)
+                                 callback(Core::Result<Message>::makeError(
+                                         "Failed to vote on poll: " + response.error));
+                             return;
+                         }
+
+                         // The endpoint returns the updated message; relay it so
+                         // callers can refresh poll results. Tolerate an empty
+                         // body (204-style) by still reporting success.
+                         if (callback) {
+                             const QJsonDocument doc = QJsonDocument::fromJson(response.body);
+                             if (doc.isObject())
+                                 callback(Core::Result<Message>::makeOk(
+                                         Message::fromJson(doc.object())));
+                             else
+                                 callback(Core::Result<Message>::makeOk(Message{}));
+                         }
+                     });
+}
+
 void Client::leaveGuild(Snowflake guildId)
 {
     QString endpoint = "/users/@me/guilds/" + QString::number(guildId);
@@ -1307,6 +1517,12 @@ void Client::sendVoiceStateUpdate(Snowflake guildId, Snowflake channelId, bool s
     gateway->sendVoiceStateUpdate(guildId, channelId, selfMute, selfDeaf);
 }
 
+void Client::setPresenceStatus(const QString &status)
+{
+    m_lastPresenceStatus = status;
+    gateway->sendPresenceUpdate(status);
+}
+
 void Client::requestGuildMembers(Snowflake guildId, const QList<Snowflake> &userIds)
 {
     gateway->requestGuildMembers(guildId, userIds);
@@ -1408,6 +1624,211 @@ void Client::unbanMember(Snowflake guildId, Snowflake userId)
     httpClient->delete_(endpoint, [guildId, userId](const HttpResponse &response) {
         if (!response.success)
             qCWarning(LogDiscord) << "Failed to unban user" << userId << "from guild" << guildId
+                                  << ":" << response.error;
+    });
+}
+
+void Client::banMember(Snowflake guildId, Snowflake userId, int deleteMessageSeconds,
+                       const QString &reason)
+{
+    QString endpoint = "/guilds/" + QString::number(guildId) + "/bans/" + QString::number(userId);
+
+    QJsonObject body;
+    if (deleteMessageSeconds > 0)
+        body.insert("delete_message_seconds", deleteMessageSeconds);
+
+    QList<QPair<QString, QString>> headers;
+    if (!reason.isEmpty())
+        headers.append({ "X-Audit-Log-Reason", reason });
+
+    httpClient->put(endpoint, body, headers, [guildId, userId](const HttpResponse &response) {
+        if (!response.success)
+            qCWarning(LogDiscord) << "Failed to ban user" << userId << "from guild" << guildId
+                                  << ":" << response.error;
+    });
+}
+
+void Client::kickMember(Snowflake guildId, Snowflake userId, const QString &reason)
+{
+    QString endpoint = "/guilds/" + QString::number(guildId) + "/members/" + QString::number(userId);
+
+    QList<QPair<QString, QString>> headers;
+    if (!reason.isEmpty())
+        headers.append({ "X-Audit-Log-Reason", reason });
+
+    httpClient->delete_(endpoint, headers, [guildId, userId](const HttpResponse &response) {
+        if (!response.success)
+            qCWarning(LogDiscord) << "Failed to kick user" << userId << "from guild" << guildId
+                                  << ":" << response.error;
+    });
+}
+
+void Client::tempBanMember(Snowflake guildId, Snowflake userId, int deleteMessageSeconds,
+                           const QString &reason, int durationSeconds)
+{
+    if (durationSeconds <= 0) {
+        qCWarning(LogDiscord) << "tempBanMember: invalid duration" << durationSeconds;
+        return;
+    }
+
+    banMember(guildId, userId, deleteMessageSeconds, reason);
+
+    // Discord has no native "temp ban"; ban now and schedule the unban.
+    // Use the qint64 overload to avoid int32 overflow for long durations.
+    const qint64 delayMs = static_cast<qint64>(durationSeconds) * 1000;
+    const qint64 unbanAtMs = QDateTime::currentMSecsSinceEpoch() + delayMs;
+
+    // Cancel any previously armed unban for the same (guild, user) so re-issuing
+    // a temp ban (or a restore colliding with a fresh ban) doesn't unban early.
+    const QPair<Snowflake, Snowflake> key(guildId, userId);
+    if (auto it = m_pendingUnbanTimers.find(key); it != m_pendingUnbanTimers.end()) {
+        if (it.value())
+            it.value()->stop();
+        m_pendingUnbanTimers.erase(it);
+    }
+
+    auto *timer = new QTimer(this);
+    timer->setSingleShot(true);
+    connect(timer, &QTimer::timeout, this, [this, key, guildId, userId]() {
+        m_pendingUnbanTimers.remove(key);
+        unbanMember(guildId, userId);
+        removePendingUnban(guildId, userId);
+    });
+    timer->start(delayMs);
+    m_pendingUnbanTimers.insert(key, timer);
+
+    schedulePendingUnban(guildId, userId, unbanAtMs);
+}
+
+void Client::restorePendingUnbans()
+{
+    QSettings settings;
+    const QVariantList list = settings.value("moderation/pending_unbans").toList();
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    for (const auto &v : list) {
+        const QVariantMap e = v.toMap();
+        const Snowflake guildId(e.value("guild").toString().toULongLong());
+        const Snowflake userId(e.value("user").toString().toULongLong());
+        const qint64 at = e.value("at").toLongLong();
+        if (!guildId.isValid() || !userId.isValid() || at <= 0)
+            continue;
+        if (at <= now) {
+            unbanMember(guildId, userId);
+            removePendingUnban(guildId, userId);
+            continue;
+        }
+        const qint64 delayMs = at - now;
+        const QPair<Snowflake, Snowflake> key(guildId, userId);
+        auto *timer = new QTimer(this);
+        timer->setSingleShot(true);
+        connect(timer, &QTimer::timeout, this, [this, key, guildId, userId]() {
+            m_pendingUnbanTimers.remove(key);
+            unbanMember(guildId, userId);
+            removePendingUnban(guildId, userId);
+        });
+        timer->start(delayMs);
+        m_pendingUnbanTimers.insert(key, timer);
+    }
+}
+
+void Client::schedulePendingUnban(Snowflake guildId, Snowflake userId, qint64 unbanAtMs)
+{
+    QSettings settings;
+    QVariantList list = settings.value("moderation/pending_unbans").toList();
+    // Dedup: replace any existing entry for the same (guild, user).
+    const QString guildStr = guildId.toString();
+    const QString userStr = userId.toString();
+    for (auto it = list.begin(); it != list.end();) {
+        const QVariantMap e = it->toMap();
+        if (e.value("guild").toString() == guildStr && e.value("user").toString() == userStr)
+            it = list.erase(it);
+        else
+            ++it;
+    }
+    QVariantMap entry;
+    entry["guild"] = guildStr;
+    entry["user"] = userStr;
+    entry["at"] = unbanAtMs;
+    list.append(entry);
+    settings.setValue("moderation/pending_unbans", list);
+}
+
+void Client::removePendingUnban(Snowflake guildId, Snowflake userId)
+{
+    QSettings settings;
+    QVariantList list = settings.value("moderation/pending_unbans").toList();
+    QVariantList kept;
+    for (const auto &v : list) {
+        const QVariantMap e = v.toMap();
+        if (e.value("guild").toString() == guildId.toString()
+            && e.value("user").toString() == userId.toString())
+            continue;
+        kept.append(v);
+    }
+    settings.setValue("moderation/pending_unbans", kept);
+}
+
+void Client::setMemberMute(Snowflake guildId, Snowflake userId, bool muted, const QString &reason)
+{
+    QString endpoint = "/guilds/" + QString::number(guildId) + "/members/" + QString::number(userId);
+
+    QJsonObject body;
+    body.insert("mute", muted);
+
+    QList<QPair<QString, QString>> headers;
+    if (!reason.isEmpty())
+        headers.append({ "X-Audit-Log-Reason", reason });
+
+    httpClient->patch(endpoint, body, headers, [guildId, userId, muted](const HttpResponse &response) {
+        if (!response.success)
+            qCWarning(LogDiscord) << "Failed to set mute" << muted << "for user" << userId
+                                  << "in guild" << guildId << ":" << response.error;
+    });
+}
+
+void Client::setMemberDeaf(Snowflake guildId, Snowflake userId, bool deafened,
+                           const QString &reason)
+{
+    QString endpoint = "/guilds/" + QString::number(guildId) + "/members/" + QString::number(userId);
+
+    QJsonObject body;
+    body.insert("deaf", deafened);
+
+    QList<QPair<QString, QString>> headers;
+    if (!reason.isEmpty())
+        headers.append({ "X-Audit-Log-Reason", reason });
+
+    httpClient->patch(endpoint, body, headers,
+                      [guildId, userId, deafened](const HttpResponse &response) {
+        if (!response.success)
+            qCWarning(LogDiscord) << "Failed to set deaf" << deafened << "for user" << userId
+                                  << "in guild" << guildId << ":" << response.error;
+    });
+}
+
+void Client::setMemberTimeout(Snowflake guildId, Snowflake userId, int durationSeconds,
+                              const QString &reason)
+{
+    QString endpoint = "/guilds/" + QString::number(guildId) + "/members/" + QString::number(userId);
+
+    QJsonObject body;
+    if (durationSeconds > 0) {
+        const QString until = QDateTime::currentDateTimeUtc()
+                                      .addSecs(durationSeconds)
+                                      .toString(Qt::ISODate);
+        body.insert("communication_disabled_until", until);
+    } else {
+        body.insert("communication_disabled_until", QJsonValue::Null);
+    }
+
+    QList<QPair<QString, QString>> headers;
+    if (!reason.isEmpty())
+        headers.append({ "X-Audit-Log-Reason", reason });
+
+    httpClient->patch(endpoint, body, headers,
+                      [guildId, userId, durationSeconds](const HttpResponse &response) {
+        if (!response.success)
+            qCWarning(LogDiscord) << "Failed to timeout user" << userId << "in guild" << guildId
                                   << ":" << response.error;
     });
 }

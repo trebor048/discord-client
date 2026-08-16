@@ -495,6 +495,27 @@ void Parser::setupDefaultRules()
     };
     rules.append(strike);
 
+    MarkdownRule spoiler;
+    spoiler.name = "spoiler";
+    spoiler.order = 22;
+    spoiler.regex = QRegularExpression(R"(^\|\|([\s\S]+?)\|\|)");
+    spoiler.match = inlineRegex(spoiler.regex);
+    spoiler.parse = [](const Capture &match, NestedParseFn nestedParse,
+                       ParseState state) -> AstNode {
+        AstNode node;
+        node.type = "spoiler";
+        QString innerContent = match.captured(1);
+        ParseState childState = state;
+        childState.isInline = true;
+        node.children = nestedParse(innerContent, childState);
+        return node;
+    };
+    spoiler.html = [](const AstNode &node,
+                      std::function<QString(const QList<AstNode> &)> renderChildren) -> QString {
+        return QString("<span class=\"spoiler\">%1</span>").arg(renderChildren(node.children));
+    };
+    rules.append(spoiler);
+
     MarkdownRule inlineCode;
     inlineCode.name = "inlineCode";
     inlineCode.order = 23;
@@ -563,7 +584,7 @@ void Parser::sortRules()
         { "url", "h" },         { "link", "[" },      { "em", "_*" },
         { "user", "<" },        { "channel", "<" },   { "customEmoji", "<" },
         { "strong", "*" },      { "u", "_" },         { "strike", "~" },
-        { "inlineCode", "`" },  { "br", "\n" },
+        { "spoiler", "|" },     { "inlineCode", "`" }, { "br", "\n" },
     };
 
     for (auto &rule : rules) {

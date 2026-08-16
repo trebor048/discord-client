@@ -32,6 +32,10 @@ public:
     void setEdgeOffset(int offset);
     void setPosition(Core::Notification::NotificationPosition position);
     void setAnimationsEnabled(bool enabled) { m_animationsEnabled = enabled; }
+    // When non-null, the container is reparented to @p widget and toasts are
+    // positioned inside that widget (in-window overlay). When null, it is a
+    // frameless always-on-top top-level window pinned to a screen corner.
+    void setAnchorWidget(QWidget *widget);
 
     int notificationCount() const { return m_notifications.size(); }
 
@@ -68,6 +72,7 @@ private:
     bool m_dismissingAll = false;
     bool m_animationsEnabled = true;
     bool m_justAdded = false;
+    QWidget *m_anchorWidget = nullptr;
 
     mutable QPointer<QScreen> m_cachedScreen;
 };

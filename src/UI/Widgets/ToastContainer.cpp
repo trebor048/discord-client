@@ -172,6 +172,23 @@ void ToastContainer::setPosition(NotificationPosition position)
     repositionNotifications();
 }
 
+void ToastContainer::setAnchorWidget(QWidget *widget)
+{
+    if (m_anchorWidget == widget)
+        return;
+    m_anchorWidget = widget;
+
+    if (widget) {
+        setParent(widget);
+        setWindowFlags(Qt::Widget);
+    } else {
+        setParent(nullptr);
+        setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool);
+    }
+    show();
+    repositionNotifications();
+}
+
 void ToastContainer::resizeEvent(QResizeEvent *event)
 {
     Q_UNUSED(event);
@@ -180,10 +197,16 @@ void ToastContainer::resizeEvent(QResizeEvent *event)
 
 void ToastContainer::repositionNotifications()
 {
-    QScreen *screen = currentScreen();
-    if (!screen) return;
+    QRect geometry;
+    if (m_anchorWidget) {
+        geometry = QRect(0, 0, m_anchorWidget->width(), m_anchorWidget->height());
+    } else {
+        QScreen *screen = currentScreen();
+        if (!screen)
+            return;
+        geometry = screen->availableGeometry();
+    }
 
-    QRect geometry = screen->availableGeometry();
     if (QWidget::geometry() != geometry)
         setGeometry(geometry);
 
@@ -312,10 +335,16 @@ QScreen *ToastContainer::currentScreen() const
 
 QPoint ToastContainer::calculateStartPosition() const
 {
-    QScreen *screen = currentScreen();
-    if (!screen) return QPoint();
+    QRect geometry;
+    if (m_anchorWidget) {
+        geometry = QRect(0, 0, m_anchorWidget->width(), m_anchorWidget->height());
+    } else {
+        QScreen *screen = currentScreen();
+        if (!screen)
+            return QPoint();
+        geometry = screen->availableGeometry();
+    }
 
-    QRect geometry = screen->availableGeometry();
     const int width = qRound(ToastNotification::defaultWidth() * m_scale);
 
     // Children are positioned in container-local coordinates; the container

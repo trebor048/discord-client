@@ -4,6 +4,7 @@
 #include "Core/AV/VoiceManager.hpp"
 #include "Core/ImageManager.hpp"
 #include "Core/Logging.hpp"
+#include "Core/Theme/Manager.hpp"
 
 #include <QContextMenuEvent>
 #include <QCoreApplication>
@@ -998,8 +999,9 @@ static QDialog *createCodeDialog(QWidget *parent, const QString &title,
     codeFont.setLetterSpacing(QFont::AbsoluteSpacing, 1);
     codeLabel->setFont(codeFont);
     codeLabel->setStyleSheet(
-            "QLabel { background: palette(base); border: 1px solid palette(mid);"
-            "  border-radius: 6px; padding: 12px 16px; }");
+            QString("QLabel { background: palette(base); border: 1px solid palette(mid);"
+                    "  border-radius: %1px; padding: 12px 16px; }")
+                    .arg(Core::Theme::Manager::instance().roundness()));
     layout->addWidget(codeLabel);
 
     auto *btnBox = new QDialogButtonBox(QDialogButtonBox::Close, dlg);

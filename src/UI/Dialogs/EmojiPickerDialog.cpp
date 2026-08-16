@@ -2,6 +2,7 @@
 #include "VirtualEmojiGrid.hpp"
 
 #include "Core/AnimationUtils.hpp"
+#include "Core/Theme/Manager.hpp"
 #include "EmojiPreferences.hpp"
 
 #include <QAbstractButton>
@@ -419,6 +420,8 @@ void EmojiPickerDialog::updateCategoryStickyHeader()
     QString displayName = currentSection;
     if (displayName == QStringLiteral("recents"))
         displayName = tr("Frequently Used");
+    else if (displayName == QStringLiteral("guild"))
+        displayName = tr("Guild Emoji");
     else if (!displayName.isEmpty())
         displayName[0] = displayName[0].toUpper();
 
@@ -450,21 +453,30 @@ void EmojiPickerDialog::rebuildCategoryGrid(const QList<Core::EmojiCatalogItem> 
 {
     clearCategoryGrid();
 
-    // Group by category
+    // Group by category. Custom guild emoji are pulled into their own section
+    // (below) so they are exposed from the shared picker surface, not just the
+    // Server tab, instead of being lumped into the generic "other" bucket.
     QHash<QString, QList<Core::EmojiCatalogItem>> grouped;
+    QList<Core::EmojiCatalogItem> guildEmoji;
     for (const auto &item : items) {
-        const QString cat = item.category.isEmpty() ? QStringLiteral("other") : item.category.toCaseFolded();
-        grouped[cat].append(item);
+        if (item.isCustom()) {
+            guildEmoji.append(item);
+        } else {
+            const QString cat = item.category.isEmpty() ? QStringLiteral("other") : item.category.toCaseFolded();
+            grouped[cat].append(item);
+        }
     }
     QStringList categories = grouped.keys();
     categories.sort();
 
     // Shared stylesheet for all emoji grid buttons
-    static const QString kGridButtonStyle =
+    const int gridR = Core::Theme::Manager::instance().roundness();
+    const QString kGridButtonStyle =
             QStringLiteral(
-                    "QToolButton[emojiGridButton=\"true\"] { border: 1px solid transparent; border-radius: 6px; padding: 2px; }"
+                    "QToolButton[emojiGridButton=\"true\"] { border: 1px solid transparent; border-radius: %1px; padding: 2px; }"
                     "QToolButton[emojiGridButton=\"true\"]:hover { border-color: palette(mid); background: palette(base); }"
-                    "QToolButton[emojiGridButton=\"true\"]:checked { border-color: palette(highlight); background: palette(highlight); }");
+                    "QToolButton[emojiGridButton=\"true\"]:checked { border-color: palette(highlight); background: palette(highlight); }")
+                    .arg(gridR);
     categoryGrid->setStyleSheet(kGridButtonStyle);
 
     QList<EmojiGridSection> sections;
@@ -497,6 +509,21 @@ void EmojiPickerDialog::rebuildCategoryGrid(const QList<Core::EmojiCatalogItem> 
         section.header = category;
         section.items = catItems;
         sections.append(section);
+    }
+
+    // Guild emoji: all custom emoji the session has registered. Reuses the
+    // grid's shared click/select path (itemClicked -> setSelectedEmojiValue),
+    // so insertion of `:name:` / `<a:name:id>` works exactly like the Server
+    // tab.
+    if (!guildEmoji.isEmpty()) {
+        std::sort(guildEmoji.begin(), guildEmoji.end(), [](const auto &a, const auto &b) {
+            return a.name.toCaseFolded() < b.name.toCaseFolded();
+        });
+        EmojiGridSection guildSection;
+        guildSection.key = QStringLiteral("guild");
+        guildSection.header = tr("Guild Emoji");
+        guildSection.items = guildEmoji;
+        sections.append(guildSection);
     }
 
     categoryGrid->setSections(sections);
@@ -1011,11 +1038,13 @@ void EmojiPickerDialog::rebuildServerGrid(const QList<Core::EmojiCatalogItem> &i
     orderedGroups.append(leftovers);
 
     // Shared stylesheet for server emoji grid buttons
-    static const QString kServerButtonStyle =
+    const int serverGridR = Core::Theme::Manager::instance().roundness();
+    const QString kServerButtonStyle =
             QStringLiteral(
-                    "QToolButton[emojiGridButton=\"true\"] { border: 1px solid transparent; border-radius: 8px; padding: 4px; }"
+                    "QToolButton[emojiGridButton=\"true\"] { border: 1px solid transparent; border-radius: %1px; padding: 4px; }"
                     "QToolButton[emojiGridButton=\"true\"]:hover { border-color: palette(mid); background: palette(base); }"
-                    "QToolButton[emojiGridButton=\"true\"]:checked { border-color: palette(highlight); background: palette(highlight); }");
+                    "QToolButton[emojiGridButton=\"true\"]:checked { border-color: palette(highlight); background: palette(highlight); }")
+                    .arg(serverGridR);
     serverGrid->setStyleSheet(kServerButtonStyle);
 
     QList<EmojiGridSection> sections;

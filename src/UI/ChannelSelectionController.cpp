@@ -8,6 +8,7 @@
 #include "NotificationController.hpp"
 #include "Chat/ChatModel.hpp"
 #include "Chat/ChatView.hpp"
+#include "UI/Widgets/Chat/MentionAutocompletePopup.hpp"
 #include "Forum/ForumBrowser.hpp"
 #include "Forum/ForumPostModel.hpp"
 #include "Forum/NewPostDialog.hpp"
@@ -219,6 +220,95 @@ void ChannelSelectionController::switchChatChannel(Core::Snowflake channelId,
     m_window->chatModel->setActiveChannel(channelId, guildId);
     m_window->typingTracker->setActiveChannel(channelId);
     m_window->messageInput->clearReplyTarget();
+
+    // Build the mention autocomplete list (`@` roles, `#` channels) for the
+    // newly active guild.
+    if (m_window->currentInstance) {
+        QList<MentionItem> mentions;
+
+        const auto channels = m_window->currentInstance->getChannelsForGuild(guildId);
+        for (const auto &channel : channels) {
+            const auto type = channel.type.get();
+            switch (type) {
+            case Discord::ChannelType::GUILD_TEXT:
+            case Discord::ChannelType::GUILD_VOICE:
+            case Discord::ChannelType::GUILD_NEWS:
+            case Discord::ChannelType::GUILD_FORUM:
+            case Discord::ChannelType::GUILD_MEDIA:
+            case Discord::ChannelType::GUILD_STAGE_VOICE:
+            case Discord::ChannelType::NEWS_THREAD:
+            case Discord::ChannelType::PUBLIC_THREAD:
+            case Discord::ChannelType::PRIVATE_THREAD:
+                break;
+            default:
+                continue;
+            }
+            MentionItem item;
+            item.id = channel.id.get();
+            item.name = channel.name.getOr(QString());
+            item.kind = MentionItem::Kind::Channel;
+            mentions.append(item);
+        }
+
+        const auto roles = m_window->currentInstance->getRolesForGuild(guildId);
+        for (const auto &role : roles) {
+            if (role.name.get().isEmpty())
+                continue;
+            MentionItem item;
+            item.id = role.id.get();
+            item.name = role.name.get();
+            item.kind = MentionItem::Kind::Role;
+            mentions.append(item);
+        }
+
+        // '@' mentions: prefer the guild's actual member ids (cached), falling
+        // back to the global user cache. Cap the list so channel switches stay
+        // fast; the inserted `<@id>` is what matters.
+        QList<Core::Snowflake> userIds = m_window->currentInstance->guildMemberIds(guildId);
+        if (userIds.isEmpty())
+            userIds = m_window->currentInstance->users()->cachedUserIds();
+        constexpr int kMaxUserMentions = 100;
+        int userMentionsAdded = 0;
+        for (const auto userId : userIds) {
+            if (userId == m_window->currentInstance->accountId())
+                continue;
+            auto user = m_window->currentInstance->users()->getUser(userId);
+            if (!user || user->username.get().isEmpty())
+                continue;
+            MentionItem item;
+            item.id = userId;
+            item.name = user->getDisplayName();
+            item.kind = MentionItem::Kind::User;
+            mentions.append(item);
+            if (++userMentionsAdded >= kMaxUserMentions)
+                break;
+        }
+
+        m_window->messageInput->setAvailableMentions(mentions);
+    }
+
+    // Fetch slash commands available in this channel for `/` autocomplete.
+    // Clear the previous channel's list synchronously so stale commands don't
+    // linger while the fetch is in flight or on error.
+    m_window->messageInput->setAvailableCommands({});
+    if (m_window->currentInstance && m_window->currentInstance->discord()) {
+        m_window->currentInstance->discord()->fetchApplicationCommands(
+                channelId, QString(),
+                [guard = QPointer<ChannelSelectionController>(this),
+                 channelId](const Core::Result<QList<Discord::ApplicationCommand>> &res) {
+                    // The controller (and its MainWindow) can be destroyed while
+                    // the HTTP response is in flight (detached windows).
+                    if (guard.isNull())
+                        return;
+                    if (!guard->m_window->currentInstance)
+                        return;
+                    // Drop results for a channel we've since navigated away from.
+                    if (guard->m_window->chatModel->getActiveChannelId() != channelId)
+                        return;
+                    if (res.success())
+                        guard->m_window->messageInput->setAvailableCommands(*res.value);
+                });
+    }
 }
 
 void ChannelSelectionController::setViewMode(ViewMode mode)
@@ -354,11 +444,14 @@ void ChannelSelectionController::onNewPostRequested()
         dialog->setBusy(true);
 
         QPointer<NewPostDialog> guard(dialog);
+        QPointer<ChannelSelectionController> selfGuard(this);
         instance->discord()->createForumThread(
                 forumId, dialog->title(), dialog->selectedTagIds(), dialog->content(),
                 Core::Snowflake::generateNonce().toString(), dialog->attachments(),
-                [this, guard, instance, forumId,
+                [this, selfGuard, guard, instance, forumId,
                  guildId](const Core::Result<Discord::Client::CreatedForumThread> &res) {
+                    if (selfGuard.isNull())
+                        return;
                     if (!res.success()) {
                         qCWarning(LogUI) << "Failed to create forum post:" << res.error;
                         if (guard)

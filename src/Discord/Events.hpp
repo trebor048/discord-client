@@ -821,13 +821,31 @@ struct Activity : Core::JsonUtils::JsonObject
     }
 };
 
+// Per-device presence from client_status: each device's status, or empty when
+// the user isn't active on that device.
+struct ClientStatus : Core::JsonUtils::JsonObject
+{
+    Field<QString, true, true> desktop;
+    Field<QString, true, true> mobile;
+    Field<QString, true, true> web;
+
+    static ClientStatus fromJson(const QJsonObject &obj)
+    {
+        ClientStatus cs;
+        get(obj, "desktop", cs.desktop);
+        get(obj, "mobile", cs.mobile);
+        get(obj, "web", cs.web);
+        return cs;
+    }
+};
+
 struct PresenceUpdate : Core::JsonUtils::JsonObject
 {
     Field<User> user;
     Field<Core::Snowflake, true> guildId;
     Field<QString> status;
     Field<QList<Activity>, true> activities;
-    Field<QString, true, true> clientStatus;
+    Field<ClientStatus, true> clientStatus;
 
     static PresenceUpdate fromJson(const QJsonObject &obj)
     {

@@ -8,6 +8,11 @@
 
 #include <random>
 
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 namespace Acheron {
 namespace Discord {
 namespace AV {
@@ -403,6 +408,7 @@ void VoiceGateway::networkLoop()
 
         curl_easy_setopt(curl, CURLOPT_URL, connectUrl.toUtf8().constData());
         curl_easy_setopt(curl, CURLOPT_CONNECT_ONLY, 2L);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
         CurlUtils::applyCommonOptions(curl);
 
         CURLcode res = curl_easy_perform(curl);
@@ -432,6 +438,18 @@ void VoiceGateway::networkLoop()
         }
 
         qCInfo(LogVoice) << "Voice WebSocket connected to" << endpoint;
+
+        curl_socket_t sock = CurlUtils::getActiveSocket(curl);
+        if (sock != CURL_SOCKET_BAD) {
+#ifdef _WIN32
+            u_long mode = 1;
+            ioctlsocket(sock, FIONBIO, &mode);
+#else
+            int flags = fcntl(sock, F_GETFL, 0);
+            fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+#endif
+        }
+
         generation++;
         emit connected();
 

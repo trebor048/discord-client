@@ -1,6 +1,7 @@
 #include "ShortcutSheet.hpp"
 
 #include "Core/AnimationUtils.hpp"
+#include "Core/Theme/Manager.hpp"
 
 #include <QFrame>
 #include <QGridLayout>
@@ -61,8 +62,10 @@ QWidget *makeShortcutRow(const QStringList &keys, const QString &description, QW
 QFrame *makeSection(const QString &title, QWidget *content, QWidget *parent)
 {
     auto *frame = new QFrame(parent);
+    const int r = Core::Theme::Manager::instance().roundness();
     frame->setStyleSheet(QStringLiteral(
-            "QFrame { background: palette(window); border: 1px solid palette(mid); border-radius: 10px; }"));
+            "QFrame { background: palette(window); border: 1px solid palette(mid); border-radius: %1px; }")
+                                 .arg(r));
     auto *layout = new QVBoxLayout(frame);
     layout->setContentsMargins(14, 12, 14, 12);
     layout->setSpacing(10);
@@ -93,7 +96,8 @@ ShortcutSheet::ShortcutSheet(QWidget *parent) : QDialog(parent)
     auto *panel = new QWidget(this);
     panel->setObjectName(QStringLiteral("shortcutSheetPanel"));
     panel->setStyleSheet(QStringLiteral(
-            "#shortcutSheetPanel { background: palette(window); border: 1px solid palette(mid); border-radius: 12px; }"));
+            "#shortcutSheetPanel { background: palette(window); border: 1px solid palette(mid); border-radius: %1px; }")
+                                 .arg(Core::Theme::Manager::instance().roundness()));
     auto *panelLayout = new QVBoxLayout(panel);
     panelLayout->setContentsMargins(16, 16, 16, 16);
     panelLayout->setSpacing(12);

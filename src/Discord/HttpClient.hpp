@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QJsonArray>
+#include <QPair>
 
 #include <curl/curl.h>
 
@@ -57,9 +58,15 @@ public:
     void post(const QString &endpoint, const QJsonObject &body, HttpCallback callback);
     void patch(const QString &endpoint, const QJsonObject &body, HttpCallback callback);
     void patch(const QString &endpoint, const QJsonArray &body, HttpCallback callback);
+    void patch(const QString &endpoint, const QJsonObject &body,
+               const QList<QPair<QString, QString>> &headers, HttpCallback callback);
     void put(const QString &endpoint, const QJsonObject &body, HttpCallback callback);
+    void put(const QString &endpoint, const QJsonObject &body,
+             const QList<QPair<QString, QString>> &headers, HttpCallback callback);
     void delete_(const QString &endpoint, HttpCallback callback);
     void delete_(const QString &endpoint, const QJsonObject &body, HttpCallback callback);
+    void delete_(const QString &endpoint, const QList<QPair<QString, QString>> &headers,
+                 HttpCallback callback);
     void postMultipart(const QString &endpoint, const QJsonObject &jsonPayload,
                        const QList<FileUpload> &files, HttpCallback callback);
     // for gcp uploads
@@ -73,6 +80,8 @@ public:
                      std::shared_ptr<std::atomic<bool>> cancelFlag = {});
 
 private:
+    void executeRequest(Method method, const QString &url, const QByteArray &data,
+                        const QList<QPair<QString, QString>> &headers, HttpCallback callback);
     void executeRequest(Method method, const QString &url, const QByteArray &data,
                         HttpCallback callback);
     void executeMultipartRequest(const QString &url, const QByteArray &jsonData,

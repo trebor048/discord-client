@@ -3,11 +3,13 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QFormLayout>
+#include <QGroupBox>
 #include <QPushButton>
 #include <QSettings>
 #include <QVBoxLayout>
 
 #include "UI/Widgets/CustomStatusEdit.hpp"
+#include "Core/Settings.hpp"
 
 namespace Acheron {
 namespace UI {
@@ -30,6 +32,10 @@ GeneralPage::GeneralPage(QWidget *parent)
     notificationSoundsCheckbox->setChecked(QSettings().value("notifications/sounds", true).toBool());
     layout->addWidget(notificationSoundsCheckbox);
 
+    developerModeCheckbox = new QCheckBox(tr("Developer Mode"), this);
+    developerModeCheckbox->setChecked(Core::Settings::instance().developerMode());
+    layout->addWidget(developerModeCheckbox);
+
     auto *tabsLayout = new QFormLayout();
     newTabBehaviorCombo = new QComboBox(this);
     newTabBehaviorCombo->addItem(tr("Open channel picker"), "picker");
@@ -47,6 +53,19 @@ GeneralPage::GeneralPage(QWidget *parent)
     statusLayout->addRow(tr("Custom status"), customStatusWidget);
     layout->addLayout(statusLayout);
 
+    auto *mediaGroup = new QGroupBox(tr("Media"), this);
+    auto *mediaLayout = new QVBoxLayout(mediaGroup);
+
+    autoplayGifsCheckbox = new QCheckBox(tr("Autoplay GIFs"), this);
+    autoplayGifsCheckbox->setChecked(QSettings().value("ui/gifAutoplay", true).toBool());
+    mediaLayout->addWidget(autoplayGifsCheckbox);
+
+    autoplayVideosCheckbox = new QCheckBox(tr("Autoplay Videos"), this);
+    autoplayVideosCheckbox->setChecked(QSettings().value("ui/videoAutoplay", true).toBool());
+    mediaLayout->addWidget(autoplayVideosCheckbox);
+
+    layout->addWidget(mediaGroup);
+
     layout->addStretch();
 
     connect(inMemoryCacheCheckbox, &QCheckBox::toggled, this, [](bool checked) {
@@ -57,6 +76,15 @@ GeneralPage::GeneralPage(QWidget *parent)
         QSettings settings;
         settings.setValue("notifications/sounds", checked);
         emit notificationSoundsChanged(checked);
+    });
+    connect(developerModeCheckbox, &QCheckBox::toggled, this, [](bool checked) {
+        Core::Settings::instance().setDeveloperMode(checked);
+    });
+    connect(autoplayGifsCheckbox, &QCheckBox::toggled, this, [](bool checked) {
+        QSettings().setValue("ui/gifAutoplay", checked);
+    });
+    connect(autoplayVideosCheckbox, &QCheckBox::toggled, this, [](bool checked) {
+        QSettings().setValue("ui/videoAutoplay", checked);
     });
     connect(newTabBehaviorCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         QSettings().setValue("ui/newTabBehavior", newTabBehaviorCombo->currentData().toString());

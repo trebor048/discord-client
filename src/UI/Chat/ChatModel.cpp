@@ -233,6 +233,11 @@ void ChatModel::setRoleColorResolver(RoleColorResolver resolver)
     roleColorResolver = std::move(resolver);
 }
 
+void ChatModel::setChannelNameResolver(ChannelNameResolver resolver)
+{
+    channelNameResolver = std::move(resolver);
+}
+
 QString ChatModel::resolveAuthorName(const Discord::User &author) const
 {
     if (displayNameResolver) {
@@ -358,6 +363,22 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
             return tr("Sorry, we couldn't load the first message in this thread.");
         }
 
+        // Forwarded messages (message_reference.type == FORWARD) get a banner.
+        // Computed first so image-embed-only forwards still show the banner.
+        QString forwardBanner;
+        if (msg.messageReference.hasValue() && msg.messageReference->type.get() == 1) {
+            QString channelName;
+            if (channelNameResolver && msg.messageReference->channelId.hasValue())
+                channelName = channelNameResolver(msg.messageReference->channelId.get());
+            const QString label = tr("Forwarded from %1")
+                                          .arg(channelName.isEmpty() ? QStringLiteral("a channel")
+                                                                     : QStringLiteral("#") + channelName);
+            forwardBanner = QStringLiteral(
+                                    "<div style=\"font-size:11px; color:palette(placeholder-text); "
+                                    "font-weight:600; margin-bottom:2px;\">%1</div>")
+                                    .arg(label.toHtmlEscaped());
+        }
+
         // for image embeds, suppress text if content is just the embed url
         if (msg.embeds.hasValue() && msg.embeds->size() == 1) {
             const auto &embed = msg.embeds->first();
@@ -365,11 +386,11 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
             if (embedType == "image") {
                 QString embedUrl = embed.url.hasValue() ? *embed.url : QString();
                 if (!embedUrl.isEmpty() && msg.content == embedUrl)
-                    return QString();
+                    return forwardBanner;
             }
         }
 
-        QString html = msg.parsedContentCached;
+        QString html = forwardBanner + msg.parsedContentCached;
 
         if (msg.flags.hasValue() && msg.flags->testFlag(Discord::MessageFlag::HAS_THREAD)) {
             QString sep = html.isEmpty() ? QString() : QStringLiteral("<br>");
@@ -661,6 +682,11 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
             reactionCache.insert(msg.id, data);
         return QVariant::fromValue(data);
     }
+    case PollRole: {
+        if (!msg.poll.hasValue())
+            return QVariant();
+        return QVariant::fromValue(buildPollData(msg));
+    }
     case StickersRole: {
         if (!msg.stickerItems.hasValue() || msg.stickerItems->isEmpty())
             return QVariant();
@@ -905,6 +931,71 @@ QList<ReactionData> ChatModel::buildReactionData(const Discord::Message &msg) co
     }
 
     return result;
+}
+
+PollData ChatModel::buildPollData(const Discord::Message &msg) const
+{
+    PollData data;
+    if (!msg.poll.hasValue())
+        return data;
+
+    const Discord::Poll &poll = *msg.poll;
+
+    if (poll.question.hasValue() && poll.question->text.hasValue())
+        data.question = poll.question->text.get();
+
+    data.allowMultiselect = poll.allowMultiselect.hasValue() && *poll.allowMultiselect;
+
+    if (poll.results.hasValue()) {
+        const Discord::PollResults &results = *poll.results;
+        data.isFinalized = results.isFinalized.hasValue() && *results.isFinalized;
+        if (results.answerCounts.hasValue()) {
+            for (const auto &count : *results.answerCounts)
+                data.totalVotes += count.count.hasValue() ? *count.count : 0;
+        }
+    }
+
+    data.isExpired = poll.isExpired();
+
+    if (poll.myAnswers.hasValue())
+        data.myAnswers = poll.myAnswers.get();
+
+    if (poll.answers.hasValue()) {
+        for (const auto &answer : *poll.answers) {
+            PollAnswerData answerData;
+            answerData.id = answer.answerId.hasValue() ? *answer.answerId : 0;
+
+            if (answer.pollMedia.hasValue()) {
+                answerData.text = answer.pollMedia->text.hasValue() ? *answer.pollMedia->text
+                                                                    : QString();
+                const auto &emoji = answer.pollMedia->emoji;
+                // A default-constructed Emoji reports a (default) id, so only
+                // trust it when the object actually carried an id.
+                if (emoji.hasValue() && !emoji.isNull() && emoji->name.hasValue()) {
+                    answerData.emojiName = emoji->name.get();
+                    if (!emoji->isUnicode() && emoji->id.hasValue() && emoji->id->isValid())
+                        answerData.emojiId = emoji->id.get();
+                }
+            }
+
+            if (poll.results.hasValue() && poll.results->answerCounts.hasValue()) {
+                for (const auto &count : *poll.results->answerCounts) {
+                    if (count.id.hasValue() && *count.id == answerData.id) {
+                        answerData.count = count.count.hasValue() ? *count.count : 0;
+                        break;
+                    }
+                }
+            }
+
+            if (data.totalVotes > 0)
+                answerData.percent = double(answerData.count) * 100.0 / double(data.totalVotes);
+
+            answerData.me = data.myAnswers.contains(answerData.id);
+            data.answers.append(answerData);
+        }
+    }
+
+    return data;
 }
 
 bool ChatModel::setData(const QModelIndex &index, const QVariant &value, int role)

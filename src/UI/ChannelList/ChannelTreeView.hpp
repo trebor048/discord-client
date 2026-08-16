@@ -3,6 +3,8 @@
 #include <QTreeView>
 #include <QHash>
 
+#include <functional>
+
 #include "Core/Snowflake.hpp"
 
 namespace Acheron {
@@ -20,6 +22,14 @@ public:
     void setAccountVoiceChannel(Core::Snowflake accountId, Core::Snowflake channelId);
     [[nodiscard]] bool isAccountInVoice(Core::Snowflake accountId) const;
 
+    // Provider used to label the "Listen to toasts" context action (true when
+    // the channel is already on the notify list). Set by MainWindow.
+    void setNotifyListContains(std::function<bool(Core::Snowflake)> provider);
+    // Provider for the "Ignore toasts" action (true when the channel is ignored).
+    void setIgnoreEntitiesContains(std::function<bool(Core::Snowflake)> provider);
+    // Provider for the "Mute Channel" action (true when locally muted).
+    void setChannelMutedContains(std::function<bool(Core::Snowflake)> provider);
+
 signals:
     void markAsReadRequested(const QModelIndex &proxyIndex);
     void openInNewTabRequested(const QModelIndex &proxyIndex);
@@ -30,6 +40,9 @@ signals:
     void leaveThreadRequested(const QModelIndex &proxyIndex);
     void leaveGuildRequested(Core::Snowflake accountId, Core::Snowflake guildId);
     void serverSettingsRequested(Core::Snowflake accountId, Core::Snowflake guildId);
+    void notifyListToggleRequested(Core::Snowflake channelId);
+    void ignoreToggleRequested(Core::Snowflake channelId);
+    void channelMuteToggleRequested(Core::Snowflake channelId);
 
 protected:
     void contextMenuEvent(QContextMenuEvent *event) override;
@@ -52,6 +65,9 @@ private:
     QModelIndex reorderSourceIndex;
     QPoint reorderPressPos;
     bool reorderDragging = false;
+    std::function<bool(Core::Snowflake)> m_notifyListContains;
+    std::function<bool(Core::Snowflake)> m_ignoreEntitiesContains;
+    std::function<bool(Core::Snowflake)> m_channelMutedContains;
 };
 
 } // namespace UI

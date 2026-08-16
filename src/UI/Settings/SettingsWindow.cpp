@@ -9,6 +9,8 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#include <algorithm>
+
 #include "AppearancePage.hpp"
 #include "AuthorizedAppsPage.hpp"
 #include "ConnectionsPage.hpp"
@@ -17,6 +19,8 @@
 #include "PrivacySettingsPage.hpp"
 #include "StreamerModePage.hpp"
 #include "VoicePage.hpp"
+
+#include "Core/Theme/Manager.hpp"
 
 #include "Discord/Client.hpp"
 #include "Core/Notification/NotificationManager.hpp"
@@ -79,6 +83,31 @@ void SettingsWindow::setVoiceManager(Core::AV::VoiceManager *mgr)
 #endif
 }
 
+void SettingsWindow::selectPage(const QString &name)
+{
+    if (!categoryList || !pages || name.isEmpty())
+        return;
+    for (int i = 0; i < categoryList->count(); ++i) {
+        if (categoryList->item(i)->text().compare(name, Qt::CaseInsensitive) == 0) {
+            categoryList->setCurrentRow(i);
+            pages->setCurrentIndex(i);
+            if (auto *page = pages->currentWidget())
+                Acheron::Core::AnimationUtils::fadeIn(page, 150);
+            return;
+        }
+    }
+}
+
+QStringList SettingsWindow::pageNames() const
+{
+    QStringList names;
+    if (!categoryList)
+        return names;
+    for (int i = 0; i < categoryList->count(); ++i)
+        names.append(categoryList->item(i)->text());
+    return names;
+}
+
 void SettingsWindow::setupUi()
 {
     auto *container = getContainer();
@@ -134,14 +163,18 @@ void SettingsWindow::setupUi()
     categoryList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     categoryList->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     categoryList->setSpacing(2);
+    const int r = Core::Theme::Manager::instance().roundness();
+    const int rSmall = std::max(2, r / 2);
     categoryList->setStyleSheet(QStringLiteral(
             "QListWidget#settingsCategoryList { background: palette(alternate-base); "
-            "border: 1px solid palette(mid); border-radius: 8px; padding: 4px; }"
-            "QListWidget#settingsCategoryList::item { border-radius: 6px; "
+            "border: 1px solid palette(mid); border-radius: %1px; padding: 4px; }"
+            "QListWidget#settingsCategoryList::item { border-radius: %2px; "
             "padding: 8px 10px; }"
             "QListWidget#settingsCategoryList::item:hover { background: palette(mid); }"
             "QListWidget#settingsCategoryList::item:selected { background: palette(highlight); "
-            "color: palette(highlighted-text); }"));
+            "color: palette(highlighted-text); }")
+                                       .arg(r)
+                                       .arg(rSmall));
 
     pages = new QStackedWidget(container);
     pages->setObjectName(QStringLiteral("settingsPages"));

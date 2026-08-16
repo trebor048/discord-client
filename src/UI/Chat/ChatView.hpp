@@ -101,6 +101,7 @@ signals:
     void pinMessageRequested(Core::Snowflake channelId, Core::Snowflake messageId);
     void pinnedMessagesRequested(Core::Snowflake channelId);
     void replyToMessageRequested(Core::Snowflake channelId, Core::Snowflake messageId);
+    void forwardMessageRequested(Core::Snowflake channelId, Core::Snowflake messageId);
     void addReactionRequested(Core::Snowflake channelId, Core::Snowflake messageId,
                               const QString &emoji);
     void cancelUploadRequested(Core::Snowflake channelId, Core::Snowflake messageId);
@@ -147,6 +148,8 @@ private:
     bool handleQuickReactionClick(const QModelIndex &index,
                                   const ChatLayout::ResolvedLayout &resolved,
                                   const QPoint &pos);
+    void ensureVoicePlayerPanel();
+    void positionVoicePlayerPanel();
 
     QTextEdit *inlineEditWidget = nullptr;
     QWidget *searchPanel = nullptr;
@@ -195,6 +198,7 @@ private:
 
     QLabel *placeholderLabel = nullptr;
     QPushButton *jumpToBottomButton = nullptr;
+    QPointer<QWidget> voicePlayerPanel;
     QPropertyAnimation *jumpToBottomAnimation = nullptr;
     QPropertyAnimation *scrollAnimation = nullptr;
     QVariantAnimation *channelFadeAnimation = nullptr;

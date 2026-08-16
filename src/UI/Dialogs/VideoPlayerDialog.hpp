@@ -9,6 +9,7 @@ class QVideoWidget;
 class QPushButton;
 class QSlider;
 class QLabel;
+class QKeyEvent;
 
 namespace Acheron {
 namespace UI {
@@ -28,7 +29,11 @@ private slots:
     void seekSliderPressed();
     void seekSliderReleased();
 
+protected:
+    void keyPressEvent(QKeyEvent *event) override;
+
 private:
+    void seekRelative(qint64 delta);
     void onPositionChanged(qint64 position);
     void onDurationChanged(qint64 duration);
     void onPlaybackStateChanged(QMediaPlayer::PlaybackState state);

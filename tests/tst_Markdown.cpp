@@ -27,6 +27,7 @@ private slots:
     void testBold();
     void testItalic();
     void testStrikethrough();
+    void testSpoiler();
     void testInlineCode();
     void testLink();
     void testAutoUrl();
@@ -100,6 +101,20 @@ void TestMarkdown::testStrikethrough()
     auto html = parser.toHtml(nodes);
 
     QVERIFY(html == "<s>strikethrough</s>");
+
+    return;
+}
+
+void TestMarkdown::testSpoiler()
+{
+    Parser parser;
+
+    ParseState state;
+    state.isInline = true;
+    auto nodes = parser.parse("||hidden text||", state);
+    auto html = parser.toHtml(nodes);
+
+    QVERIFY(html == "<span class=\"spoiler\">hidden text</span>");
 
     return;
 }

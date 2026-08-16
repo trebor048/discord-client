@@ -2,6 +2,10 @@
 #include "SoundOverrideWidget.hpp"
 
 #include "Core/Notification/NotificationManager.hpp"
+#include "Core/ClientInstance.hpp"
+#include "Core/UserManager.hpp"
+#include "Core/ImageManager.hpp"
+#include "Discord/CdnUrls.hpp"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -16,6 +20,7 @@
 #include <QPushButton>
 #include <QListWidget>
 #include <QListWidgetItem>
+#include <QTimeEdit>
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QSettings>
@@ -101,6 +106,12 @@ void NotificationsPage::setupAppearanceTab(QWidget *tab)
     m_deliveryCombo->addItem(tr("Both"), "both");
     generalLayout->addRow(tr("Notification Style:"), m_deliveryCombo);
 
+    m_toastPlacementCombo = new QComboBox(generalGroup);
+    m_toastPlacementCombo->addItem(tr("On the monitor"), "monitor");
+    m_toastPlacementCombo->addItem(tr("In the window"), "in-window");
+    m_toastPlacementCombo->addItem(tr("Auto (in-window when focused)"), "auto");
+    generalLayout->addRow(tr("Toast Placement:"), m_toastPlacementCombo);
+
     m_groupingCheck = new QCheckBox(tr("Group multiple messages from the same conversation into one toast"), generalGroup);
     m_groupingCheck->setChecked(true);
     generalLayout->addRow(m_groupingCheck);
@@ -173,6 +184,7 @@ void NotificationsPage::setupAppearanceTab(QWidget *tab)
     // Connect signals
     connect(m_enabledCheck, &QCheckBox::toggled, this, &NotificationsPage::onSettingChanged);
     connect(m_deliveryCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &NotificationsPage::onSettingChanged);
+    connect(m_toastPlacementCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &NotificationsPage::onSettingChanged);
     connect(m_groupingCheck, &QCheckBox::toggled, this, &NotificationsPage::onSettingChanged);
     connect(m_positionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &NotificationsPage::onSettingChanged);
     connect(m_maxNotificationsSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, &NotificationsPage::onSettingChanged);
@@ -227,11 +239,49 @@ void NotificationsPage::setupNotificationTypesTab(QWidget *tab)
 
     contentLayout->addWidget(group);
 
+    // Quiet hours group
+    auto *quietGroup = new QGroupBox(tr("Quiet Hours"), content);
+    auto *quietLayout = new QVBoxLayout(quietGroup);
+    m_quietHoursCheck = new QCheckBox(tr("Suppress toasts during quiet hours"), quietGroup);
+    quietLayout->addWidget(m_quietHoursCheck);
+    auto *timeRow = new QHBoxLayout;
+    auto *startLabel = new QLabel(tr("From"), quietGroup);
+    m_quietStartEdit = new QTimeEdit(quietGroup);
+    m_quietStartEdit->setDisplayFormat(QStringLiteral("HH:mm"));
+    auto *endLabel = new QLabel(tr("To"), quietGroup);
+    m_quietEndEdit = new QTimeEdit(quietGroup);
+    m_quietEndEdit->setDisplayFormat(QStringLiteral("HH:mm"));
+    timeRow->addWidget(startLabel);
+    timeRow->addWidget(m_quietStartEdit);
+    timeRow->addWidget(endLabel);
+    timeRow->addWidget(m_quietEndEdit);
+    timeRow->addStretch(1);
+    quietLayout->addLayout(timeRow);
+    contentLayout->addWidget(quietGroup);
+
+    connect(m_quietHoursCheck, &QCheckBox::toggled, this, &NotificationsPage::onSettingChanged);
+    connect(m_quietStartEdit, &QTimeEdit::timeChanged, this, &NotificationsPage::onSettingChanged);
+    connect(m_quietEndEdit, &QTimeEdit::timeChanged, this, &NotificationsPage::onSettingChanged);
+
     // Always Notify For list
     auto *notifyGroup = new QGroupBox(tr("Always Notify For"), content);
     auto *notifyLayout = new QVBoxLayout(notifyGroup);
+
+    // Fancy list: resolved names + icons, with the raw ID alongside.
+    m_notifyForFancyList = new QListWidget(notifyGroup);
+    m_notifyForFancyList->setIconSize(QSize(20, 20));
+    m_notifyForFancyList->setUniformItemSizes(true);
+    notifyLayout->addWidget(m_notifyForFancyList);
+
+    // Raw ID list below, as a plain reference.
+    auto *rawLabel = new QLabel(tr("Raw IDs"), notifyGroup);
+    rawLabel->setStyleSheet(QStringLiteral("QLabel { color: palette(mid); font-size: 11px; }"));
+    notifyLayout->addWidget(rawLabel);
     m_notifyForList = new QListWidget(notifyGroup);
+    m_notifyForList->setMaximumHeight(110);
+    m_notifyForList->setSelectionMode(QAbstractItemView::NoSelection);
     notifyLayout->addWidget(m_notifyForList);
+
     auto *notifyBtnLayout = new QHBoxLayout();
     auto *addNotifyBtn = new QPushButton(tr("Add..."), notifyGroup);
     auto *removeNotifyBtn = new QPushButton(tr("Remove"), notifyGroup);
@@ -564,6 +614,9 @@ void NotificationsPage::loadSettings()
     m_enabledCheck->setChecked(settings.value("notifications/enabled", true).toBool());
     int deliveryIdx = m_deliveryCombo->findData(settings.value("notifications/delivery", "in-app").toString());
     if (deliveryIdx >= 0) m_deliveryCombo->setCurrentIndex(deliveryIdx);
+
+    int placementIdx = m_toastPlacementCombo->findData(settings.value("notifications/toast_placement", "monitor").toString());
+    if (placementIdx >= 0) m_toastPlacementCombo->setCurrentIndex(placementIdx);
     m_groupingCheck->setChecked(settings.value("notifications/grouping", true).toBool());
 
     // Appearance
@@ -589,6 +642,9 @@ void NotificationsPage::loadSettings()
     m_friendServerMessagesCheck->setChecked(settings.value("notifications/friend_server_messages", true).toBool());
     m_friendRequestsCheck->setChecked(settings.value("notifications/friend_requests", true).toBool());
     m_respectServerSettingsCheck->setChecked(settings.value("notifications/respect_server_settings", true).toBool());
+    m_quietHoursCheck->setChecked(settings.value("notifications/quiet_hours_enabled", false).toBool());
+    m_quietStartEdit->setTime(QTime::fromString(settings.value("notifications/quiet_hours_start", "22:00").toString(), QStringLiteral("HH:mm")));
+    m_quietEndEdit->setTime(QTime::fromString(settings.value("notifications/quiet_hours_end", "07:00").toString(), QStringLiteral("HH:mm")));
 
     // Privacy
     m_disableStreamerModeCheck->setChecked(settings.value("notifications/disable_streamer_mode", true).toBool());
@@ -662,6 +718,7 @@ void NotificationsPage::saveSettings()
     // General
     settings.setValue("notifications/enabled", m_enabledCheck->isChecked());
     settings.setValue("notifications/delivery", m_deliveryCombo->currentData());
+    settings.setValue("notifications/toast_placement", m_toastPlacementCombo->currentData());
     settings.setValue("notifications/grouping", m_groupingCheck->isChecked());
 
     // Appearance
@@ -684,6 +741,9 @@ void NotificationsPage::saveSettings()
     settings.setValue("notifications/friend_server_messages", m_friendServerMessagesCheck->isChecked());
     settings.setValue("notifications/friend_requests", m_friendRequestsCheck->isChecked());
     settings.setValue("notifications/respect_server_settings", m_respectServerSettingsCheck->isChecked());
+    settings.setValue("notifications/quiet_hours_enabled", m_quietHoursCheck->isChecked());
+    settings.setValue("notifications/quiet_hours_start", m_quietStartEdit->time().toString(QStringLiteral("HH:mm")));
+    settings.setValue("notifications/quiet_hours_end", m_quietEndEdit->time().toString(QStringLiteral("HH:mm")));
 
     // Privacy
     settings.setValue("notifications/disable_streamer_mode", m_disableStreamerModeCheck->isChecked());
@@ -742,7 +802,25 @@ void NotificationsPage::onSettingChanged()
 void NotificationsPage::setNotificationManager(Core::NotificationManager *mgr)
 {
     m_notificationManager = mgr;
+    if (mgr && mgr->imageManager()) {
+        connect(mgr->imageManager(), &Core::ImageManager::imageFetched,
+                this, &NotificationsPage::onNotifyIconFetched);
+    }
     refreshNotifyLists();
+}
+
+void NotificationsPage::onNotifyIconFetched(const QUrl &url, const QSize &size, const QPixmap &pixmap)
+{
+    Q_UNUSED(size);
+    auto it = m_notifyIconRows.find(url.toString());
+    if (it == m_notifyIconRows.end())
+        return;
+    const QIcon icon(pixmap);
+    for (int row : it.value()) {
+        if (auto *item = m_notifyForFancyList->item(row))
+            item->setIcon(icon);
+    }
+    m_notifyIconRows.erase(it);
 }
 
 void NotificationsPage::refreshNotifyLists()
@@ -750,10 +828,78 @@ void NotificationsPage::refreshNotifyLists()
     if (!m_notificationManager)
         return;
 
+    m_notifyForFancyList->clear();
     m_notifyForList->clear();
+    m_notifyIconRows.clear();
+
+    auto *instance = m_notificationManager->instance();
+    auto *images = m_notificationManager->imageManager();
+
     const auto notify = m_notificationManager->notifyForList();
-    for (const auto &id : notify)
-        m_notifyForList->addItem(id);
+    for (const auto &idStr : notify) {
+        const Core::Snowflake id(idStr.toULongLong());
+        QIcon icon;
+        if (images)
+            icon = QIcon(images->placeholder(QSize(20, 20)));
+        QString text = idStr;
+
+        if (instance && id.isValid()) {
+            // User?
+            if (auto user = instance->users()->getUser(id)) {
+                text = user->getDisplayName();
+                const QString avatarHash = user->avatar.getOr(QString());
+                if (images && !avatarHash.isEmpty()) {
+                    const QUrl url = Discord::Cdn::userAvatar(id, avatarHash, 40);
+                    m_notifyIconRows[url.toString()].append(m_notifyForFancyList->count());
+                    const QPixmap pm = images->get(url, QSize(20, 20));
+                    if (!pm.isNull())
+                        icon = QIcon(pm);
+                }
+            }
+            // Channel? Show "GuildName / #Channel" with the guild icon.
+            else if (auto channel = instance->getChannel(id)) {
+                QString label = channel->name.getOr(QString());
+                Core::Snowflake guildId = channel->guildId.hasValue() ? channel->guildId.get()
+                                                                      : Core::Snowflake::Invalid;
+                if (guildId.isValid()) {
+                    if (auto guild = instance->getGuild(guildId)) {
+                        if (!label.isEmpty())
+                            label = guild->name.get() + QStringLiteral(" / #") + label;
+                        else
+                            label = guild->name.get();
+                        const QString iconHash = guild->icon.getOr(QString());
+                        if (images && !iconHash.isEmpty()) {
+                            const QUrl url = Discord::Cdn::guildIcon(guildId, iconHash, 40);
+                            m_notifyIconRows[url.toString()].append(m_notifyForFancyList->count());
+                            const QPixmap pm = images->get(url, QSize(20, 20));
+                            if (!pm.isNull())
+                                icon = QIcon(pm);
+                        }
+                    }
+                }
+                text = label;
+            }
+            // Guild?
+            else if (auto guild = instance->getGuild(id)) {
+                text = guild->name.get();
+                const QString iconHash = guild->icon.getOr(QString());
+                if (images && !iconHash.isEmpty()) {
+                    const QUrl url = Discord::Cdn::guildIcon(id, iconHash, 40);
+                    m_notifyIconRows[url.toString()].append(m_notifyForFancyList->count());
+                    const QPixmap pm = images->get(url, QSize(20, 20));
+                    if (!pm.isNull())
+                        icon = QIcon(pm);
+                }
+            }
+        }
+
+        text += QStringLiteral("  (%1)").arg(idStr);
+        auto *item = new QListWidgetItem(icon, text, m_notifyForFancyList);
+        item->setData(Qt::UserRole, idStr);
+        item->setToolTip(idStr);
+
+        m_notifyForList->addItem(idStr);
+    }
 
     m_ignoreUsersList->clear();
     const auto ignore = m_notificationManager->ignoreUsersList();
@@ -778,9 +924,11 @@ void NotificationsPage::onRemoveNotifyFor()
     if (!m_notificationManager)
         return;
     QString id;
-    if (m_notifyForList->currentItem()) {
+    if (m_notifyForFancyList->currentItem())
+        id = m_notifyForFancyList->currentItem()->data(Qt::UserRole).toString();
+    if (id.isEmpty() && m_notifyForList->currentItem())
         id = m_notifyForList->currentItem()->text();
-    } else {
+    if (id.isEmpty()) {
         bool ok;
         id = QInputDialog::getText(this, tr("Remove from Notify List"), tr("Enter User/Channel/Guild ID:"), QLineEdit::Normal, "", &ok);
         if (!ok)

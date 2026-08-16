@@ -39,6 +39,8 @@ public:
     /// Saves a single attachment to disk via a QFileDialog. Shared by the chat
     /// context menu and the gallery so save-as behavior lives in one place.
     static void saveAttachment(const AttachmentData &att, QWidget *parent);
+    /// Saves one attachment to a concrete file path (no dialog).
+    static void saveAttachmentTo(const AttachmentData &att, const QString &path, QWidget *parent);
 
 protected:
     void keyPressEvent(QKeyEvent *event) override;
@@ -51,6 +53,7 @@ private:
     void fitToWindow();
     void fetchFullImage(const QUrl &proxyUrl);
     void saveCurrent();
+    void saveAll();
     void copyLink();
     void updateNavigationState();
     void updateCounter();
@@ -68,6 +71,7 @@ private:
     QPushButton *zoomOutButton = nullptr;
     QPushButton *fitButton = nullptr;
     QPushButton *saveButton = nullptr;
+    QPushButton *saveAllButton = nullptr;
     QPushButton *copyLinkButton = nullptr;
     QLabel *counterLabel = nullptr;
 

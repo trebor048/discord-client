@@ -1,5 +1,6 @@
 #include "BasePopup.hpp"
 #include "Core/AnimationUtils.hpp"
+#include "Core/Theme/Manager.hpp"
 #include <QGraphicsDropShadowEffect>
 #include <QVBoxLayout>
 #include <QPainter>
@@ -35,7 +36,8 @@ BasePopup::BasePopup(QWidget *parent) : QDialog(parent, Qt::FramelessWindowHint 
     container->setFrameShape(QFrame::NoFrame);
     container->setStyleSheet(QStringLiteral(
             "#ContentFrame { background: palette(window); border: 1px solid palette(mid); "
-            "border-radius: 10px; }"));
+            "border-radius: %1px; }")
+                                    .arg(Core::Theme::Manager::instance().roundness()));
 
     // Default for small popups (ConfirmPopup, ThreadBrowserPopup). Subclasses that
     // need more room (e.g. SettingsWindow) override these in their setupUi().

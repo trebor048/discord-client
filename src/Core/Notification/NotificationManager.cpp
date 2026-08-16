@@ -1,5 +1,7 @@
 #include "NotificationManager.hpp"
 
+#include "Core/Settings.hpp"
+
 #include <QApplication>
 #include <QScreen>
 #include <QStandardPaths>
@@ -24,6 +26,7 @@
 #endif
 
 #include "Core/ImageManager.hpp"
+#include "Core/Logging.hpp"
 #include "Discord/CdnUrls.hpp"
 
 #include "Core/ReadStateManager.hpp"
@@ -93,6 +96,11 @@ void NotificationManager::initialize()
 {
     loadSettings();
 
+    qCInfo(LogCore) << "NotificationManager initialized: enabled=" << m_settings.enabled
+                    << "delivery=" << Notification::deliveryModeToString(m_settings.deliveryMode)
+                    << "placement=" << Notification::toastPlacementToString(m_settings.toastPlacement)
+                    << "discord=" << (m_instance && m_instance->discord() ? "connected" : "null");
+
     m_soundManager.initialize();
 
     // Create toast container
@@ -102,6 +110,12 @@ void NotificationManager::initialize()
     m_toastContainer->setScale(m_settings.scaleFactor);
     m_toastContainer->setEdgeOffset(m_settings.edgeOffset);
     m_toastContainer->setAnimationsEnabled(m_settings.animationsEnabled);
+    applyToastPlacement();
+
+    // Re-evaluate in-window vs monitor placement whenever focus changes
+    // (only matters for the "auto" placement, but is cheap to always run).
+    connect(qApp, &QGuiApplication::applicationStateChanged, this,
+            [this](Qt::ApplicationState) { applyToastPlacement(); });
 
     connect(m_toastContainer, &UI::ToastContainer::notificationClicked,
             this, [this](const Notification::ToastNotificationData &data) {
@@ -168,6 +182,7 @@ void NotificationManager::loadSettings()
     m_settings.enabled = settings.value("notifications/enabled", true).toBool();
     m_settings.deliveryMode = Notification::stringToDeliveryMode(settings.value("notifications/delivery", "in-app").toString());
     m_settings.groupingEnabled = settings.value("notifications/grouping", true).toBool();
+    m_settings.toastPlacement = Notification::stringToToastPlacement(settings.value("notifications/toast_placement", "monitor").toString());
 
     // Appearance
     m_settings.position = Notification::stringToPosition(settings.value("notifications/position", "bottom-left").toString());
@@ -190,6 +205,9 @@ void NotificationManager::loadSettings()
     m_settings.notifyFriendServerMessages = settings.value("notifications/friend_server_messages", true).toBool();
     m_settings.notifyFriendRequests = settings.value("notifications/friend_requests", true).toBool();
     m_settings.respectServerSettings = settings.value("notifications/respect_server_settings", true).toBool();
+    m_settings.quietHoursEnabled = settings.value("notifications/quiet_hours_enabled", false).toBool();
+    m_settings.quietHoursStart = settings.value("notifications/quiet_hours_start", "22:00").toString();
+    m_settings.quietHoursEnd = settings.value("notifications/quiet_hours_end", "07:00").toString();
 
     // Privacy
     m_settings.disableInStreamerMode = settings.value("notifications/disable_streamer_mode", true).toBool();
@@ -265,6 +283,12 @@ void NotificationManager::loadSettings()
         const auto values = ignoreUsersStr.split(",", Qt::SkipEmptyParts);
         m_ignoreUsersSet = QSet<QString>(values.cbegin(), values.cend());
     }
+
+    QString ignoreEntitiesStr = settings.value("notifications/ignore_entities", "").toString();
+    if (!ignoreEntitiesStr.isEmpty()) {
+        const auto values = ignoreEntitiesStr.split(",", Qt::SkipEmptyParts);
+        m_ignoreSet = QSet<QString>(values.cbegin(), values.cend());
+    }
     m_listsLoaded = true;
 
     // Re-apply live display settings so edits from the settings page take
@@ -278,6 +302,7 @@ void NotificationManager::loadSettings()
         m_toastContainer->setAnimationsEnabled(m_settings.animationsEnabled);
     }
     m_soundManager.setGlobalVolume(m_settings.globalSoundVolume);
+    applyToastPlacement();
 }
 
 void NotificationManager::saveSettings()
@@ -287,6 +312,7 @@ void NotificationManager::saveSettings()
     settings.setValue("notifications/enabled", m_settings.enabled);
     settings.setValue("notifications/delivery", Notification::deliveryModeToString(m_settings.deliveryMode));
     settings.setValue("notifications/grouping", m_settings.groupingEnabled);
+    settings.setValue("notifications/toast_placement", Notification::toastPlacementToString(m_settings.toastPlacement));
 
     settings.setValue("notifications/position", Notification::positionToString(m_settings.position));
     settings.setValue("notifications/max_notifications", m_settings.maxNotifications);
@@ -306,6 +332,9 @@ void NotificationManager::saveSettings()
     settings.setValue("notifications/friend_server_messages", m_settings.notifyFriendServerMessages);
     settings.setValue("notifications/friend_requests", m_settings.notifyFriendRequests);
     settings.setValue("notifications/respect_server_settings", m_settings.respectServerSettings);
+    settings.setValue("notifications/quiet_hours_enabled", m_settings.quietHoursEnabled);
+    settings.setValue("notifications/quiet_hours_start", m_settings.quietHoursStart);
+    settings.setValue("notifications/quiet_hours_end", m_settings.quietHoursEnd);
 
     settings.setValue("notifications/disable_streamer_mode", m_settings.disableInStreamerMode);
     settings.setValue("notifications/streaming_treatment", Notification::streamingTreatmentToString(m_settings.streamingTreatment));
@@ -350,6 +379,7 @@ void NotificationManager::saveSettings()
 
     settings.setValue("notifications/notify_for", m_notifyForSet.values().join(","));
     settings.setValue("notifications/ignore_users", m_ignoreUsersSet.values().join(","));
+    settings.setValue("notifications/ignore_entities", m_ignoreSet.values().join(","));
 
     settings.sync();
 }
@@ -367,6 +397,7 @@ void NotificationManager::setSettings(const Notification::NotificationSettings &
         m_toastContainer->setAnimationsEnabled(m_settings.animationsEnabled);
     }
 
+    applyToastPlacement();
     m_soundManager.setGlobalVolume(m_settings.globalSoundVolume);
 
     saveSettings();
@@ -376,8 +407,10 @@ void NotificationManager::setSettings(const Notification::NotificationSettings &
 void NotificationManager::showNotification(const Notification::ToastNotificationData &data)
 {
     // Master switch: disables all notification output (toasts, native, sound).
-    if (!m_settings.enabled)
+    if (!m_settings.enabled) {
+        qCInfo(LogCore) << "notification suppressed: master switch disabled";
         return;
+    }
 
     // Do Not Disturb: suppress notification noise (toast, sound, and native
     // popups) while the user's own presence status is "dnd". Mentions and DMs
@@ -506,8 +539,10 @@ void NotificationManager::showNotification(const Notification::ToastNotification
 
 void NotificationManager::displayToast(const Notification::ToastNotificationData &data)
 {
-    if (!m_toastContainer)
+    if (!m_toastContainer) {
+        qCWarning(LogCore) << "notification dropped: toast container not created";
         return;
+    }
 
     // Grouping: collapse repeats from the same conversation into one toast.
     // Ignore toasts that are already fading out; merging them would lose the
@@ -524,6 +559,27 @@ void NotificationManager::displayToast(const Notification::ToastNotificationData
     auto *toast = new UI::ToastNotification(data, m_imageManager);
     toast->setScale(m_settings.scaleFactor);
     m_toastContainer->addNotification(toast);
+}
+
+void NotificationManager::applyToastPlacement()
+{
+    if (!m_toastContainer)
+        return;
+
+    QWidget *anchor = nullptr;
+    switch (m_settings.toastPlacement) {
+    case Notification::NotificationSettings::ToastPlacement::InWindow:
+        anchor = m_inWindowParent;
+        break;
+    case Notification::NotificationSettings::ToastPlacement::Monitor:
+        anchor = nullptr;
+        break;
+    case Notification::NotificationSettings::ToastPlacement::Auto:
+        anchor = (QApplication::applicationState() == Qt::ApplicationActive) ? m_inWindowParent
+                                                                             : nullptr;
+        break;
+    }
+    m_toastContainer->setAnchorWidget(anchor);
 }
 
 void NotificationManager::sendToastReply(UI::ToastNotification *toast,
@@ -610,6 +666,9 @@ void NotificationManager::setActiveChannel(Core::Snowflake channelId)
 
 void NotificationManager::onMessageCreated(const Discord::Message &message)
 {
+    qCInfo(LogCore) << "notification: message received" << message.id.get().toString()
+                    << "channel" << message.channelId.get().toString();
+
     if (!m_instance || !m_instance->discord()) return;
 
     if (!message.author.hasValue()) return;
@@ -625,17 +684,27 @@ void NotificationManager::onMessageCreated(const Discord::Message &message)
 
     // Get channel
     auto channel = m_instance->getChannel(channelId);
-    if (!channel) return;
+    if (!channel) {
+        qCWarning(LogCore) << "notification dropped: channel not found for message" << message.id.get().toString();
+        return;
+    }
 
     // Don't notify for current active channel
     if (channelId == m_activeChannelId) return;
 
     // Check streamer mode
     auto streamer = evaluateStreamerMode();
-    if (streamer.shouldIgnore) return;
+    if (streamer.shouldIgnore) {
+        qCInfo(LogCore) << "notification dropped: streamer mode";
+        return;
+    }
 
     // Check if we should show notification
-    if (!shouldShowNotification(message, *channel)) return;
+    if (!shouldShowNotification(message, *channel)) {
+        qCInfo(LogCore) << "notification dropped by policy for channel"
+                        << channel->name.getOr(QStringLiteral("?"));
+        return;
+    }
 
     // Store notification context for user-specific sounds
     m_lastNotificationContext = NotificationContext{
@@ -663,6 +732,7 @@ void NotificationManager::onMessageCreated(const Discord::Message &message)
         notification.body.replace(invitePattern, QStringLiteral("[invite hidden]"));
     }
 
+    qCInfo(LogCore) << "showing toast:" << notification.title;
     showNotification(notification);
 }
 
@@ -826,6 +896,8 @@ void NotificationManager::onRelationshipAdded(const Discord::Relationship &relat
 {
     if (!m_settings.notifyFriendRequests) return;
 
+    if (m_settings.quietHoursEnabled && isInQuietHours()) return;
+
     if (m_ignoreUsersSet.contains(relationship.id.get().toString())) return;
 
     auto streamer = evaluateStreamerMode();
@@ -872,17 +944,42 @@ bool NotificationManager::shouldShowNotification(const Discord::Message &message
 {
     if (!m_instance) return false;
 
+    // Quiet hours: suppress all toasts during the configured window.
+    if (m_settings.quietHoursEnabled && isInQuietHours()) return false;
+
     const auto &author = message.author.get();
     const auto authorId = author.id.get();
 
     if (!authorId.isValid()) return false;
     if (author.bot.getOr(false)) return false;
 
-    // Check ignore list
+    // Check ignore list (users)
     if (m_ignoreUsersSet.contains(authorId.toString())) return false;
 
-    // Check notify list (always notify)
+    // Local mute (Settings override) has the highest precedence — a muted
+    // channel/server suppresses toasts even for notify-listed authors.
+    {
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        if (auto chOv = Core::Settings::instance().channelOverride(channel.id.get())) {
+            if (chOv->muted || chOv->muteUntilMs > nowMs)
+                return false;
+        }
+        if (channel.guildId.hasValue()) {
+            if (auto srvOv = Core::Settings::instance().serverOverride(channel.guildId.get())) {
+                if (srvOv->muted || srvOv->muteUntilMs > nowMs)
+                    return false;
+            }
+        }
+    }
+
+    // Notify list ("listen to") wins over the channel/guild ignore list.
     if (m_notifyForSet.contains(authorId.toString())) return true;
+    if (m_notifyForSet.contains(channel.id.get().toString())) return true;
+    if (channel.guildId.hasValue() && m_notifyForSet.contains(channel.guildId->toString())) return true;
+
+    // A channel (or its guild) on the ignore list suppresses toasts entirely.
+    if (m_ignoreSet.contains(channel.id.get().toString())) return false;
+    if (channel.guildId.hasValue() && m_ignoreSet.contains(channel.guildId->toString())) return false;
 
     // Check channel type
     if (channel.type.get() == Discord::ChannelType::DM) {
@@ -911,7 +1008,9 @@ bool NotificationManager::shouldShowNotification(const Discord::Message &message
             auto level = getChannelNotificationLevel(channel);
             if (level == Discord::MessageNotificationLevel::ALL_MESSAGES) return true;
             if (level == Discord::MessageNotificationLevel::ONLY_MENTIONS) {
-                return isMentioned(message);
+                // Respect the master "notify on mention" toggle even in
+                // mentions-only channels.
+                return m_settings.notifyMentions && isMentioned(message);
             }
             return false;
         }
@@ -922,14 +1021,54 @@ bool NotificationManager::shouldShowNotification(const Discord::Message &message
     return false;
 }
 
+bool NotificationManager::isInQuietHours() const
+{
+    const QTime now = QTime::currentTime();
+    const QTime start = QTime::fromString(m_settings.quietHoursStart, QStringLiteral("HH:mm"));
+    const QTime end = QTime::fromString(m_settings.quietHoursEnd, QStringLiteral("HH:mm"));
+    if (!start.isValid() || !end.isValid())
+        return false;
+    if (start == end)
+        return true; // equal times = all day
+    if (start < end)
+        return now >= start && now < end;
+    // Overnight window (e.g. 22:00 -> 07:00); end is exclusive.
+    return now >= start || now < end;
+}
+
 bool NotificationManager::shouldShowVoiceNotification(const Discord::VoiceState &newState, const Discord::VoiceState *oldState)
 {
     Q_UNUSED(oldState);
+
+    if (m_settings.quietHoursEnabled && isInQuietHours())
+        return false;
 
     // Check streamer mode
     auto streamer = evaluateStreamerMode();
     if (streamer.shouldIgnore)
         return false;
+
+    // Ignore-set + local Settings mutes for the channel/guild, matching the
+    // message path so "Ignore toasts"/"Mute" cover voice notifications too.
+    if (newState.channelId.hasValue()) {
+        const Core::Snowflake channelId = newState.channelId.get();
+        if (m_ignoreSet.contains(channelId.toString()))
+            return false;
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        if (auto chOv = Core::Settings::instance().channelOverride(channelId)) {
+            if (chOv->muted || chOv->muteUntilMs > nowMs)
+                return false;
+        }
+        if (newState.guildId.hasValue()) {
+            const Core::Snowflake guildId = newState.guildId.get();
+            if (m_ignoreSet.contains(guildId.toString()))
+                return false;
+            if (auto srvOv = Core::Settings::instance().serverOverride(guildId)) {
+                if (srvOv->muted || srvOv->muteUntilMs > nowMs)
+                    return false;
+            }
+        }
+    }
 
     // Check mute status via ReadStateManager
     if (newState.channelId.hasValue() && m_instance) {
@@ -1190,6 +1329,23 @@ Discord::MessageNotificationLevel NotificationManager::getChannelNotificationLev
     const Core::Snowflake guildId = channel.guildId.get();
     const Core::Snowflake channelId = channel.id.get();
 
+    // Local overrides from Core::Settings (per-channel/server mute + level).
+    // These take precedence over the server-side UserGuildSettings below.
+    const auto &localSettings = Core::Settings::instance();
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    if (auto channelOv = localSettings.channelOverride(channelId)) {
+        if (channelOv->muted || channelOv->muteUntilMs > nowMs)
+            return Level::NO_MESSAGES;
+        if (channelOv->level != Level::ALL_MESSAGES)
+            return channelOv->level;
+    }
+    if (auto serverOv = localSettings.serverOverride(guildId)) {
+        if (serverOv->muted || serverOv->muteUntilMs > nowMs)
+            return Level::NO_MESSAGES; // local mute = hard suppress, like channels
+        if (serverOv->level != Level::ALL_MESSAGES)
+            return serverOv->level;
+    }
+
     if (m_instance) {
         if (auto *rs = m_instance->readState()) {
             // Muted channels produce no notifications
@@ -1381,6 +1537,12 @@ QSet<QString> NotificationManager::ignoreUsersList() const
     return m_ignoreUsersSet;
 }
 
+QSet<QString> NotificationManager::ignoreEntitiesList() const
+{
+    QMutexLocker locker(&m_notifyListMutex);
+    return m_ignoreSet;
+}
+
 void NotificationManager::addToNotifyList(const QString &id)
 {
     QMutexLocker locker(&m_notifyListMutex);
@@ -1406,6 +1568,20 @@ void NotificationManager::removeFromIgnoreList(const QString &id)
 {
     QMutexLocker locker(&m_notifyListMutex);
     m_ignoreUsersSet.remove(id);
+    saveSettings();
+}
+
+void NotificationManager::addToIgnoreSet(const QString &id)
+{
+    QMutexLocker locker(&m_notifyListMutex);
+    m_ignoreSet.insert(id);
+    saveSettings();
+}
+
+void NotificationManager::removeFromIgnoreSet(const QString &id)
+{
+    QMutexLocker locker(&m_notifyListMutex);
+    m_ignoreSet.remove(id);
     saveSettings();
 }
 

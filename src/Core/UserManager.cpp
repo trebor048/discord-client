@@ -31,6 +31,11 @@ std::optional<Discord::User> UserManager::getUser(Snowflake userId)
     return dbUser;
 }
 
+QList<Snowflake> UserManager::cachedUserIds() const
+{
+    return userCache.keys();
+}
+
 std::optional<Discord::Member> UserManager::getMember(Snowflake guildId, Snowflake userId)
 {
     MemberKey key{ guildId, userId };

@@ -25,6 +25,12 @@ public:
     QColor color(Token token) const;
     QFont font(FontRole role) const;
 
+    /// Global corner radius (px) applied to cards, buttons, inputs, menus, and
+    /// scrollbars. Stored in QSettings under "appearance/roundness".
+    static constexpr int kDefaultRoundness = 8;
+    int roundness() const;
+    void setRoundness(int px);
+
     bool hasOverride(Token token) const;
     void setOverride(Token token, const QColor &color);
     void clearOverride(Token token);

@@ -39,6 +39,9 @@ public:
     [[nodiscard]] std::optional<Discord::User> getUser(Snowflake userId);
     [[nodiscard]] std::optional<Discord::Member> getMember(Snowflake guildId, Snowflake userId);
 
+    // IDs of currently-cached users (friends/DMs/seen users) for `@` autocomplete.
+    [[nodiscard]] QList<Snowflake> cachedUserIds() const;
+
     [[nodiscard]] std::optional<QList<Snowflake>> getMemberRoles(Snowflake guildId, Snowflake userId);
 
     [[nodiscard]] QString getDisplayName(Snowflake userId, Snowflake guildId = Snowflake::Invalid);

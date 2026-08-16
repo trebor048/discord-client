@@ -31,6 +31,9 @@ namespace UI {
 
 class AttachmentPreviewPanel;
 class EmojiAutocompletePopup;
+class SlashCommandPopup;
+class MentionAutocompletePopup;
+struct MentionItem;
 
 class ChatTextEdit : public QTextEdit
 {
@@ -72,6 +75,8 @@ public:
     void queueAttachments(const QList<QUrl> &urls);
     void setMaxUploadSize(qint64 bytes);
     void setAvailableStickers(QHash<Core::Snowflake, QList<Discord::Sticker>> stickers);
+    void setAvailableCommands(const QList<Discord::ApplicationCommand> &commands);
+    void setAvailableMentions(const QList<MentionItem> &items);
     void setGuildOrder(const QStringList &orderedGuildIds);
     void setCurrentGuildId(const Core::Snowflake &guildId);
     void setCompact(bool compact);
@@ -91,6 +96,11 @@ protected:
 
 signals:
     void sendMessage(const QString &text, const QList<Core::PendingAttachment> &attachments);
+    void slashCommandSend(const Discord::ApplicationCommand &command,
+                          const QList<Discord::InteractionOptionValue> &options);
+    void slashCommandIncomplete(const QString &reason);
+    // Debounced slash-command-name prefix for server-side search.
+    void slashQueryChanged(const QString &query);
 
 private:
     ChatTextEdit *textEdit;
@@ -107,6 +117,12 @@ private:
     Core::Markdown::Parser markdownParser;
     std::optional<QString> lastMarkdownPreviewText;
     EmojiAutocompletePopup *emojiPopup = nullptr;
+    SlashCommandPopup *slashPopup = nullptr;
+    MentionAutocompletePopup *mentionPopup = nullptr;
+    QList<MentionItem> m_availableMentions;
+    QList<Discord::ApplicationCommand> m_availableCommands;
+    QTimer *slashQueryDebounce = nullptr;
+    QString m_pendingSlashQuery;
     QGraphicsOpacityEffect *replyBarOpacity = nullptr;
     QPropertyAnimation *replyBarFadeAnimation = nullptr;
 
@@ -147,6 +163,18 @@ private:
     void showEmojiPopup();
     void hideEmojiPopup();
     [[nodiscard]] QString currentEmojiPrefix(int *startPosition = nullptr) const;
+    void updateSlashPopup();
+    void insertSlashCompletion(const Discord::ApplicationCommand &command);
+    void insertSlashArgument(const QString &text);
+    bool tryParseSlashCommand(const QString &text, Discord::ApplicationCommand *command,
+                              QList<Discord::InteractionOptionValue> *options) const;
+    void showSlashPopup();
+    void hideSlashPopup();
+    void updateMentionPopup();
+    void insertMentionCompletion(const MentionItem &item);
+    void showMentionPopup();
+    void hideMentionPopup();
+    [[nodiscard]] QString currentMentionPrefix(int *startPosition = nullptr, QChar *trigger = nullptr) const;
     void updateMarkdownPreview();
     void renderMarkdownPreview();
     void setMarkdownPreviewVisible(bool visible);

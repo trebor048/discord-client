@@ -41,6 +41,7 @@ void NotificationController::setupForInstance(Core::ClientInstance *instance)
     if (m_window->session) {
         notificationManager->setImageManager(m_window->session->getImageManager());
     }
+    notificationManager->setInWindowParent(m_window);
     notificationManager->initialize();
 
     // Clear active channel when switching instances

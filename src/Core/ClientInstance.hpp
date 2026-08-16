@@ -60,7 +60,12 @@ public:
     [[nodiscard]] QList<Discord::Role> getRolesForGuild(Snowflake guildId);
     [[nodiscard]] QList<Discord::Role> getMemberRolesSorted(Snowflake guildId, Snowflake userId);
     [[nodiscard]] std::optional<Discord::Guild> getGuild(Snowflake guildId);
+    // User IDs cached for a guild (for @-mention suggestions).
+    [[nodiscard]] QList<Snowflake> guildMemberIds(Snowflake guildId);
+    // Guild-level (base) permission check, independent of any channel overwrites.
+    [[nodiscard]] bool hasGuildPermission(Snowflake guildId, Discord::Permission permission);
     [[nodiscard]] std::optional<Discord::Channel> getChannel(Snowflake channelId);
+    [[nodiscard]] QList<Discord::Channel> getChannelsForGuild(Snowflake guildId);
     [[nodiscard]] std::optional<Snowflake> findDmChannelWithUser(Snowflake userId);
     [[nodiscard]] int getChannelRateLimit(Snowflake channelId);
 
@@ -82,6 +87,23 @@ public:
 
     // Own Discord presence status ("online", "idle", "dnd", "offline").
     [[nodiscard]] QString presenceStatus() const;
+
+    // Per-user presence (status + per-device client status) seen via
+    // PRESENCE_UPDATE. Returns std::nullopt when unknown.
+    struct UserPresence
+    {
+        QString status;  // online / idle / dnd / offline
+        QString desktop; // per-device status, empty when not active there
+        QString mobile;
+        QString web;
+
+        bool operator==(const UserPresence &other) const
+        {
+            return status == other.status && desktop == other.desktop
+                   && mobile == other.mobile && web == other.web;
+        }
+    };
+    [[nodiscard]] std::optional<UserPresence> presence(Snowflake userId) const;
 
     Snowflake accountId() const;
     const AccountInfo &accountInfo() const;
@@ -116,6 +138,7 @@ signals:
     void channelLastMessageUpdated(Snowflake channelId, Snowflake messageId);
     void voiceStateChanged(Snowflake channelId, Snowflake guildId);
     void presenceStatusChanged(const QString &status);
+    void userPresenceChanged(Snowflake userId);
     void authenticationFailed(const AccountInfo &info);
 
 private slots:
@@ -181,6 +204,8 @@ private:
     Snowflake currentVoiceChannelId;
     Snowflake currentVoiceGuildId;
     QString currentPresenceStatus = QStringLiteral("online");
+
+    QHash<Snowflake, UserPresence> m_presences;
 
     // notFound members are kept in here so we dont ask for them again
     QHash<QPair<Snowflake /*guildId*/, Snowflake /*userId*/>, QDateTime> pendingMemberRequests;

@@ -3,6 +3,7 @@
 #ifndef ACHERON_NO_VOICE
 #include "Core/AV/VoiceManager.hpp"
 #endif
+#include "Core/PermissionComputer.hpp"
 
 #include <algorithm>
 
@@ -378,13 +379,30 @@ ClientInstance::ClientInstance(const AccountInfo &info,
             [this](const Discord::PresenceUpdate &event) {
                 // Track our own presence status so consumers (e.g. the
                 // notification manager) can react to Do Not Disturb.
-                if (event.user.get().id.get() != account.id)
-                    return;
-                const QString status = event.status.get();
-                if (status.isEmpty() || status == currentPresenceStatus)
-                    return;
-                currentPresenceStatus = status;
-                emit presenceStatusChanged(currentPresenceStatus);
+                const Snowflake userId = event.user.get().id.get();
+                if (userId == account.id) {
+                    const QString status = event.status.get();
+                    if (!status.isEmpty() && status != currentPresenceStatus) {
+                        currentPresenceStatus = status;
+                        emit presenceStatusChanged(currentPresenceStatus);
+                    }
+                }
+
+                // Cache every user's presence so member lists / profiles can
+                // render device + status icons.
+                UserPresence presence;
+                presence.status = event.status.get();
+                if (event.clientStatus.hasValue()) {
+                    const auto &cs = event.clientStatus.get();
+                    presence.desktop = cs.desktop.getOr(QString());
+                    presence.mobile = cs.mobile.getOr(QString());
+                    presence.web = cs.web.getOr(QString());
+                }
+                auto existing = m_presences.constFind(userId);
+                if (existing != m_presences.constEnd() && existing.value() == presence)
+                    return; // no change; skip the expensive refresh
+                m_presences.insert(userId, presence);
+                emit userPresenceChanged(userId);
             });
 
 #ifndef ACHERON_NO_VOICE
@@ -813,6 +831,11 @@ std::optional<Discord::Channel> ClientInstance::getChannel(Snowflake channelId)
     if (it != threadCache.constEnd())
         return it.value();
     return channelRepo.getChannel(channelId);
+}
+
+QList<Discord::Channel> ClientInstance::getChannelsForGuild(Snowflake guildId)
+{
+    return channelRepo.getChannelsForGuild(guildId);
 }
 
 bool ClientInstance::isThreadJoined(Snowflake threadId) const
@@ -1309,6 +1332,26 @@ std::optional<Discord::Guild> ClientInstance::getGuild(Snowflake guildId)
     return guildRepo.getGuild(guildId);
 }
 
+bool ClientInstance::hasGuildPermission(Snowflake guildId, Discord::Permission permission)
+{
+    auto guild = guildRepo.getGuild(guildId);
+    if (!guild)
+        return false;
+
+    QList<Snowflake> memberRoleIds;
+    if (auto roles = userManager->getMemberRoles(guildId, accountId()))
+        memberRoleIds = *roles;
+
+    const Discord::Permissions perms = PermissionComputer::computeBasePermissions(
+            guild->ownerId.get(), accountId(), guildId, memberRoleIds, getRolesForGuild(guildId));
+    return perms.testFlag(permission);
+}
+
+QList<Snowflake> ClientInstance::guildMemberIds(Snowflake guildId)
+{
+    return memberRepo.getMemberUserIds(guildId);
+}
+
 std::optional<Snowflake> ClientInstance::findDmChannelWithUser(Snowflake userId)
 {
     return channelRepo.findDmChannelWithUser(userId);
@@ -1355,6 +1398,14 @@ bool ClientInstance::isInVoice() const
 QString ClientInstance::presenceStatus() const
 {
     return currentPresenceStatus;
+}
+
+std::optional<ClientInstance::UserPresence> ClientInstance::presence(Snowflake userId) const
+{
+    auto it = m_presences.constFind(userId);
+    if (it == m_presences.constEnd())
+        return std::nullopt;
+    return it.value();
 }
 
 } // namespace Core

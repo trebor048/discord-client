@@ -19,6 +19,7 @@ private slots:
     void testChannelForumTags();
     void testUser();
     void testMessageBotEmbed();
+    void testApplicationCommand();
     void testEmoji();
     void testEmojiUnicode();
     void testGuildDelete();
@@ -245,6 +246,77 @@ void TestDeserialization::testMessageBotEmbed()
     QCOMPARE(e.fields->at(0).isInline.get(), true);
 }
 
+void TestDeserialization::testApplicationCommand()
+{
+    QJsonObject choice;
+    choice["name"] = "ascending";
+    choice["value"] = "asc";
+
+    QJsonArray choices;
+    choices.append(choice);
+
+    QJsonObject param;
+    param["type"] = 3; // STRING
+    param["name"] = "sort";
+    param["description"] = "Sort order";
+    param["required"] = true;
+    param["choices"] = choices;
+
+    QJsonObject subParam;
+    subParam["type"] = 4; // INTEGER
+    subParam["name"] = "count";
+    subParam["description"] = "Number of results";
+
+    QJsonArray subParams;
+    subParams.append(subParam);
+
+    QJsonObject subCmd;
+    subCmd["type"] = 1; // SUB_COMMAND
+    subCmd["name"] = "list";
+    subCmd["description"] = "List things";
+    subCmd["options"] = subParams;
+
+    QJsonArray options;
+    options.append(param);
+    options.append(subCmd);
+
+    QJsonObject cmd;
+    cmd["id"] = "123";
+    cmd["type"] = 1; // CHAT_INPUT
+    cmd["application_id"] = "456";
+    cmd["name"] = "query";
+    cmd["description"] = "Query things";
+    cmd["options"] = options;
+    cmd["version"] = "1";
+
+    ApplicationCommand c = ApplicationCommand::fromJson(cmd);
+
+    QCOMPARE(static_cast<quint64>(c.id.get()), 123ull);
+    QCOMPARE(c.type.get(), ApplicationCommandType::CHAT_INPUT);
+    QCOMPARE(static_cast<quint64>(c.applicationId.get()), 456ull);
+    QVERIFY(!c.guildId.hasValue());
+    QCOMPARE(c.name.get(), QString("query"));
+    QCOMPARE(c.description.get(), QString("Query things"));
+    QVERIFY(c.options.hasValue());
+    QCOMPARE(c.options->size(), 2);
+
+    const ApplicationCommandOption &sortParam = c.options->at(0);
+    QCOMPARE(sortParam.type.get(), ApplicationCommandOptionType::STRING);
+    QCOMPARE(sortParam.name.get(), QString("sort"));
+    QVERIFY(sortParam.choices.hasValue());
+    QCOMPARE(sortParam.choices->size(), 1);
+    QCOMPARE(sortParam.choices->at(0).name.get(), QString("ascending"));
+    QCOMPARE(sortParam.choices->at(0).value.get(), QString("asc"));
+
+    const ApplicationCommandOption &sub = c.options->at(1);
+    QCOMPARE(sub.type.get(), ApplicationCommandOptionType::SUB_COMMAND);
+    QCOMPARE(sub.name.get(), QString("list"));
+    QVERIFY(sub.options.hasValue());
+    QCOMPARE(sub.options->size(), 1);
+    QCOMPARE(sub.options->at(0).type.get(), ApplicationCommandOptionType::INTEGER);
+    QCOMPARE(sub.options->at(0).name.get(), QString("count"));
+}
+
 void TestDeserialization::testEmoji()
 {
     QJsonObject obj;
@@ -400,7 +472,10 @@ void TestDeserialization::testPresenceUpdate()
     obj["guild_id"] = "777";
     obj["status"] = "online";
     obj["activities"] = activities;
-    obj["client_status"] = "online";
+    QJsonObject clientStatus;
+    clientStatus["desktop"] = "online";
+    clientStatus["web"] = "idle";
+    obj["client_status"] = clientStatus;
 
     PresenceUpdate event = PresenceUpdate::fromJson(obj);
 
@@ -410,6 +485,9 @@ void TestDeserialization::testPresenceUpdate()
     QVERIFY(event.activities.hasValue());
     QCOMPARE(event.activities->size(), 1);
     QCOMPARE(event.activities->at(0).name.get(), QString("Playing"));
+    QVERIFY(event.clientStatus.hasValue());
+    QCOMPARE(event.clientStatus->desktop.getOr(QString()), QString("online"));
+    QCOMPARE(event.clientStatus->web.getOr(QString()), QString("idle"));
 }
 
 void TestDeserialization::testInviteCreate()

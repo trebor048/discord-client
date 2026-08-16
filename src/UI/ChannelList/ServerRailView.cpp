@@ -22,6 +22,16 @@ ServerRailView::ServerRailView(QWidget *parent)
     setMouseTracking(true);
 }
 
+void ServerRailView::setNotifyListContains(std::function<bool(Core::Snowflake)> provider)
+{
+    m_notifyListContains = std::move(provider);
+}
+
+void ServerRailView::setIgnoreEntitiesContains(std::function<bool(Core::Snowflake)> provider)
+{
+    m_ignoreEntitiesContains = std::move(provider);
+}
+
 void ServerRailView::setModel(QAbstractItemModel *model)
 {
     // Note: deliberately no dataChanged -> fade hook here. Fading the whole
@@ -95,6 +105,21 @@ void ServerRailView::contextMenuEvent(QContextMenuEvent *event)
         leaveAction->setEnabled(ownerId != accountId);
         connect(leaveAction, &QAction::triggered, this, [this, accountId, id]() {
             emit leaveGuildRequested(accountId, id);
+        });
+
+        menu.addSeparator();
+        const bool listened = m_notifyListContains ? m_notifyListContains(id) : false;
+        QAction *notifyAction = menu.addAction(
+                listened ? tr("Stop listening to toasts") : tr("Listen to toasts"));
+        connect(notifyAction, &QAction::triggered, this, [this, accountId, id]() {
+            emit notifyListToggleRequested(accountId, id);
+        });
+
+        const bool ignored = m_ignoreEntitiesContains ? m_ignoreEntitiesContains(id) : false;
+        QAction *ignoreAction = menu.addAction(
+                ignored ? tr("Unignore toasts") : tr("Ignore toasts"));
+        connect(ignoreAction, &QAction::triggered, this, [this, accountId, id]() {
+            emit ignoreToggleRequested(accountId, id);
         });
     }
 

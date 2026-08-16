@@ -751,13 +751,15 @@ void ToastNotification::paintEvent(QPaintEvent *event)
     const QRectF card = QRectF(rect()).adjusted(ShadowMarginX, ShadowMarginTop,
                                                 -ShadowMarginX, -ShadowMarginBottom);
 
+    const qreal r = Core::Theme::Manager::instance().roundness();
+
     // Soft painted drop shadow: stacked rounded rects with falloff alpha.
     const QColor shadowBase(0, 0, 0);
     for (int i = 1; i <= 3; ++i) {
         QColor layer = shadowBase;
         layer.setAlpha(14 - i * 3);
         QPainterPath shadowPath;
-        shadowPath.addRoundedRect(card.translated(0, i * 2.0), 10.0 + i, 10.0 + i);
+        shadowPath.addRoundedRect(card.translated(0, i * 2.0), r + i, r + i);
         p.fillPath(shadowPath, layer);
     }
 
@@ -770,7 +772,7 @@ void ToastNotification::paintEvent(QPaintEvent *event)
     }
 
     QPainterPath background;
-    background.addRoundedRect(card, 10.0, 10.0);
+    background.addRoundedRect(card, r, r);
     p.fillPath(background, bg);
     p.setPen(QPen(border, 1));
     p.drawPath(background);

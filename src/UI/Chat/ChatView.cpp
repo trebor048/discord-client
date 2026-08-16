@@ -1,7 +1,9 @@
 #include "ChatView.hpp"
 
 #include "Core/MessageManager.hpp"
+#include "Core/Settings.hpp"
 #include "Core/EmojiCatalog.hpp"
+#include "Core/Theme/Manager.hpp"
 #include "UI/Dialogs/EmojiPickerDialog.hpp"
 #include "Core/AnimationUtils.hpp"
 #include <QMenu>
@@ -16,6 +18,7 @@
 #include <QLabel>
 #include <QDesktopServices>
 #include <QToolTip>
+#include <QSettings>
 #include <algorithm>
 
 #include "Core/TimeUtils.hpp"
@@ -32,16 +35,24 @@ namespace UI {
 namespace {
 
 // Lazy-loaded voice message audio player — only created when user clicks a voice message.
-// Kept file-static to avoid pulling Qt Multimedia headers into ChatView.hpp.
+// Kept file-static to avoid pulling Qt Multimedia headers into ChatView.hpp. Volume is
+// shared with the video player dialog under the "media/volume" QSettings key.
+static QAudioOutput *voiceAudioOutput()
+{
+    static QAudioOutput *audioOut = nullptr;
+    if (!audioOut) {
+        audioOut = new QAudioOutput;
+        audioOut->setVolume(qreal(QSettings().value("media/volume", 100).toInt()) / 100.0);
+    }
+    return audioOut;
+}
+
 static QMediaPlayer *voicePlayer()
 {
     static QMediaPlayer *player = nullptr;
-    static QAudioOutput *audioOut = nullptr;
     if (!player) {
         player = new QMediaPlayer;
-        audioOut = new QAudioOutput;
-        player->setAudioOutput(audioOut);
-        audioOut->setVolume(0.8);
+        player->setAudioOutput(voiceAudioOutput());
     }
     return player;
 }
@@ -101,6 +112,141 @@ private:
     QPixmap snapshot;
     qreal opacity = 1.0;
 };
+
+// Floating mini-player for voice messages. A frameless child of the ChatView so it
+// stays put while the chat scrolls. Drives the shared, lazy voicePlayer() and shares
+// its volume with the video player dialog under the "media/volume" QSettings key.
+class VoicePlayerPanel : public QWidget
+{
+public:
+    explicit VoicePlayerPanel(QWidget *parent = nullptr)
+        : QWidget(parent)
+    {
+        setObjectName(QStringLiteral("voicePlayerPanel"));
+        setStyleSheet(QStringLiteral(
+            "#voicePlayerPanel {"
+            "  background: palette(window);"
+            "  border: 1px solid palette(mid);"
+            "  border-radius: %1px;"
+            "}"
+            "QPushButton {"
+            "  background: transparent;"
+            "  color: palette(text);"
+            "  border: none;"
+            "  border-radius: 4px;"
+            "  padding: 4px 8px;"
+            "}"
+            "QPushButton:hover { color: palette(highlight); }"
+            "QLabel { color: palette(text); background: transparent; }"
+            "QSlider::groove:horizontal { height: 4px; background: palette(mid); border-radius: 2px; }"
+            "QSlider::sub-page:horizontal { background: palette(highlight); border-radius: 2px; }"
+            "QSlider::handle:horizontal { width: 10px; margin: -3px 0; border-radius: 5px; background: palette(text); }"
+        ).arg(Core::Theme::Manager::instance().roundness()));
+
+        auto *layout = new QHBoxLayout(this);
+        layout->setContentsMargins(8, 6, 8, 6);
+        layout->setSpacing(8);
+
+        playButton = new QPushButton(QStringLiteral("▶"), this);
+        playButton->setToolTip(tr("Play / Pause"));
+        layout->addWidget(playButton);
+
+        positionSlider = new QSlider(Qt::Horizontal, this);
+        positionSlider->setRange(0, 0);
+        positionSlider->setMinimumWidth(140);
+        positionSlider->setToolTip(tr("Seek"));
+        layout->addWidget(positionSlider, 1);
+
+        timeLabel = new QLabel(QStringLiteral("00:00 / 00:00"), this);
+        timeLabel->setToolTip(tr("Current time / total time"));
+        layout->addWidget(timeLabel);
+
+        volumeSlider = new QSlider(Qt::Horizontal, this);
+        volumeSlider->setRange(0, 100);
+        volumeSlider->setValue(QSettings().value("media/volume", 100).toInt());
+        volumeSlider->setFixedWidth(70);
+        volumeSlider->setToolTip(tr("Volume"));
+        layout->addWidget(volumeSlider);
+
+        auto *closeButton = new QPushButton(QStringLiteral("✕"), this);
+        closeButton->setToolTip(tr("Close"));
+        layout->addWidget(closeButton);
+
+        QMediaPlayer *vp = voicePlayer();
+        connect(playButton, &QPushButton::clicked, this, [this]() {
+            QMediaPlayer *p = voicePlayer();
+            if (p->playbackState() == QMediaPlayer::PlayingState)
+                p->pause();
+            else
+                p->play();
+        });
+        connect(positionSlider, &QSlider::sliderPressed, this, [this]() { sliderDragging = true; });
+        connect(positionSlider, &QSlider::sliderMoved, this, [this](int pos) {
+            timeLabel->setText(formatTime(pos) + QStringLiteral(" / ") +
+                               formatTime(voicePlayer()->duration()));
+            voicePlayer()->setPosition(pos);
+        });
+        connect(positionSlider, &QSlider::sliderReleased, this, [this]() {
+            sliderDragging = false;
+            voicePlayer()->setPosition(positionSlider->value());
+        });
+        connect(volumeSlider, &QSlider::valueChanged, this, [this](int value) {
+            voiceAudioOutput()->setVolume(qreal(value) / 100.0);
+            QSettings().setValue("media/volume", value);
+        });
+        connect(closeButton, &QPushButton::clicked, this, &QWidget::hide);
+
+        connect(vp, &QMediaPlayer::positionChanged, this, [this](qint64 position) {
+            if (sliderDragging)
+                return;
+            updateSlider(position);
+        });
+        connect(vp, &QMediaPlayer::durationChanged, this, [this](qint64 duration) {
+            positionSlider->setRange(0, int(duration));
+            updateSlider(voicePlayer()->position());
+        });
+        connect(vp, &QMediaPlayer::playbackStateChanged, this, [this]() {
+            const bool playing = voicePlayer()->playbackState() == QMediaPlayer::PlayingState;
+            playButton->setText(playing ? QStringLiteral("❚❚") : QStringLiteral("▶"));
+        });
+    }
+
+protected:
+    void keyPressEvent(QKeyEvent *event) override
+    {
+        if (event->key() == Qt::Key_Escape) {
+            hide();
+            event->accept();
+            return;
+        }
+        QWidget::keyPressEvent(event);
+    }
+
+private:
+    void updateSlider(qint64 position)
+    {
+        positionSlider->blockSignals(true);
+        positionSlider->setValue(int(position));
+        positionSlider->blockSignals(false);
+        timeLabel->setText(formatTime(position) + QStringLiteral(" / ") +
+                           formatTime(voicePlayer()->duration()));
+    }
+
+    static QString formatTime(qint64 ms)
+    {
+        const qint64 totalSecs = ms / 1000;
+        const qint64 mins = totalSecs / 60;
+        const qint64 secs = totalSecs % 60;
+        return QString("%1:%2").arg(mins, 2, 10, QLatin1Char('0'))
+                               .arg(secs, 2, 10, QLatin1Char('0'));
+    }
+
+    QPushButton *playButton = nullptr;
+    QSlider *positionSlider = nullptr;
+    QLabel *timeLabel = nullptr;
+    QSlider *volumeSlider = nullptr;
+    bool sliderDragging = false;
+};
 } // namespace
 
 ChatView::ChatView(QWidget *parent) : QListView(parent), hoveredRow(-1), hoveredChar(-1)
@@ -125,7 +271,8 @@ ChatView::ChatView(QWidget *parent) : QListView(parent), hoveredRow(-1), hovered
     searchPanel->setObjectName(QStringLiteral("chatSearchPanel"));
     searchPanel->setVisible(false);
     searchPanel->setStyleSheet(
-        QStringLiteral("#chatSearchPanel { background: palette(window); border: 1px solid palette(mid); border-radius: 6px; }"));
+            QStringLiteral("#chatSearchPanel { background: palette(window); border: 1px solid palette(mid); border-radius: %1px; }")
+                    .arg(Core::Theme::Manager::instance().roundness()));
     auto *searchLayout = new QHBoxLayout(searchPanel);
     searchLayout->setContentsMargins(8, 4, 8, 4);
     searchLayout->setSpacing(6);
@@ -437,6 +584,19 @@ void ChatView::mouseReleaseEvent(QMouseEvent *event)
         break;
     }
 
+    case Kind::PollVote: {
+        if (hasTextSelection())
+            break;
+        auto *chatModel = qobject_cast<ChatModel *>(model());
+        if (!chatModel || region->index < 0 || region->index >= resolved.ctx.poll.answers.size())
+            break;
+        const Snowflake channelId = chatModel->getActiveChannelId();
+        const Snowflake messageId = idx.data(ChatModel::MessageIdRole).toULongLong();
+        emit chatModel->pollVoteRequested(channelId, messageId,
+                                          { resolved.ctx.poll.answers[region->index].id });
+        break;
+    }
+
     case Kind::AttachmentImage:
     case Kind::AttachmentFile:
     case Kind::AttachmentVideo: {
@@ -451,8 +611,11 @@ void ChatView::mouseReleaseEvent(QMouseEvent *event)
             break;
         }
 
-        // Voice message: toggle audio playback
+        // Voice message: toggle audio playback and surface the mini-player so
+        // the user can seek/pause/change volume. Audio never autoplays — the
+        // click is always required.
         if (att.isVoice) {
+            ensureVoicePlayerPanel();
             auto *vp = voicePlayer();
             if (vp->playbackState() == QMediaPlayer::PlayingState &&
                 vp->source() == att.proxyUrl) {
@@ -586,6 +749,7 @@ void ChatView::resizeEvent(QResizeEvent *event)
                                  height() - jumpToBottomButton->height() - margin);
     }
     positionSearchPanel();
+    positionVoicePlayerPanel();
 }
 
 bool ChatView::viewportEvent(QEvent *event)
@@ -989,6 +1153,13 @@ void ChatView::contextMenuEvent(QContextMenuEvent *event)
         emit replyToMessageRequested(channelId, messageId);
     });
 
+    QAction *forwardAction = menu.addAction(tr("Forward"));
+    const bool isPendingRow = index.data(ChatModel::IsPendingRole).toBool();
+    forwardAction->setEnabled(!isPendingRow);
+    connect(forwardAction, &QAction::triggered, this, [this, channelId, messageId]() {
+        emit forwardMessageRequested(channelId, messageId);
+    });
+
     if (canPinMessages) {
         QAction *pinAction = menu.addAction(tr("Pin Message"));
         connect(pinAction, &QAction::triggered, this, [this, channelId, messageId]() {
@@ -1016,10 +1187,12 @@ void ChatView::contextMenuEvent(QContextMenuEvent *event)
         });
     }
 
-    QAction *copyIdAction = menu.addAction(tr("Copy ID"));
-    connect(copyIdAction, &QAction::triggered, this, [copyTextToClipboard, messageId]() {
-        copyTextToClipboard(QString::number(static_cast<qulonglong>(messageId)));
-    });
+    if (Core::isDeveloperModeEnabled()) {
+        QAction *copyIdAction = menu.addAction(tr("Copy ID"));
+        connect(copyIdAction, &QAction::triggered, this, [copyTextToClipboard, messageId]() {
+            copyTextToClipboard(QString::number(static_cast<qulonglong>(messageId)));
+        });
+    }
 
     QAction *copyLinkAction = menu.addAction(tr("Copy Link"));
     connect(copyLinkAction, &QAction::triggered, this, [copyTextToClipboard, messageLink]() {
@@ -1396,6 +1569,33 @@ void ChatView::positionSearchPanel()
 
     const int panelWidth = qMin(360, qMax(220, width() - 32));
     searchPanel->setGeometry(width() - panelWidth - 16, 12, panelWidth, 36);
+}
+
+void ChatView::ensureVoicePlayerPanel()
+{
+    // The panel pointer is only ever assigned VoicePlayerPanel instances below,
+    // so a plain static_cast is safe and avoids requiring Q_OBJECT for moc.
+    auto *panel = static_cast<VoicePlayerPanel *>(voicePlayerPanel.data());
+    if (!panel) {
+        panel = new VoicePlayerPanel(this);
+        voicePlayerPanel = panel;
+    }
+    positionVoicePlayerPanel();
+    panel->show();
+    panel->raise();
+}
+
+void ChatView::positionVoicePlayerPanel()
+{
+    auto *panel = static_cast<VoicePlayerPanel *>(voicePlayerPanel.data());
+    if (!panel || !panel->isVisible())
+        return;
+
+    panel->adjustSize();
+    const int margin = 12;
+    const int x = qMax(margin, (width() - panel->width()) / 2);
+    const int y = height() - panel->height() - margin;
+    panel->move(x, y);
 }
 
 void ChatView::openReactionPicker(Core::Snowflake channelId, Core::Snowflake messageId)

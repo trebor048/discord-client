@@ -116,9 +116,11 @@ void Gateway::sendPayload(const QByteArray &data)
 
 void Gateway::onPayloadReceived(const QJsonObject &root)
 {
-    qCDebug(LogDiscord) << "Received payload" << root;
-
     Inbound msg = Inbound::fromJson(root);
+
+    qCDebug(LogDiscord) << "Received payload"
+                        << "op" << static_cast<int>(msg.opcode) << "t" << msg.t.value_or(QString())
+                        << "s" << msg.s.value_or(-1);
 
     if (msg.s.has_value())
         lastReceivedSequence = msg.s.value();
@@ -699,6 +701,22 @@ void Gateway::sendVoiceStateUpdate(Core::Snowflake guildId, Core::Snowflake chan
     sendPayload(msg.toJson());
 }
 
+void Gateway::sendPresenceUpdate(const QString &status)
+{
+    PresenceUpdateOutbound msg;
+    msg.status = status;
+    msg.since = 0;
+    msg.afk = false;
+
+    sendPayload(msg.toJson());
+}
+
+QString Gateway::gatewaySessionId() const
+{
+    std::lock_guard lock(sessionMutex);
+    return sessionId;
+}
+
 void Gateway::handleHello(const Inbound &data)
 {
     qCDebug(LogDiscord) << "Received hello";
@@ -796,8 +814,11 @@ void Gateway::networkLoop()
             }
         }
 
-        curl = curl_easy_init();
-        if (!curl) {
+        // Use a local handle for the connect phase so a concurrent UI-thread
+        // send (which checks the shared `curl` under curlMutex) never touches a
+        // half-initialized handle. Publish it only once the connection is up.
+        CURL *connectingCurl = curl_easy_init();
+        if (!connectingCurl) {
             qCCritical(LogDiscord) << "Failed to initialize curl";
             running = false;
             if (ingest)
@@ -810,26 +831,27 @@ void Gateway::networkLoop()
         curl_version_info_data *info = curl_version_info(CURLVERSION_NOW);
         qCDebug(LogDiscord) << "SSL backend:" << info->ssl_version;
 
-        curl_easy_setopt(curl, CURLOPT_URL, connectUrl.toUtf8().constData());
-        curl_easy_setopt(curl, CURLOPT_CONNECT_ONLY, 2L);
-        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
-        CurlUtils::applyCommonOptions(curl);
+        curl_easy_setopt(connectingCurl, CURLOPT_URL, connectUrl.toUtf8().constData());
+        curl_easy_setopt(connectingCurl, CURLOPT_CONNECT_ONLY, 2L);
+        curl_easy_setopt(connectingCurl, CURLOPT_CONNECTTIMEOUT, 15L);
+        CurlUtils::applyCommonOptions(connectingCurl);
 
-        CURLcode res = curl_easy_perform(curl);
+        CURLcode res = curl_easy_perform(connectingCurl);
         if (res != CURLE_OK) {
             qWarning() << "Failed to connect to gateway:" << curl_easy_strerror(res);
 
             // Retry any connect failure (initial or reconnect) with backoff
             if (reconnectAttempts < maxReconnectAttempts) {
-                std::lock_guard lock(curlMutex);
-                curl_easy_cleanup(curl);
-                curl = nullptr;
+                curl_easy_cleanup(connectingCurl);
 
-                reconnectAttempts++;
-                int delay = reconnectBackoffMs(reconnectAttempts);
-                qCInfo(LogDiscord) << "Connect attempt" << reconnectAttempts
+                // Snapshot after incrementing: the UI thread resets
+                // reconnectAttempts on READY, and reading it again later could
+                // observe 0 and compute an invalid backoff.
+                const int attempt = reconnectAttempts.fetch_add(1) + 1;
+                int delay = reconnectBackoffMs(attempt);
+                qCInfo(LogDiscord) << "Connect attempt" << attempt
                                    << "failed, retrying in" << delay << "ms";
-                emit reconnecting(reconnectAttempts, maxReconnectAttempts);
+                emit reconnecting(attempt, maxReconnectAttempts);
                 if (!waitInterruptible(std::chrono::milliseconds(delay)))
                     break;
                 shouldReconnect = true;
@@ -838,17 +860,17 @@ void Gateway::networkLoop()
 
             emit disconnected(CloseCode::INTERNAL,
                               QString("Failed to connect to gateway: ") + curl_easy_strerror(res));
-            {
-                std::lock_guard lock(curlMutex);
-                curl_easy_cleanup(curl);
-                curl = nullptr;
-            }
+            curl_easy_cleanup(connectingCurl);
             running = false;
             if (ingest)
                 ingest->stop();
             return;
         }
 
+        {
+            std::lock_guard lock(curlMutex);
+            curl = connectingCurl;
+        }
         emit connected();
 
         char chunk[8192];
@@ -890,13 +912,23 @@ void Gateway::networkLoop()
                 res = curl_ws_recv(curl, chunk, sizeof(chunk), &rlen, &meta);
             }
 
-            if (res == CURLE_AGAIN || res == CURLE_GOT_NOTHING) {
+            if (res == CURLE_AGAIN) {
                 CurlUtils::wsRecvWait(curl, curlMutex);
 
                 if (shouldReconnect)
                     break;
 
                 continue;
+            }
+
+            // GOT_NOTHING means the peer closed without a clean WS close frame
+            // (recv returned 0 bytes); treat it as a dead connection and
+            // reconnect rather than busy-looping forever in a silently-dead
+            // "connected" state.
+            if (res == CURLE_GOT_NOTHING) {
+                qCWarning(LogDiscord) << "Gateway connection returned no data; reconnecting";
+                shouldReconnect = true;
+                break;
             }
 
             if (!meta) {
@@ -971,10 +1003,10 @@ void Gateway::networkLoop()
             // zlib context, so the old stream state would corrupt decompression
             ingest->reset();
 
-            int delay = reconnectBackoffMs(reconnectAttempts);
-            qCInfo(LogDiscord) << "Reconnecting in" << delay << "ms (attempt"
-                               << reconnectAttempts << ")";
-            emit reconnecting(reconnectAttempts, maxReconnectAttempts);
+            const int attempt = reconnectAttempts.load();
+            int delay = reconnectBackoffMs(attempt);
+            qCInfo(LogDiscord) << "Reconnecting in" << delay << "ms (attempt" << attempt << ")";
+            emit reconnecting(attempt, maxReconnectAttempts);
             if (!waitInterruptible(std::chrono::milliseconds(delay))) {
                 shouldReconnect = false;
                 break;

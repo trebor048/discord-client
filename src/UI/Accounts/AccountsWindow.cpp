@@ -4,9 +4,11 @@
 #include <QRandomGenerator>
 
 #include "Core/Session.hpp"
+#include "Core/ClientInstance.hpp"
 #include "Core/TokenStore.hpp"
 #include "Core/TokenUtils.hpp"
 #include "Discord/CdnUrls.hpp"
+#include "Discord/Client.hpp"
 #include "UI/Dialogs/QRLoginDialog.hpp"
 
 namespace Acheron {
@@ -87,6 +89,15 @@ void AccountsWindow::setupUi()
     detailStatus = new QLabel(detailsContainer);
     detailStatus->setStyleSheet("font-weight: bold;");
 
+    presenceCombo = new QComboBox(detailsContainer);
+    presenceCombo->addItem(tr("Online"), QStringLiteral("online"));
+    presenceCombo->addItem(tr("Idle"), QStringLiteral("idle"));
+    presenceCombo->addItem(tr("Do Not Disturb"), QStringLiteral("dnd"));
+    presenceCombo->addItem(tr("Invisible"), QStringLiteral("invisible"));
+    presenceCombo->setToolTip(tr("Set your presence status for this account"));
+    connect(presenceCombo, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            &AccountsWindow::onPresenceChanged);
+
     autoConnectCheck = new QCheckBox(tr("Connect on startup"), detailsContainer);
     autoConnectCheck->setToolTip(tr("Connect this account automatically when Acheron starts"));
 
@@ -98,6 +109,7 @@ void AccountsWindow::setupUi()
 
     form->addRow(tr("Display Name:"), detailDisplayName);
     form->addRow(tr("Status:"), detailStatus);
+    form->addRow(tr("Presence:"), presenceCombo);
     form->addRow(tr("Username:"), detailUsername);
     form->addRow(tr("User ID:"), detailId);
     form->addRow(autoConnectCheck);
@@ -391,6 +403,24 @@ void AccountsWindow::updateDetails(Snowflake id)
         disconnectButton->setEnabled(false);
         break;
     }
+
+    const bool connected = (info->state == ConnectionState::Connected);
+    presenceCombo->setEnabled(connected);
+    if (connected) {
+        if (auto *instance = session->client(id)) {
+            QString status = instance->presenceStatus();
+            int comboIdx = presenceCombo->findData(status);
+            // Discord reports invisible as "offline" on the wire; map it to the
+            // Invisible entry instead of silently showing "Online".
+            if (comboIdx < 0
+                && (status == QLatin1String("offline") || status == QLatin1String("invisible")))
+                comboIdx = presenceCombo->findData(QStringLiteral("invisible"));
+            if (comboIdx < 0)
+                comboIdx = 0; // "unknown"/fresh connects map to Online
+            QSignalBlocker blocker(presenceCombo);
+            presenceCombo->setCurrentIndex(comboIdx);
+        }
+    }
 }
 
 void AccountsWindow::onConnectClicked()
@@ -405,6 +435,24 @@ void AccountsWindow::onDisconnectClicked()
     QModelIndex idx = listView->selectionModel()->currentIndex();
     if (idx.isValid())
         performDisconnect(idx.row());
+}
+
+void AccountsWindow::onPresenceChanged(int index)
+{
+    Q_UNUSED(index);
+    QModelIndex idx = listView->selectionModel()->currentIndex();
+    if (!idx.isValid())
+        return;
+
+    Snowflake id(idx.data(AccountsModel::AccountObjectRole).value<quint64>());
+    if (!id.isValid())
+        return;
+
+    const QString status = presenceCombo->currentData().toString();
+    if (auto *instance = session->client(id)) {
+        if (auto *client = instance->discord())
+            client->setPresenceStatus(status);
+    }
 }
 
 void AccountsWindow::onRemoveClicked()

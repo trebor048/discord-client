@@ -6,6 +6,7 @@
 #include <QListWidget>
 #include <QStackedWidget>
 #include <QString>
+#include <QStringList>
 
 namespace Acheron {
 namespace Discord {
@@ -30,6 +31,13 @@ public:
     void setImageManager(Core::ImageManager *mgr);
     void setNotificationManager(Core::NotificationManager *mgr);
     void setVoiceManager(Core::AV::VoiceManager *mgr);
+
+    /// Jump to the settings category whose label matches `name`
+    /// (case-insensitive). No-op if no category matches.
+    void selectPage(const QString &name);
+
+    /// The category labels in display order (matches the side list).
+    QStringList pageNames() const;
 
 signals:
     void channelListModeChanged(bool classic);

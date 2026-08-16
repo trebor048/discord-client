@@ -29,6 +29,7 @@ private slots:
     void onConnectClicked();
     void onDisconnectClicked();
     void onSetTokenRequested(int row);
+    void onPresenceChanged(int index);
 
 private:
     Core::Session *session;
@@ -42,6 +43,7 @@ private:
     QLabel *detailUsername;
     QLabel *detailId;
     QLabel *detailStatus;
+    QComboBox *presenceCombo = nullptr;
     QCheckBox *autoConnectCheck;
     QWidget *detailsContainer;
     QLabel *emptyStateLabel;

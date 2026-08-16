@@ -22,6 +22,7 @@ public:
     void deleteMembersForGuild(Core::Snowflake guildId, QSqlDatabase &db);
 
     std::optional<Discord::Member> getMember(Core::Snowflake guildId, Core::Snowflake userId);
+    QList<Core::Snowflake> getMemberUserIds(Core::Snowflake guildId);
 
 private:
     static QString rolesToJson(const QList<Core::Snowflake> &roles);

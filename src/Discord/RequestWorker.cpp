@@ -217,6 +217,17 @@ CURL *RequestWorker::buildEasyHandle(TransferContext *ctx)
 
         if (desc.solution)
             appendCaptchaHeaders(headers, *desc.solution);
+
+        for (const auto &header : desc.extraHeaders) {
+            QString name = header.first;
+            QString value = header.second;
+            // Sanitize CR/LF to prevent header injection and to avoid libcurl
+            // rejecting the whole request.
+            name.remove(QLatin1Char('\r')).remove(QLatin1Char('\n'));
+            value.remove(QLatin1Char('\r')).remove(QLatin1Char('\n'));
+            const QByteArray line = name.toUtf8() + ": " + value.toUtf8();
+            headers = curl_slist_append(headers, line.constData());
+        }
     }
 
     ctx->headers = headers;

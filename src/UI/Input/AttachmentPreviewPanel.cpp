@@ -238,8 +238,9 @@ QWidget *AttachmentPreviewPanel::createCard(int index)
 
     auto *card = new QFrame(cardsContainer);
     card->setFixedSize(124, 120);
-    card->setStyleSheet(QStringLiteral("QFrame { background-color: %1; border-radius: 4px; }")
-                                .arg(theme.color(Core::Theme::Token::AlternateBaseBg).name()));
+    card->setStyleSheet(QStringLiteral("QFrame { background-color: %1; border-radius: %2px; }")
+                                .arg(theme.color(Core::Theme::Token::AlternateBaseBg).name())
+                                .arg(theme.roundness()));
 
     auto *layout = new QVBoxLayout(card);
     layout->setContentsMargins(6, 2, 6, 4);

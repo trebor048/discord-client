@@ -129,6 +129,42 @@ constexpr int stickerSpacing() noexcept
 {
     return 8;
 }
+constexpr int pollMaxWidth() noexcept
+{
+    return 400;
+}
+constexpr int pollRadius() noexcept
+{
+    return 8;
+}
+constexpr int pollBorderWidth() noexcept
+{
+    return 1;
+}
+constexpr int pollPadding() noexcept
+{
+    return 12;
+}
+constexpr int pollOptionHeight() noexcept
+{
+    return 40;
+}
+constexpr int pollProgressBarHeight() noexcept
+{
+    return 6;
+}
+constexpr int pollOptionSpacing() noexcept
+{
+    return 10;
+}
+constexpr int pollQuestionSpacing() noexcept
+{
+    return 6;
+}
+constexpr int pollAnswerSpacing() noexcept
+{
+    return 8;
+}
 
 struct AttachmentGridCell
 {
@@ -203,6 +239,22 @@ struct AttachmentLayout
     int index;
 };
 
+struct PollAnswerLayout
+{
+    int answerIndex;
+    QRect optionRect; // label + count + vote affordance row (click target)
+    QRect barRect;    // progress bar below the option row
+};
+
+struct PollLayout
+{
+    QRect pollRect;
+    QRect questionRect;
+    QList<PollAnswerLayout> answerLayouts;
+    QRect footerRect;
+    int totalHeight;
+};
+
 struct HitRegion
 {
     enum class Kind {
@@ -221,6 +273,8 @@ struct HitRegion
         EmbedFieldName,
         EmbedFieldValue,
         Reaction,
+
+        PollVote,
 
         TextLink,
         TextCursor,
@@ -264,6 +318,10 @@ struct MessageLayout
     QList<ReactionLayout> reactionLayouts;
     int reactionsTotalHeight;
 
+    int pollTop;
+    QList<PollLayout> pollLayouts;
+    int pollTotalHeight;
+
     QuickReactionLayout quickReaction;
 
     int stickersTop;
@@ -295,6 +353,9 @@ struct LayoutContext
     bool compactMode = false;
     const ChatModel *model = nullptr;
     Core::Snowflake messageId;
+
+    PollData poll;
+    bool hasPoll = false;
 };
 
 MessageLayout calculateMessageLayout(const LayoutContext &ctx);

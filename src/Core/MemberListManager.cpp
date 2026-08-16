@@ -655,6 +655,11 @@ void MemberListManager::resolveMemberInfo(MemberListItem &item, const GuildListS
 {
     const auto &member = item.member;
 
+    // Reset derived state so role updates / deletions don't leave stale colors.
+    item.roleColor = QColor();
+    item.roleIconRoleId = Snowflake::Invalid;
+    item.roleIconHash.clear();
+
     if (!member.nick.isUndefined() && !member.nick.isNull() && !member.nick->isEmpty())
         item.displayName = member.nick;
     else if (!member.user.isUndefined())
@@ -663,6 +668,7 @@ void MemberListManager::resolveMemberInfo(MemberListItem &item, const GuildListS
     if (!member.roles.isUndefined()) {
         int highestPos = -1;
         int bestColor = 0;
+        int highestIconPos = -1;
 
         for (const auto &roleId : member.roles.get()) {
             QString roleIdStr = QString::number(roleId);
@@ -671,6 +677,11 @@ void MemberListManager::resolveMemberInfo(MemberListItem &item, const GuildListS
                 if (!it->color.isUndefined() && it->color.get() != 0 && it->position.get() > highestPos) {
                     highestPos = it->position.get();
                     bestColor = it->color.get();
+                }
+                if (it->icon.hasValue() && !it->icon->isEmpty() && it->position.get() > highestIconPos) {
+                    highestIconPos = it->position.get();
+                    item.roleIconRoleId = roleId;
+                    item.roleIconHash = it->icon.get();
                 }
             }
         }

@@ -135,6 +135,13 @@ void WindowManager::openSettingsWindow()
     settingsWindow->activateWindow();
 }
 
+void WindowManager::openSettingsWindow(const QString &page)
+{
+    openSettingsWindow();
+    if (settingsWindow && !page.isEmpty())
+        settingsWindow->selectPage(page);
+}
+
 void WindowManager::openFriendsWindow()
 {
     if (!m_window->currentInstance)

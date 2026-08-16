@@ -170,6 +170,11 @@ UserProfilePopup::UserProfilePopup(Core::ImageManager *images, Core::ClientInsta
                     if (id == this->userId)
                         renderFriendStatus();
                 });
+        connect(instance, &Core::ClientInstance::userPresenceChanged, this,
+                [this](Core::Snowflake id) {
+                    if (id == this->userId)
+                        updatePresenceIcon();
+                });
         connect(instance->users(), &Core::UserManager::noteChanged, this,
                 [this](Core::Snowflake id) {
                     if (id == this->userId)
@@ -274,7 +279,18 @@ QWidget *UserProfilePopup::buildHeader()
 
     handleLabel = new QLabel(identityRow);
     handleLabel->setStyleSheet(QStringLiteral("color: palette(placeholder-text); font-size: 13px;"));
-    identityCol->addWidget(handleLabel);
+
+    presenceIconLabel = new QLabel(identityRow);
+    presenceIconLabel->setFixedSize(14, 14);
+    presenceIconLabel->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
+
+    auto *handleRow = new QHBoxLayout;
+    handleRow->setContentsMargins(0, 0, 0, 0);
+    handleRow->setSpacing(6);
+    handleRow->addWidget(presenceIconLabel, 0, Qt::AlignVCenter);
+    handleRow->addWidget(handleLabel, 0, Qt::AlignVCenter);
+    handleRow->addStretch(1);
+    identityCol->addLayout(handleRow);
     identityRowLayout->addLayout(identityCol);
 
     headerLayout->addWidget(identityRow);
@@ -543,6 +559,7 @@ void UserProfilePopup::renderFromCachedData()
     displayNameLabel->setText(name.toHtmlEscaped());
     handleLabel->setText(tagHandle().toHtmlEscaped());
     botBadgeLabel->setVisible(isBot());
+    updatePresenceIcon();
 
     int color = resolvedAccentColor();
     if (color != 0) {
@@ -590,6 +607,58 @@ void UserProfilePopup::renderFromCachedData()
     }
 
     applyView();
+}
+
+void UserProfilePopup::updatePresenceIcon()
+{
+    presenceIconLabel->setPixmap(QPixmap());
+    if (instance.isNull())
+        return;
+    const auto p = instance->presence(userId);
+    if (!p)
+        return;
+
+    QString device;
+    QString deviceStatus;
+    const auto pick = [&device, &deviceStatus](const QString &d, const QString &s) {
+        if (device.isEmpty() && !s.isEmpty() && s != QLatin1String("offline")) {
+            device = d;
+            deviceStatus = s;
+        }
+    };
+    pick(QStringLiteral("desktop"), p->desktop);
+    pick(QStringLiteral("mobile"), p->mobile);
+    pick(QStringLiteral("web"), p->web);
+
+    const qreal dpr = devicePixelRatioF();
+    const int px = 14;
+    if (device.isEmpty()) {
+        const QString colorStatus = deviceStatus.isEmpty() ? p->status : deviceStatus;
+        QColor color;
+        if (colorStatus == QLatin1String("online"))
+            color = QColor(0x23, 0xA5, 0x5A);
+        else if (colorStatus == QLatin1String("idle"))
+            color = QColor(0xF0, 0xB2, 0x32);
+        else if (colorStatus == QLatin1String("dnd"))
+            color = QColor(0xF2, 0x3F, 0x43);
+        else
+            color = QColor(0x80, 0x84, 0x8E);
+
+        QPixmap pm(qRound(px * dpr), qRound(px * dpr));
+        pm.setDevicePixelRatio(dpr);
+        pm.fill(Qt::transparent);
+        QPainter painter(&pm);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(color);
+        painter.drawEllipse(0, 0, px, px);
+        painter.end();
+        presenceIconLabel->setPixmap(pm);
+    } else {
+        const QPixmap pm = Core::Theme::Icons::presencePixmap(p->status, device, deviceStatus,
+                                                              px, dpr);
+        presenceIconLabel->setPixmap(pm);
+    }
 }
 
 void UserProfilePopup::renderFromProfile()

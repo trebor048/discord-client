@@ -213,5 +213,23 @@ struct UpdateVoiceStateData : Core::JsonUtils::JsonObject
 };
 using UpdateVoiceState = Outbound<OpCode::VOICE_STATE_UPDATE, UpdateVoiceStateData>;
 
+struct PresenceUpdateData : Core::JsonUtils::JsonObject
+{
+    Field<int> since;
+    Field<QString> status;
+    Field<bool> afk;
+
+    QJsonObject toJson() const
+    {
+        QJsonObject obj;
+        insert(obj, "since", since);
+        obj["activities"] = QJsonArray();
+        insert(obj, "status", status);
+        insert(obj, "afk", afk);
+        return obj;
+    }
+};
+using PresenceUpdateOutbound = Outbound<OpCode::PRESENCE_UPDATE, PresenceUpdateData>;
+
 } // namespace Discord
 } // namespace Acheron

@@ -37,6 +37,9 @@ struct MemberListItem
     Snowflake userId;
     QString displayName;
     QColor roleColor;
+    // Top-position role that has a custom icon (rendered as a small badge).
+    Snowflake roleIconRoleId;
+    QString roleIconHash;
 };
 
 struct ListData

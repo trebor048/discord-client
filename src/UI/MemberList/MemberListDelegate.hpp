@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QStyledItemDelegate>
+#include <QVariantMap>
 
 namespace Acheron {
 namespace UI {
@@ -21,6 +22,8 @@ private:
                     const QModelIndex &index) const;
     void paintMember(QPainter *painter, const QStyleOptionViewItem &option,
                      const QModelIndex &index) const;
+    void drawPresenceIcon(QPainter *painter, const QVariantMap &presence,
+                          const QRect &rect) const;
     void paintPlaceholder(QPainter *painter, const QStyleOptionViewItem &option) const;
 };
 

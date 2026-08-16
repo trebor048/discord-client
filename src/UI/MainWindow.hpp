@@ -65,6 +65,7 @@ class TypingIndicator;
 class SlowModeIndicator;
 class ConnectionBanner;
 class PinnedMessagesPanel;
+class MePanel;
 #ifndef ACHERON_NO_VOICE
 class VoiceStatusBar;
 #endif
@@ -214,6 +215,9 @@ private:
     MemberListView *memberListView;
     MemberListModel *memberListModel;
     Core::TypingTracker *typingTracker;
+    MePanel *mePanel = nullptr;
+    bool mePanelWired = false;
+    quint64 m_slashQueryGeneration = 0;
 
 #ifndef ACHERON_NO_VOICE
     VoiceStatusBar *voiceStatusBar;

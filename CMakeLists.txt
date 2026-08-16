@@ -372,6 +372,14 @@ if(BUILD_TESTS)
     target_include_directories(TestDeserialization PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME DeserializationTests COMMAND TestDeserialization)
 
+    qt_add_executable(TestNotificationDecider
+        tests/tst_NotificationDecider.cpp
+        src/Core/Notification/NotificationDecider.cpp
+    )
+    target_link_libraries(TestNotificationDecider PRIVATE Qt::Core Qt::Gui Qt::Test)
+    target_include_directories(TestNotificationDecider PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME NotificationDeciderTests COMMAND TestNotificationDecider)
+
     qt_add_executable(TestEmojiCatalog
         tests/tst_EmojiCatalog.cpp
         src/Core/EmojiCatalog.cpp
@@ -450,6 +458,7 @@ if(BUILD_TESTS)
             ProtoReaderTests
             EmojiSegmenterTests
             MemberListTests
+            NotificationDeciderTests
             PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORM_PLUGIN_PATH=${QT_INSTALL_PREFIX}/plugins/platforms"
         )
         if(NOT WIN32)

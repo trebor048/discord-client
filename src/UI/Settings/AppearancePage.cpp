@@ -112,6 +112,27 @@ AppearancePage::AppearancePage(QWidget *parent)
     messageLayout->addStretch(1);
     outer->addWidget(messageGroup);
 
+    auto *cornersGroup = new QGroupBox(tr("Corners"), this);
+    auto *cornersLayout = new QHBoxLayout(cornersGroup);
+    cornersLayout->addWidget(new QLabel(tr("Corner radius:"), cornersGroup));
+    auto *roundnessSpin = new QSpinBox(cornersGroup);
+    roundnessSpin->setRange(0, 48);
+    roundnessSpin->setSuffix(" px");
+    roundnessSpin->setValue(Manager::instance().roundness());
+    cornersLayout->addWidget(roundnessSpin);
+    auto *roundnessReset = new QToolButton(cornersGroup);
+    roundnessReset->setText(tr("Reset"));
+    cornersLayout->addWidget(roundnessReset);
+    cornersLayout->addStretch(1);
+    outer->addWidget(cornersGroup);
+
+    connect(roundnessSpin, qOverload<int>(&QSpinBox::valueChanged), this,
+            [](int px) { Manager::instance().setRoundness(px); });
+    connect(roundnessReset, &QToolButton::clicked, this, [roundnessSpin]() {
+        Manager::instance().setRoundness(Manager::kDefaultRoundness);
+        roundnessSpin->setValue(Manager::instance().roundness());
+    });
+
     connect(compactToggle, &QCheckBox::toggled, this, [this](bool compact) {
         QSettings().setValue("ui/compactMessages", compact);
         emit compactModeChanged(compact);

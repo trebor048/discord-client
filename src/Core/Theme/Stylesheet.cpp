@@ -6,6 +6,8 @@
 
 #include <QColor>
 
+#include <algorithm>
+
 namespace Acheron {
 namespace Core {
 namespace Theme {
@@ -28,6 +30,9 @@ QString buildStyleSheet()
     const QColor divider = m.color(Token::Divider);
     const QColor highlight = m.color(Token::Highlight);
 
+    const int r = m.roundness();
+    const int rSmall = std::max(2, r / 2);
+
     QString qss;
 
     constexpr qreal tooltipFontScale = 0.9;
@@ -40,10 +45,13 @@ QString buildStyleSheet()
                           "  background-color: %1;"
                           "  color: %2;"
                           "  border: 1px solid %3;"
+                          "  border-radius: %4px;"
                           "  padding: 2px 6px;"
-                          "%4"
+                          "%5"
                           "}")
-                   .arg(hex(tooltipBg), hex(tooltipText), hex(divider), tooltipFontSize);
+                   .arg(hex(tooltipBg), hex(tooltipText), hex(divider))
+                   .arg(rSmall)
+                   .arg(tooltipFontSize);
 
     const QColor scrollbarHandle = divider.darker(120);
     const QColor scrollbarHandleHover = highlight.lighter(120);
@@ -56,7 +64,7 @@ QString buildStyleSheet()
                           "QScrollBar::handle:vertical {"
                           "  background-color: %1;"
                           "  border: 1px solid %3;"
-                          "  border-radius: 4px;"
+                          "  border-radius: %4px;"
                           "  min-height: 30px;"
                           "  margin: 1px;"
                           "}"
@@ -77,7 +85,7 @@ QString buildStyleSheet()
                           "QScrollBar::handle:horizontal {"
                           "  background-color: %1;"
                           "  border: 1px solid %3;"
-                          "  border-radius: 4px;"
+                          "  border-radius: %4px;"
                           "  min-width: 30px;"
                           "  margin: 1px;"
                           "}"
@@ -90,15 +98,27 @@ QString buildStyleSheet()
                           "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {"
                           "  background: none;"
                           "}")
-                   .arg(hex(scrollbarHandle), hex(scrollbarHandleHover), hex(windowBg));
+                   .arg(hex(scrollbarHandle), hex(scrollbarHandleHover), hex(windowBg))
+                   .arg(rSmall);
 
     qss += QStringLiteral("#MessageInput {"
                           "  background-color: %1;"
                           "  border: 1px solid %2;"
-                          "  border-radius: 6px;"
+                          "  border-radius: %4px;"
                           "  padding: 8px 10px; }"
                           "#MessageInput:focus { border: 1px solid %3; }")
-                   .arg(hex(baseBg), hex(divider), hex(highlight));
+                   .arg(hex(baseBg), hex(divider), hex(highlight))
+                   .arg(r);
+
+    // Apply the global corner radius to the common widget families that do
+    // not set their own inline border-radius, so the "roundness" setting
+    // visibly shapes the whole app rather than just tooltips and scrollbars.
+    qss += QStringLiteral("QPushButton, QToolButton, QComboBox, QSpinBox, QDoubleSpinBox,"
+                          " QLineEdit, QTextEdit, QPlainTextEdit,"
+                          " QListWidget, QListView, QTreeView, QTableView,"
+                          " QGroupBox, QFrame, QMenu {"
+                          "  border-radius: %1px; }")
+                   .arg(r);
 
     return qss;
 }

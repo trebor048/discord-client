@@ -9,9 +9,12 @@
 #include <QJsonDocument>
 #include <QSaveFile>
 #include <QJsonObject>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QStyle>
 #include <QTimer>
+
+#include <algorithm>
 
 namespace Acheron {
 namespace Core {
@@ -37,6 +40,21 @@ QFont Manager::font(FontRole role) const
     if (it != fontOverrides.constEnd())
         return it.value();
     return fontDescriptor(role).defaultFont;
+}
+
+int Manager::roundness() const
+{
+    const int px = QSettings().value(QStringLiteral("appearance/roundness"), kDefaultRoundness).toInt();
+    return std::clamp(px, 0, 48);
+}
+
+void Manager::setRoundness(int px)
+{
+    const int clamped = std::clamp(px, 0, 48);
+    if (clamped == roundness())
+        return;
+    QSettings().setValue(QStringLiteral("appearance/roundness"), clamped);
+    scheduleApply(true, false);
 }
 
 bool Manager::hasOverride(Token token) const

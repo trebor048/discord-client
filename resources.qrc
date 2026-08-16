@@ -11,11 +11,15 @@
         <file>resources/icons/lucide/at-sign.svg</file>
         <file>resources/icons/lucide/eye.svg</file>
         <file>resources/icons/lucide/file-text.svg</file>
+        <file>resources/icons/lucide/globe.svg</file>
         <file>resources/icons/lucide/handshake.svg</file>
         <file>resources/icons/lucide/id-card.svg</file>
         <file>resources/icons/lucide/lock.svg</file>
         <file>resources/icons/lucide/message-circle.svg</file>
+        <file>resources/icons/lucide/monitor.svg</file>
         <file>resources/icons/lucide/pencil.svg</file>
+        <file>resources/icons/lucide/settings.svg</file>
+        <file>resources/icons/lucide/smartphone.svg</file>
         <file>resources/icons/lucide/spool.svg</file>
         <file>resources/icons/lucide/x.svg</file>
     </qresource>

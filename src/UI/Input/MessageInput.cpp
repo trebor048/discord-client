@@ -2,12 +2,15 @@
 #include "AttachmentPreviewPanel.hpp"
 #include "Core/AnimationUtils.hpp"
 #include "Core/EmojiCatalog.hpp"
+#include "Core/Theme/Manager.hpp"
 #include "Discord/CdnUrls.hpp"
 #include "Discord/Entities.hpp"
 #include "UI/Dialogs/EmojiPickerDialog.hpp"
 #include "UI/Dialogs/GifPickerDialog.hpp"
 #include "UI/Dialogs/StickerPickerDialog.hpp"
 #include "UI/Widgets/Chat/EmojiAutocompletePopup.hpp"
+#include "UI/Widgets/Chat/SlashCommandPopup.hpp"
+#include "UI/Widgets/Chat/MentionAutocompletePopup.hpp"
 #include "Core/Theme/Icons.hpp"
 #include <QBuffer>
 #include <QVBoxLayout>
@@ -41,6 +44,11 @@ namespace Acheron {
 namespace UI {
 
 namespace {
+
+// Forward decls (defined below, used by the returnPressed handler).
+bool hasAllRequiredOptions(const Discord::ApplicationCommand &command,
+                           const QList<Discord::InteractionOptionValue> &parsed);
+
 QString pickEmoji(QWidget *parent, const QString &title, const QString &prompt,
                   const QStringList &orderedGuildIds = {},
                   const Core::Snowflake &currentGuildId = {})
@@ -274,8 +282,9 @@ MessageInput::MessageInput(QWidget *parent) : QWidget(parent)
     markdownPreview->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     markdownPreview->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     markdownPreview->setStyleSheet(
-            "#MarkdownInputPreview { background: #2b2d31; border: 1px solid #3f4147; "
-            "border-radius: 6px; padding: 6px; }");
+            QString("#MarkdownInputPreview { background: #2b2d31; border: 1px solid #3f4147; "
+                    "border-radius: %1px; padding: 6px; }")
+                    .arg(Core::Theme::Manager::instance().roundness()));
 
     markdownPreviewDebounceTimer = new QTimer(this);
     markdownPreviewDebounceTimer->setSingleShot(true);
@@ -307,6 +316,12 @@ MessageInput::MessageInput(QWidget *parent) : QWidget(parent)
     emojiPopup->setNetworkAccessManager(emojiNam);
     emojiPopup->hide();
 
+    slashPopup = new SlashCommandPopup(this);
+    slashPopup->hide();
+
+    mentionPopup = new MentionAutocompletePopup(this);
+    mentionPopup->hide();
+
     connect(textEdit, &ChatTextEdit::returnPressed, [this]() {
         if (sendBlocked)
             return;
@@ -325,8 +340,30 @@ MessageInput::MessageInput(QWidget *parent) : QWidget(parent)
         }
 
         // Only emit sendMessage if there's actual text or attachments
-        if (!txt.trimmed().isEmpty() || attachmentPanel->hasAttachments())
-            emit sendMessage(txt, attachmentPanel->attachments());
+        if (!txt.trimmed().isEmpty() || attachmentPanel->hasAttachments()) {
+            Discord::ApplicationCommand command;
+            QList<Discord::InteractionOptionValue> options;
+            // A slash command can't carry attachments; if files are queued, send
+            // as a normal message instead of silently dropping them. A bare "/"
+            // (no command name) is also a literal message.
+            const QString trimmed = txt.trimmed();
+            const bool slashLike = !attachmentPanel->hasAttachments()
+                                   && trimmed.startsWith(QLatin1Char('/'))
+                                   && trimmed.mid(1).length() > 0;
+            if (slashLike && tryParseSlashCommand(txt, &command, &options)) {
+                if (!hasAllRequiredOptions(command, options)) {
+                    emit slashCommandIncomplete(tr("Missing required option(s)."));
+                    return;
+                }
+                emit slashCommandSend(command, options);
+            } else if (slashLike) {
+                // Leading '/' that isn't a known command: don't leak it as a
+                // literal message (matches Discord's behavior).
+                emit slashCommandIncomplete(tr("Unknown command. Type / to see available commands."));
+            } else {
+                emit sendMessage(txt, attachmentPanel->attachments());
+            }
+        }
     });
 
     connect(textEdit, &ChatTextEdit::escapePressed, this, [this]() {
@@ -334,8 +371,19 @@ MessageInput::MessageInput(QWidget *parent) : QWidget(parent)
         attachmentPanel->clearAttachments();
     });
 
+    slashQueryDebounce = new QTimer(this);
+    slashQueryDebounce->setSingleShot(true);
+    slashQueryDebounce->setInterval(250);
+    connect(slashQueryDebounce, &QTimer::timeout, this, [this]() {
+        // Emit even when empty so the full (unfiltered) command list is restored.
+        emit slashQueryChanged(m_pendingSlashQuery);
+        m_pendingSlashQuery.clear();
+    });
+
     connect(textEdit->document(), &QTextDocument::contentsChanged, this, [this]() {
         updateEmojiPopup();
+        updateSlashPopup();
+        updateMentionPopup();
         updateMarkdownPreview();
         adjustHeight();
     });
@@ -350,6 +398,15 @@ MessageInput::MessageInput(QWidget *parent) : QWidget(parent)
     });
     connect(emojiPopup, &EmojiAutocompletePopup::emojiSelected, this, [this](const Core::EmojiCatalogItem &item) {
         insertEmojiCompletion(item);
+    });
+    connect(slashPopup, &SlashCommandPopup::commandSelected, this, [this](const Discord::ApplicationCommand &command) {
+        insertSlashCompletion(command);
+    });
+    connect(slashPopup, &SlashCommandPopup::suggestionSelected, this, [this](const QString &insertText) {
+        insertSlashArgument(insertText);
+    });
+    connect(mentionPopup, &MentionAutocompletePopup::mentionSelected, this, [this](const MentionItem &item) {
+        insertMentionCompletion(item);
     });
     connect(composeEmojiButton, &QToolButton::clicked, this, [this]() {
         const QString emoji = pickEmoji(this, tr("Emoji Picker"), tr("Search emoji"),
@@ -557,6 +614,54 @@ bool MessageInput::eventFilter(QObject *watched, QEvent *event)
         }
     }
 
+    if (event->type() == QEvent::KeyPress && slashPopup &&
+        slashPopup->isVisible()) {
+        auto *keyEvent = static_cast<QKeyEvent *>(event);
+        switch (keyEvent->key()) {
+        case Qt::Key_Return:
+        case Qt::Key_Enter:
+        case Qt::Key_Tab:
+            slashPopup->acceptCurrent();
+            hideSlashPopup();
+            return true;
+        case Qt::Key_Escape:
+            hideSlashPopup();
+            return true;
+        case Qt::Key_Up:
+            slashPopup->moveSelection(-1);
+            return true;
+        case Qt::Key_Down:
+            slashPopup->moveSelection(1);
+            return true;
+        default:
+            break;
+        }
+    }
+
+    if (event->type() == QEvent::KeyPress && mentionPopup &&
+        mentionPopup->isVisible()) {
+        auto *keyEvent = static_cast<QKeyEvent *>(event);
+        switch (keyEvent->key()) {
+        case Qt::Key_Return:
+        case Qt::Key_Enter:
+        case Qt::Key_Tab:
+            mentionPopup->acceptCurrent();
+            hideMentionPopup();
+            return true;
+        case Qt::Key_Escape:
+            hideMentionPopup();
+            return true;
+        case Qt::Key_Up:
+            mentionPopup->moveSelection(-1);
+            return true;
+        case Qt::Key_Down:
+            mentionPopup->moveSelection(1);
+            return true;
+        default:
+            break;
+        }
+    }
+
     }
     return QWidget::eventFilter(watched, event);
 }
@@ -568,6 +673,9 @@ void MessageInput::clear()
     clearPendingSticker();
     attachmentPanel->clearAttachments();
     hideEmojiPopup();
+    if (slashQueryDebounce)
+        slashQueryDebounce->stop();
+    m_pendingSlashQuery.clear();
     // Properly delete movies held via QPointer (MEDIUM #17)
     for (auto it = activeEmojiMovies.begin(); it != activeEmojiMovies.end(); ++it) {
         if (QMovie *m = it.value())
@@ -703,6 +811,9 @@ void MessageInput::showEmojiPopup()
 {
     if (!emojiPopup)
         return;
+    // Mutually exclusive with the other autocomplete popups.
+    hideSlashPopup();
+    hideMentionPopup();
     QTextCursor cursor = textEdit->textCursor();
     QRect cursorRect = textEdit->cursorRect(cursor);
     QPoint bottomLeft = textEdit->mapToGlobal(QPoint(cursorRect.left(), cursorRect.bottom() + 2));
@@ -770,6 +881,754 @@ void MessageInput::insertEmojiCompletion(const Core::EmojiCatalogItem &item)
 
     insertEmojiInline(item);
     hideEmojiPopup();
+}
+
+void MessageInput::showSlashPopup()
+{
+    if (!slashPopup)
+        return;
+    // Mutually exclusive with the mention/emoji popups so their key handling
+    // can't fight over Up/Down/Enter.
+    hideMentionPopup();
+    hideEmojiPopup();
+    QTextCursor cursor = textEdit->textCursor();
+    QRect cursorRect = textEdit->cursorRect(cursor);
+    QPoint bottomLeft = textEdit->mapToGlobal(QPoint(cursorRect.left(), cursorRect.bottom() + 2));
+    slashPopup->move(bottomLeft);
+    slashPopup->show();
+
+    QScreen *screen = QGuiApplication::screenAt(bottomLeft);
+    if (!screen && windowHandle())
+        screen = windowHandle()->screen();
+    if (!screen)
+        return;
+
+    const QRect screenGeo = screen->availableGeometry();
+    const QRect popupGeo = slashPopup->geometry();
+    if (!screenGeo.contains(popupGeo)) {
+        QPoint clamped = popupGeo.topLeft();
+        clamped.setX(qMax(screenGeo.left(), qMin(clamped.x(),
+                      screenGeo.right() - popupGeo.width())));
+        clamped.setY(qMax(screenGeo.top(), qMin(clamped.y(),
+                      screenGeo.bottom() - popupGeo.height())));
+        slashPopup->move(clamped);
+    }
+}
+
+void MessageInput::hideSlashPopup()
+{
+    if (slashPopup)
+        slashPopup->hide();
+}
+
+namespace {
+
+void collectSubCommandSuggestions(const QList<Discord::ApplicationCommandOption> &options,
+                                  QStringList *names, QStringList *descriptions,
+                                  QStringList *insertTexts)
+{
+    for (const auto &opt : options) {
+        const auto type = opt.type.get();
+        if (type != Discord::ApplicationCommandOptionType::SUB_COMMAND
+            && type != Discord::ApplicationCommandOptionType::SUB_COMMAND_GROUP)
+            continue;
+        names->append(opt.name.get());
+        descriptions->append(opt.description.hasValue() ? opt.description.get() : QString());
+        insertTexts->append(opt.name.get());
+    }
+}
+
+void suggestChoicesForOption(const QList<Discord::ApplicationCommandOption> &options,
+                             const QStringList &valueTokens, QStringList *names,
+                             QStringList *descriptions, QStringList *insertTexts)
+{
+    const int filled = valueTokens.size();
+    if (filled < 0 || filled >= options.size())
+        return;
+    const auto &opt = options[filled];
+    if (opt.type.get() != Discord::ApplicationCommandOptionType::STRING)
+        return;
+    if (!opt.choices.hasValue() || opt.choices->isEmpty())
+        return;
+    for (const auto &choice : *opt.choices) {
+        names->append(choice.name.get());
+        descriptions->append(QString());
+        insertTexts->append(choice.value.get());
+    }
+}
+
+// Determines argument suggestions for a command given the fully-typed tokens
+// after the command name (the partial token, if any, is excluded by the caller).
+void computeSlashSuggestions(const Discord::ApplicationCommand &cmd, const QStringList &tokens,
+                             QStringList *names, QStringList *descriptions,
+                             QStringList *insertTexts)
+{
+    using namespace Discord;
+    QList<ApplicationCommandOption> options;
+    if (cmd.options.hasValue())
+        options = *cmd.options;
+    if (options.isEmpty())
+        return;
+
+    // Sub-command groups: [group] [sub] ...
+    if (options.first().type.get() == ApplicationCommandOptionType::SUB_COMMAND_GROUP) {
+        if (tokens.isEmpty()) {
+            collectSubCommandSuggestions(options, names, descriptions, insertTexts);
+            return;
+        }
+        const ApplicationCommandOption *group = nullptr;
+        for (const auto &opt : options) {
+            if (opt.name.get() == tokens.first()) {
+                group = &opt;
+                break;
+            }
+        }
+        if (!group)
+            return;
+        if (tokens.size() == 1) {
+            if (group->options.hasValue())
+                collectSubCommandSuggestions(*group->options, names, descriptions, insertTexts);
+            return;
+        }
+        const ApplicationCommandOption *sub = nullptr;
+        if (group->options.hasValue()) {
+            for (const auto &opt : *group->options) {
+                if (opt.name.get() == tokens.at(1)) {
+                    sub = &opt;
+                    break;
+                }
+            }
+        }
+        if (!sub)
+            return;
+        options.clear();
+        if (sub->options.hasValue())
+            options = *sub->options;
+        suggestChoicesForOption(options, tokens.mid(2), names, descriptions, insertTexts);
+        return;
+    }
+
+    // Top-level sub-commands: [sub] ...
+    if (options.first().type.get() == ApplicationCommandOptionType::SUB_COMMAND) {
+        if (tokens.isEmpty()) {
+            collectSubCommandSuggestions(options, names, descriptions, insertTexts);
+            return;
+        }
+        const ApplicationCommandOption *sub = nullptr;
+        for (const auto &opt : options) {
+            if (opt.name.get() == tokens.first()) {
+                sub = &opt;
+                break;
+            }
+        }
+        if (!sub)
+            return;
+        options.clear();
+        if (sub->options.hasValue())
+            options = *sub->options;
+        suggestChoicesForOption(options, tokens.mid(1), names, descriptions, insertTexts);
+        return;
+    }
+
+    // No sub-commands: options are value-level.
+    suggestChoicesForOption(options, tokens, names, descriptions, insertTexts);
+}
+
+} // namespace
+
+void MessageInput::updateSlashPopup()
+{
+    if (!slashPopup)
+        return;
+
+    // Emoji autocomplete runs first in the update chain and has precedence: a
+    // `:name` token (e.g. inside slash args) should win over slash suggestions.
+    if (emojiPopup && emojiPopup->isVisible()) {
+        hideSlashPopup();
+        if (slashQueryDebounce)
+            slashQueryDebounce->stop();
+        m_pendingSlashQuery.clear();
+        return;
+    }
+
+    const QString text = textEdit->toPlainText();
+    if (!text.startsWith(QLatin1Char('/'))) {
+        hideSlashPopup();
+        if (slashQueryDebounce)
+            slashQueryDebounce->stop();
+        m_pendingSlashQuery.clear();
+        return;
+    }
+
+    const QTextCursor cursor = textEdit->textCursor();
+    const int position = cursor.position();
+    const QString afterSlash = text.mid(1, qMax(0, position - 1));
+
+    // Command-name phase: no space yet -> suggest matching commands.
+    if (!afterSlash.contains(QLatin1Char(' '))) {
+        static const QRegularExpression validPrefix(QStringLiteral("^[A-Za-z0-9_-]*$"));
+        if (!validPrefix.match(afterSlash).hasMatch()) {
+            hideSlashPopup();
+            if (slashQueryDebounce)
+                slashQueryDebounce->stop();
+            m_pendingSlashQuery.clear();
+            return;
+        }
+        slashPopup->setQuery(afterSlash);
+        if (slashPopup->hasResults())
+            showSlashPopup();
+        else
+            hideSlashPopup();
+
+        // Debounced server-side command search for better discoverability.
+        if (slashQueryDebounce) {
+            m_pendingSlashQuery = afterSlash;
+            slashQueryDebounce->start();
+        }
+        return;
+    }
+
+    // Argument phase: resolve the command and suggest sub-commands/choices.
+    const int spaceIdx = afterSlash.indexOf(QLatin1Char(' '));
+    const QString commandName = afterSlash.left(spaceIdx);
+    const QString argumentText = afterSlash.mid(spaceIdx + 1);
+
+    // The command name is settled; no more server-side command search.
+    if (slashQueryDebounce)
+        slashQueryDebounce->stop();
+    m_pendingSlashQuery.clear();
+
+    const Discord::ApplicationCommand *cmd = nullptr;
+    for (const auto &c : m_availableCommands) {
+        if (c.name.get().toCaseFolded() == commandName.toCaseFolded()) {
+            cmd = &c;
+            break;
+        }
+    }
+    if (!cmd) {
+        hideSlashPopup();
+        return;
+    }
+
+    QStringList rawTokens = argumentText.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    QString partialWord;
+    QStringList completeTokens = rawTokens;
+    if (!argumentText.isEmpty() && !argumentText.endsWith(QLatin1Char(' '))) {
+        partialWord = rawTokens.takeLast();
+        completeTokens = rawTokens;
+    }
+
+    QStringList names, descriptions, insertTexts;
+    computeSlashSuggestions(*cmd, completeTokens, &names, &descriptions, &insertTexts);
+    if (names.isEmpty()) {
+        hideSlashPopup();
+        return;
+    }
+
+    slashPopup->setSuggestions(names, descriptions, insertTexts, partialWord);
+    if (slashPopup->hasResults())
+        showSlashPopup();
+    else
+        hideSlashPopup();
+}
+
+void MessageInput::insertSlashCompletion(const Discord::ApplicationCommand &command)
+{
+    QTextCursor cursor = textEdit->textCursor();
+    const QString docText = textEdit->toPlainText();
+    const int docLen = docText.length();
+
+    // Replace the whole command-name token (which starts at index 1) regardless
+    // of where the cursor is, so clicking mid-name can't mangle it.
+    int tokenEnd = 1;
+    while (tokenEnd < docLen && !docText.at(tokenEnd).isSpace())
+        ++tokenEnd;
+
+    cursor.setPosition(0, QTextCursor::MoveAnchor);
+    cursor.setPosition(tokenEnd, QTextCursor::KeepAnchor);
+    cursor.insertText(QStringLiteral("/%1").arg(command.name.get()));
+    if (tokenEnd >= docLen)
+        cursor.insertText(QStringLiteral(" "));
+    hideSlashPopup();
+    textEdit->setFocus();
+}
+
+void MessageInput::insertSlashArgument(const QString &text)
+{
+    QTextCursor cursor = textEdit->textCursor();
+    const int position = cursor.position();
+    const QString docText = textEdit->toPlainText();
+
+    // Replace the partial argument token the user was typing (from after the
+    // last space up to the cursor), otherwise `/cmd su<Tab>` becomes `/cmd susub1 `.
+    int start = position;
+    while (start > 0 && !docText.at(start - 1).isSpace())
+        --start;
+    cursor.setPosition(start, QTextCursor::MoveAnchor);
+    cursor.setPosition(position, QTextCursor::KeepAnchor);
+    cursor.insertText(text + QLatin1Char(' '));
+
+    hideSlashPopup();
+    textEdit->setFocus();
+}
+
+void MessageInput::setAvailableCommands(const QList<Discord::ApplicationCommand> &commands)
+{
+    m_availableCommands = commands;
+    if (slashPopup)
+        slashPopup->setCommands(commands);
+    // Refresh the popup immediately so fetched results aren't one keystroke late.
+    updateSlashPopup();
+}
+
+namespace {
+
+QStringList tokenizeArguments(const QString &text)
+{
+    QStringList tokens;
+    QString current;
+    bool inQuotes = false;
+    QChar quoteChar;
+    for (const QChar c : text) {
+        if (inQuotes) {
+            if (c == quoteChar) {
+                inQuotes = false;
+            } else {
+                current.append(c);
+            }
+        } else if (c == QLatin1Char('"') || c == QLatin1Char('\'')) {
+            inQuotes = true;
+            quoteChar = c;
+        } else if (c.isSpace()) {
+            if (!current.isEmpty()) {
+                tokens.append(current);
+                current.clear();
+            }
+        } else {
+            current.append(c);
+        }
+    }
+    if (!current.isEmpty())
+        tokens.append(current);
+    return tokens;
+}
+
+Core::Snowflake extractMentionSnowflake(const QString &token, bool *ok)
+{
+    *ok = false;
+    QString inner = token;
+    if (token.startsWith(QLatin1Char('<')) && token.endsWith(QLatin1Char('>'))) {
+        inner = token.mid(1, token.length() - 2);
+        if (inner.startsWith(QLatin1Char('@')) && inner.length() > 1 && inner.at(1) == QLatin1Char('&'))
+            inner = inner.mid(2);
+        else if (inner.startsWith(QLatin1Char('@')) || inner.startsWith(QLatin1Char('#')))
+            inner = inner.mid(1);
+    }
+    bool valid = false;
+    const quint64 id = inner.toULongLong(&valid);
+    if (valid && id != 0) {
+        *ok = true;
+        return Core::Snowflake(id);
+    }
+    return {};
+}
+
+QList<Discord::InteractionOptionValue> parseCommandOptions(
+        const QList<Discord::ApplicationCommandOption> &options, QStringList &tokens)
+{
+    using namespace Discord;
+    QList<InteractionOptionValue> result;
+    if (options.isEmpty())
+        return result;
+
+    const auto firstType = options.first().type.get();
+
+    // Sub-command group: match group name then sub-command name.
+    if (firstType == ApplicationCommandOptionType::SUB_COMMAND_GROUP) {
+        if (tokens.isEmpty())
+            return result;
+        const QString groupName = tokens.takeFirst();
+        const ApplicationCommandOption *group = nullptr;
+        for (const auto &opt : options) {
+            if (opt.name.get() == groupName) {
+                group = &opt;
+                break;
+            }
+        }
+        if (!group)
+            return result;
+
+        InteractionOptionValue gv;
+        gv.type = static_cast<int>(ApplicationCommandOptionType::SUB_COMMAND_GROUP);
+        gv.name = group->name.get();
+
+        if (!tokens.isEmpty() && group->options.hasValue()) {
+            const QString subName = tokens.takeFirst();
+            for (const auto &sub : *group->options) {
+                if (sub.name.get() == subName) {
+                    InteractionOptionValue sv;
+                    sv.type = static_cast<int>(ApplicationCommandOptionType::SUB_COMMAND);
+                    sv.name = sub.name.get();
+                    if (sub.options.hasValue())
+                        sv.options = parseCommandOptions(*sub.options, tokens);
+                    gv.options.append(sv);
+                    break;
+                }
+            }
+        }
+        result.append(gv);
+        return result;
+    }
+
+    // Top-level sub-commands.
+    if (firstType == ApplicationCommandOptionType::SUB_COMMAND) {
+        if (tokens.isEmpty())
+            return result;
+        const QString subName = tokens.takeFirst();
+        for (const auto &opt : options) {
+            if (opt.name.get() == subName) {
+                InteractionOptionValue sv;
+                sv.type = static_cast<int>(ApplicationCommandOptionType::SUB_COMMAND);
+                sv.name = opt.name.get();
+                if (opt.options.hasValue())
+                    sv.options = parseCommandOptions(*opt.options, tokens);
+                result.append(sv);
+                break;
+            }
+        }
+        return result;
+    }
+
+    // Regular options, consumed in declaration order.
+    const int count = options.size();
+    for (int i = 0; i < count; ++i) {
+        const auto &opt = options[i];
+        const auto type = opt.type.get();
+        if (type == ApplicationCommandOptionType::SUB_COMMAND
+            || type == ApplicationCommandOptionType::SUB_COMMAND_GROUP)
+            continue;
+        if (tokens.isEmpty())
+            break;
+
+        InteractionOptionValue v;
+        v.type = static_cast<int>(type);
+        v.name = opt.name.get();
+
+        switch (type) {
+        case ApplicationCommandOptionType::STRING: {
+            const bool isLast = (i == count - 1);
+            if (isLast && tokens.size() > 1) {
+                v.value = tokens.join(QLatin1Char(' '));
+                tokens.clear();
+            } else {
+                v.value = tokens.takeFirst();
+            }
+            break;
+        }
+        case ApplicationCommandOptionType::INTEGER: {
+            static const QRegularExpression intRe(QStringLiteral("^-?\\d+$"));
+            const QString tok = tokens.first();
+            if (!intRe.match(tok).hasMatch()) {
+                tokens.removeFirst();
+                continue;
+            }
+            tokens.removeFirst();
+            v.value = static_cast<double>(tok.toLongLong());
+            break;
+        }
+        case ApplicationCommandOptionType::NUMBER: {
+            static const QRegularExpression numRe(QStringLiteral("^-?\\d+(\\.\\d+)?$"));
+            const QString tok = tokens.first();
+            if (!numRe.match(tok).hasMatch()) {
+                tokens.removeFirst();
+                continue;
+            }
+            tokens.removeFirst();
+            v.value = tok.toDouble();
+            break;
+        }
+        case ApplicationCommandOptionType::BOOLEAN: {
+            const QString t = tokens.first().toCaseFolded();
+            if (t == QLatin1String("true") || t == QLatin1String("yes") || t == QLatin1String("1")) {
+                tokens.removeFirst();
+                v.value = true;
+            } else if (t == QLatin1String("false") || t == QLatin1String("no") || t == QLatin1String("0")) {
+                tokens.removeFirst();
+                v.value = false;
+            } else {
+                // Invalid token: consume it and skip this option, matching the
+                // INTEGER/NUMBER behavior, so it can't bleed into the next option.
+                tokens.removeFirst();
+                continue;
+            }
+            break;
+        }
+        case ApplicationCommandOptionType::USER:
+        case ApplicationCommandOptionType::ROLE:
+        case ApplicationCommandOptionType::MENTIONABLE:
+        case ApplicationCommandOptionType::CHANNEL: {
+            const QString tok = tokens.takeFirst();
+            bool ok = false;
+            const Core::Snowflake id = extractMentionSnowflake(tok, &ok);
+            v.value = ok ? id.toString() : tok;
+            break;
+        }
+        default:
+            v.value = tokens.takeFirst();
+            break;
+        }
+
+        result.append(v);
+    }
+
+    return result;
+}
+
+bool optionValueFilled(const Discord::InteractionOptionValue &v)
+{
+    // A matched sub-command/group is "filled" by being selected; required nested
+    // values are checked by hasAllRequiredOptionsImpl on opt.options.
+    if (v.type == static_cast<int>(Discord::ApplicationCommandOptionType::SUB_COMMAND)
+        || v.type == static_cast<int>(Discord::ApplicationCommandOptionType::SUB_COMMAND_GROUP))
+        return true;
+    return v.isScalar();
+}
+
+bool hasAllRequiredOptionsImpl(const QList<Discord::ApplicationCommandOption> &options,
+                               const QList<Discord::InteractionOptionValue> &parsed)
+{
+    for (const auto &opt : options) {
+        const auto type = opt.type.get();
+        const bool required = (type == Discord::ApplicationCommandOptionType::SUB_COMMAND
+                               || type == Discord::ApplicationCommandOptionType::SUB_COMMAND_GROUP)
+                                      ? true
+                                      : opt.required.getOr(false);
+        if (!required)
+            continue;
+
+        bool filled = false;
+        for (const auto &v : parsed) {
+            if (v.name != opt.name.get())
+                continue;
+            if (!optionValueFilled(v)) {
+                filled = false;
+                break;
+            }
+            if (v.type == static_cast<int>(Discord::ApplicationCommandOptionType::SUB_COMMAND)
+                || v.type == static_cast<int>(Discord::ApplicationCommandOptionType::SUB_COMMAND_GROUP)) {
+                const QList<Discord::ApplicationCommandOption> subOptions = opt.options.getOr({});
+                if (!hasAllRequiredOptionsImpl(subOptions, v.options)) {
+                    filled = false;
+                    break;
+                }
+            }
+            filled = true;
+            break;
+        }
+        if (!filled)
+            return false;
+    }
+    return true;
+}
+
+bool hasAllRequiredOptions(const Discord::ApplicationCommand &command,
+                           const QList<Discord::InteractionOptionValue> &parsed)
+{
+    const QList<Discord::ApplicationCommandOption> options = command.options.getOr({});
+    return hasAllRequiredOptionsImpl(options, parsed);
+}
+
+} // namespace
+
+bool MessageInput::tryParseSlashCommand(const QString &text, Discord::ApplicationCommand *command,
+                                        QList<Discord::InteractionOptionValue> *options) const
+{
+    // A slash command must start at column 0 (matching the popup's trigger
+    // condition); leading whitespace means a normal message.
+    if (!text.startsWith(QLatin1Char('/')))
+        return false;
+    const QString trimmed = text;
+
+    int space = -1;
+    for (int i = 1; i < trimmed.length(); ++i) {
+        if (trimmed.at(i).isSpace()) {
+            space = i;
+            break;
+        }
+    }
+    const QString name = (space < 0) ? trimmed.mid(1) : trimmed.mid(1, space - 1);
+    const QString rest = (space < 0) ? QString() : trimmed.mid(space + 1);
+
+    const Discord::ApplicationCommand *match = nullptr;
+    for (const auto &cmd : m_availableCommands) {
+        if (cmd.name.get().toCaseFolded() == name.toCaseFolded()) {
+            match = &cmd;
+            break;
+        }
+    }
+    if (!match)
+        return false;
+
+    *command = *match;
+
+    QStringList tokens = tokenizeArguments(rest);
+    QList<Discord::ApplicationCommandOption> cmdOptions;
+    if (match->options.hasValue())
+        cmdOptions = *match->options;
+    *options = parseCommandOptions(cmdOptions, tokens);
+    return true;
+}
+
+QString MessageInput::currentMentionPrefix(int *startPosition, QChar *trigger) const
+{
+    QTextCursor cursor = textEdit->textCursor();
+    const int position = cursor.position();
+    const QString text = textEdit->toPlainText();
+
+    int triggerPos = -1;
+    QChar trig;
+    for (int i = position - 1; i >= 0; --i) {
+        const QChar c = text.at(i);
+        if (c == '@' || c == '#') {
+            if (i == 0 || text.at(i - 1).isSpace()) {
+                triggerPos = i;
+                trig = c;
+                break;
+            }
+        }
+    }
+    if (triggerPos < 0)
+        return {};
+
+    const QString prefix = text.mid(triggerPos + 1, position - triggerPos - 1);
+    static const QRegularExpression validPrefix(QStringLiteral("^[A-Za-z0-9_-]*$"));
+    if (!validPrefix.match(prefix).hasMatch())
+        return {};
+
+    if (startPosition)
+        *startPosition = triggerPos;
+    if (trigger)
+        *trigger = trig;
+    return prefix;
+}
+
+void MessageInput::showMentionPopup()
+{
+    if (!mentionPopup)
+        return;
+    // Mutually exclusive with the slash/emoji popups so their key handling
+    // can't fight.
+    hideSlashPopup();
+    hideEmojiPopup();
+    QTextCursor cursor = textEdit->textCursor();
+    QRect cursorRect = textEdit->cursorRect(cursor);
+    QPoint bottomLeft = textEdit->mapToGlobal(QPoint(cursorRect.left(), cursorRect.bottom() + 2));
+    mentionPopup->move(bottomLeft);
+    mentionPopup->show();
+
+    QScreen *screen = QGuiApplication::screenAt(bottomLeft);
+    if (!screen && windowHandle())
+        screen = windowHandle()->screen();
+    if (!screen)
+        return;
+
+    const QRect screenGeo = screen->availableGeometry();
+    const QRect popupGeo = mentionPopup->geometry();
+    if (!screenGeo.contains(popupGeo)) {
+        QPoint clamped = popupGeo.topLeft();
+        clamped.setX(qMax(screenGeo.left(), qMin(clamped.x(),
+                      screenGeo.right() - popupGeo.width())));
+        clamped.setY(qMax(screenGeo.top(), qMin(clamped.y(),
+                      screenGeo.bottom() - popupGeo.height())));
+        mentionPopup->move(clamped);
+    }
+}
+
+void MessageInput::hideMentionPopup()
+{
+    if (mentionPopup)
+        mentionPopup->hide();
+}
+
+void MessageInput::updateMentionPopup()
+{
+    int startPosition = -1;
+    QChar trigger;
+    const QString prefix = currentMentionPrefix(&startPosition, &trigger);
+    if (trigger.isNull()) {
+        hideMentionPopup();
+        return;
+    }
+    if (!mentionPopup)
+        return;
+
+    // Emoji has precedence when both triggers could apply (e.g. `:sm` inside a
+    // message that also parses as a slash command).
+    if (emojiPopup && emojiPopup->isVisible()) {
+        hideMentionPopup();
+        return;
+    }
+
+    // Filter the available mentionables by the trigger kind: '@' matches
+    // users/roles, '#' matches channels.
+    QList<MentionItem> filtered;
+    for (const auto &item : m_availableMentions) {
+        if (trigger == '#') {
+            if (item.kind == MentionItem::Kind::Channel)
+                filtered.append(item);
+        } else if (item.kind != MentionItem::Kind::Channel) {
+            filtered.append(item);
+        }
+    }
+    mentionPopup->setItems(filtered);
+    mentionPopup->setQuery(prefix);
+
+    if (mentionPopup->hasResults()) {
+        showMentionPopup();
+    } else {
+        hideMentionPopup();
+    }
+}
+
+void MessageInput::insertMentionCompletion(const MentionItem &item)
+{
+    int startPosition = -1;
+    QChar trigger;
+    [[maybe_unused]] const QString unusedPrefix = currentMentionPrefix(&startPosition, &trigger);
+    if (trigger.isNull()) {
+        // The mention context disappeared (e.g. the trigger was deleted); hide
+        // the popup so it doesn't linger with stale items.
+        hideMentionPopup();
+        return;
+    }
+
+    QString text;
+    switch (item.kind) {
+    case MentionItem::Kind::Role:
+        text = QStringLiteral("<@&%1>").arg(item.id.toString());
+        break;
+    case MentionItem::Kind::Channel:
+        text = QStringLiteral("<#%1>").arg(item.id.toString());
+        break;
+    case MentionItem::Kind::User:
+    default:
+        text = QStringLiteral("<@%1>").arg(item.id.toString());
+        break;
+    }
+
+    QTextCursor cursor = textEdit->textCursor();
+    cursor.setPosition(startPosition, QTextCursor::MoveAnchor);
+    cursor.setPosition(textEdit->textCursor().position(), QTextCursor::KeepAnchor);
+    textEdit->setTextCursor(cursor);
+    cursor.insertText(text + QStringLiteral(" "));
+    hideMentionPopup();
+}
+
+void MessageInput::setAvailableMentions(const QList<MentionItem> &items)
+{
+    m_availableMentions = items;
+    if (mentionPopup)
+        mentionPopup->setItems(items);
 }
 
 void MessageInput::refreshEmojiCompleter()

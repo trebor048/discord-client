@@ -1,6 +1,7 @@
 #include "ChannelTreeView.hpp"
 #include "ChannelFilterProxyModel.hpp"
 #include "ChannelTreeModel.hpp"
+#include "Core/Settings.hpp"
 
 #include <QApplication>
 #include <QColorDialog>
@@ -292,6 +293,15 @@ void ChannelTreeView::contextMenuEvent(QContextMenuEvent *event)
         Core::Snowflake accountId = findAccountIdForIndex(sourceIndex);
 
         menu.addSeparator();
+        const bool serverMuted = Core::Settings::instance().isServerMuted(
+                Core::Snowflake(sourceIndex.data(ChannelTreeModel::IdRole).toULongLong()));
+        QAction *muteServerAction = menu.addAction(serverMuted ? tr("Unmute Server")
+                                                               : tr("Mute Server"));
+        connect(muteServerAction, &QAction::triggered, this, [sourceIndex, serverMuted]() {
+            const Core::Snowflake guildId(sourceIndex.data(ChannelTreeModel::IdRole).toULongLong());
+            Core::Settings::instance().setServerMuted(guildId, !serverMuted);
+        });
+
         QAction *settingsAction = menu.addAction(tr("Server Settings"));
         connect(settingsAction, &QAction::triggered, this, [this, sourceIndex]() {
             Core::Snowflake accountId = findAccountIdForIndex(sourceIndex);
@@ -309,6 +319,41 @@ void ChannelTreeView::contextMenuEvent(QContextMenuEvent *event)
         });
     }
 
+    // "Listen to toasts" — add/remove this channel (or guild) from the notify list.
+    const bool isNotifyable = (nodeType == ChannelNode::Type::Channel
+                               || nodeType == ChannelNode::Type::DMChannel
+                               || nodeType == ChannelNode::Type::VoiceChannel
+                               || nodeType == ChannelNode::Type::Thread
+                               || nodeType == ChannelNode::Type::Server);
+    if (isNotifyable) {
+        Core::Snowflake notifyId(sourceIndex.data(ChannelTreeModel::IdRole).toULongLong());
+        menu.addSeparator();
+        const bool listened = m_notifyListContains ? m_notifyListContains(notifyId) : false;
+        QAction *notifyAction = menu.addAction(
+                listened ? tr("Stop listening to toasts") : tr("Listen to toasts"));
+        connect(notifyAction, &QAction::triggered, this, [this, notifyId]() {
+            emit notifyListToggleRequested(notifyId);
+        });
+
+        const bool ignored = m_ignoreEntitiesContains ? m_ignoreEntitiesContains(notifyId) : false;
+        QAction *ignoreAction = menu.addAction(
+                ignored ? tr("Unignore toasts") : tr("Ignore toasts"));
+        connect(ignoreAction, &QAction::triggered, this, [this, notifyId]() {
+            emit ignoreToggleRequested(notifyId);
+        });
+
+        // Local mute toggle (independent of server-side mute settings). Only
+        // meaningful for guild channels/threads (DM/voice have no local-mute
+        // path in the notification decision).
+        if (nodeType == ChannelNode::Type::Channel || nodeType == ChannelNode::Type::Thread) {
+            const bool muted = m_channelMutedContains ? m_channelMutedContains(notifyId) : false;
+            QAction *muteAction = menu.addAction(muted ? tr("Unmute Channel") : tr("Mute Channel"));
+            connect(muteAction, &QAction::triggered, this, [this, notifyId]() {
+                emit channelMuteToggleRequested(notifyId);
+            });
+        }
+    }
+
     QAction *markReadAction = menu.addAction(tr("Mark As Read"));
     markReadAction->setEnabled(isUnread || mentionCount > 0);
 
@@ -317,6 +362,21 @@ void ChannelTreeView::contextMenuEvent(QContextMenuEvent *event)
     });
 
     menu.exec(event->globalPos());
+}
+
+void ChannelTreeView::setNotifyListContains(std::function<bool(Core::Snowflake)> provider)
+{
+    m_notifyListContains = std::move(provider);
+}
+
+void ChannelTreeView::setIgnoreEntitiesContains(std::function<bool(Core::Snowflake)> provider)
+{
+    m_ignoreEntitiesContains = std::move(provider);
+}
+
+void ChannelTreeView::setChannelMutedContains(std::function<bool(Core::Snowflake)> provider)
+{
+    m_channelMutedContains = std::move(provider);
 }
 
 void ChannelTreeView::setAccountVoiceChannel(Core::Snowflake accountId, Core::Snowflake channelId)

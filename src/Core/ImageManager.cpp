@@ -12,11 +12,55 @@
 #include <QImageReader>
 #include <QDir>
 #include <QFileInfo>
+#include <QSettings>
 
 #include "Logging.hpp"
 
 namespace Acheron {
 namespace Core {
+
+// ---------------------------------------------------------------------------
+// Animated image format detection
+// ---------------------------------------------------------------------------
+
+// Formats that can animate through QMovie when the runtime Qt imageformats
+// plugins support them. Anything else (png, jpeg, ...) renders as a static
+// image even if it is actually animated underneath.
+static bool animatedFormatSupported(const QByteArray &format)
+{
+    static const QSet<QByteArray> animated = []() {
+        QSet<QByteArray> supported;
+        const QList<QByteArray> formats = QImageReader::supportedImageFormats();
+        for (const QByteArray &f : formats) {
+            if (f == QByteArrayLiteral("gif") || f == QByteArrayLiteral("webp")
+                || f == QByteArrayLiteral("avif")) {
+                supported.insert(f);
+            }
+        }
+        return supported;
+    }();
+    return animated.contains(format);
+}
+
+// Maps a content-type header / URL suffix to one of the animated-capable
+// formats, or an empty QByteArray when neither names gif/webp/avif.
+static QByteArray animatedFormatFrom(const QUrl &url, const QString &mime)
+{
+    const QString mt = mime.section(QLatin1Char(';'), 0, 0).trimmed().toLower();
+    if (mt == QStringLiteral("image/gif"))
+        return QByteArrayLiteral("gif");
+    if (mt == QStringLiteral("image/webp"))
+        return QByteArrayLiteral("webp");
+    if (mt == QStringLiteral("image/avif"))
+        return QByteArrayLiteral("avif");
+
+    const QString ext = url.path().section(QLatin1Char('.'), -1).toLower();
+    if (ext == QStringLiteral("gif") || ext == QStringLiteral("webp")
+        || ext == QStringLiteral("avif")) {
+        return ext.toUtf8();
+    }
+    return QByteArray();
+}
 
 // ---------------------------------------------------------------------------
 // GifAnimation
@@ -76,6 +120,29 @@ void GifAnimation::load(const QUrl &url, int containerWidth)
         }
 
         QByteArray data = reply->readAll();
+        const QString contentType =
+                reply->header(QNetworkRequest::ContentTypeHeader).toString();
+
+        // Only payloads whose URL/mime (or sniffed container) identify an
+        // animated-capable format (.gif/.webp/.avif) with runtime plugin
+        // support go through QMovie. Everything else — including animated
+        // formats the deployed plugins cannot decode — renders statically.
+        const bool animatedCapable =
+                ImageManager::isSupportedAnimatedImage(m_url, contentType)
+                || animatedFormatSupported(QImageReader::imageFormat(data));
+
+        if (!animatedCapable) {
+            QImage staticImage = QImage::fromData(data);
+            if (staticImage.isNull()) {
+                qCWarning(LogCore) << "Undecodable GIF/image data from" << m_url;
+                emit failed();
+                return;
+            }
+            m_staticImage = staticImage;
+            m_displaySize = computeDisplaySize(staticImage.size());
+            emit ready();
+            return;
+        }
 
         m_buffer = new QBuffer(this);
         m_buffer->setData(data);
@@ -84,19 +151,20 @@ void GifAnimation::load(const QUrl &url, int containerWidth)
         m_movie = new QMovie(this);
         m_movie->setDevice(m_buffer);
         // Deliberately no setFormat(): sniff the actual container so animated
-        // webp (and any other supported format) isn't rejected as "not gif".
-        // Klipy/media-proxy thumbnails are frequently served as webp.
+        // webp/avif (and any other supported format) isn't rejected as "not
+        // gif". Klipy/media-proxy thumbnails are frequently served as webp.
 
-        if (!m_movie->isValid() || m_movie->frameCount() == 0) {
-            // Not an animation QMovie understands — it may still be a static
-            // poster image (e.g. a static webp thumbnail for a gifv embed).
-            // Show that instead of failing into a gray box.
-            QImage staticImage = QImage::fromData(data);
+        if (!m_movie->isValid()) {
+            // The payload claims an animated-capable format but QMovie could
+            // not decode it (e.g. an unsupported or corrupt container); it may
+            // still be a static poster image (e.g. a static webp thumbnail for
+            // a gifv embed). Show that instead of failing into a gray box.
             m_movie->deleteLater();
             m_movie = nullptr;
             m_buffer->deleteLater();
             m_buffer = nullptr;
 
+            QImage staticImage = QImage::fromData(data);
             if (staticImage.isNull()) {
                 qCWarning(LogCore) << "Undecodable GIF/image data from" << m_url;
                 emit failed();
@@ -117,8 +185,10 @@ void GifAnimation::load(const QUrl &url, int containerWidth)
 
         emit ready();
 
-        // If we were asked to play before data arrived, start now
-        if (m_playing)
+        // If we were asked to play before data arrived, start now — unless the
+        // user disabled GIF/webp autoplay ("ui/gifAutoplay"), in which case the
+        // first frame is shown statically until playback is enabled.
+        if (m_playing && ImageManager::gifAutoplayEnabled())
             m_movie->start();
     });
 }
@@ -197,7 +267,10 @@ void GifAnimation::play()
         load(m_url, m_containerWidth);
         return;
     }
-    if (m_movie)
+    // Honor the autoplay setting: with "ui/gifAutoplay" off the movie stays on
+    // its first frame until the setting is re-enabled (play() is re-invoked by
+    // views on every repaint, so flipping the setting back on resumes it).
+    if (m_movie && ImageManager::gifAutoplayEnabled())
         m_movie->start();
 }
 
@@ -255,6 +328,17 @@ void GifAnimation::onMovieFrameChanged(int frameNum)
 // ---------------------------------------------------------------------------
 // ImageManager GIF methods
 // ---------------------------------------------------------------------------
+
+bool ImageManager::isSupportedAnimatedImage(const QUrl &url, const QString &mime)
+{
+    const QByteArray format = animatedFormatFrom(url, mime);
+    return !format.isEmpty() && animatedFormatSupported(format);
+}
+
+bool ImageManager::gifAutoplayEnabled()
+{
+    return QSettings().value(QStringLiteral("ui/gifAutoplay"), true).toBool();
+}
 
 GifAnimation *ImageManager::createGifAnimation(const QUrl &url, int containerWidth)
 {

@@ -21,12 +21,44 @@ inline constexpr auto IdCard = "id-card";
 inline constexpr auto Lock = "lock";
 inline constexpr auto MessageCircle = "message-circle";
 inline constexpr auto Pencil = "pencil";
+inline constexpr auto Settings = "settings";
 inline constexpr auto Spool = "spool";
 inline constexpr auto X = "x";
 } // namespace Name
 
 QPixmap pixmap(const QString &name, int px, const QColor &color, qreal dpr = 1.0);
 QPixmap pixmap(const QString &name, int px, Token token, qreal dpr = 1.0);
+
+// Device presence glyph (monitor/smartphone/globe) colored by the user's status
+// (green=online, yellow=idle, red=dnd, gray=offline). Returns a null pixmap
+// when `device` is empty (caller should render a status dot instead).
+inline QPixmap presencePixmap(const QString &status, const QString &device,
+                              const QString &deviceStatus, int px, qreal dpr = 1.0)
+{
+    const QString colorStatus = deviceStatus.isEmpty() ? status : deviceStatus;
+    QColor color;
+    if (colorStatus == QLatin1String("online"))
+        color = QColor(0x23, 0xA5, 0x5A);
+    else if (colorStatus == QLatin1String("idle"))
+        color = QColor(0xF0, 0xB2, 0x32);
+    else if (colorStatus == QLatin1String("dnd"))
+        color = QColor(0xF2, 0x3F, 0x43);
+    else
+        color = QColor(0x80, 0x84, 0x8E); // offline / unknown
+
+    if (device.isEmpty())
+        return {};
+
+    QString iconName;
+    if (device == QLatin1String("monitor") || device == QLatin1String("desktop"))
+        iconName = QStringLiteral("monitor");
+    else if (device == QLatin1String("mobile") || device == QLatin1String("phone"))
+        iconName = QStringLiteral("smartphone");
+    else
+        iconName = QStringLiteral("globe");
+
+    return pixmap(iconName, px, color, dpr);
+}
 
 QIcon icon(const QString &name, const QColor &color);
 QIcon icon(const QString &name, Token token);

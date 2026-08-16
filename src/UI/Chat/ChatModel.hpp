@@ -131,6 +131,28 @@ struct ReactionData
     QColor burstTintColor;
 };
 
+struct PollAnswerData
+{
+    int id = 0;
+    QString text;
+    QString emojiName; // unicode glyph for built-in emoji, else the custom emoji name
+    Core::Snowflake emojiId;
+    int count = 0;
+    double percent = 0.0; // share of total votes, 0..100
+    bool me = false;      // current user voted for this answer
+};
+
+struct PollData
+{
+    QString question;
+    QList<PollAnswerData> answers;
+    bool allowMultiselect = false;
+    bool isFinalized = false;
+    bool isExpired = false;
+    QList<int> myAnswers; // answer ids the current user voted for
+    int totalVotes = 0;
+};
+
 struct EmbedData
 {
     EmbedType type = EmbedType::Rich; // should this be default idk
@@ -209,6 +231,10 @@ inline DocCacheKey embedFieldValueDocKey(Snowflake msgId, int embedIdx, int fiel
 {
     return { msgId, (embedIdx + 1) * 1000 + 100 + fieldIdx * 2 + 1 };
 }
+inline DocCacheKey pollQuestionDocKey(Snowflake msgId)
+{
+    return { msgId, 9000 };
+}
 
 class ChatModel : public QAbstractListModel
 {
@@ -237,6 +263,7 @@ public:
         ReactionsRole,
         StickersRole,
         IsSystemMessageRole,
+        PollRole,
     };
 
     using AvatarUrlResolver = std::function<QUrl(const Discord::User &)>;
@@ -247,6 +274,9 @@ public:
 
     using RoleColorResolver = std::function<QColor(Core::Snowflake userId, Core::Snowflake guildId)>;
     void setRoleColorResolver(RoleColorResolver resolver);
+
+    using ChannelNameResolver = std::function<QString(Core::Snowflake channelId)>;
+    void setChannelNameResolver(ChannelNameResolver resolver);
 
     int rowCount(const QModelIndex &parent = {}) const override;
     QVariant data(const QModelIndex &index, int role) const override;
@@ -278,6 +308,13 @@ public:
     /// True if the ImageManager fetch for this url+size definitively failed;
     /// the delegate paints an error state instead of the gray placeholder.
     [[nodiscard]] bool hasImageFailed(const QUrl &url, const QSize &size) const;
+
+signals:
+    /// A poll answer was clicked in the message view. `answerIds` holds the
+    /// answer id(s) to vote for. The view should route this to Client::votePoll;
+    /// the resulting MESSAGE_UPDATE refreshes the row's poll results.
+    void pollVoteRequested(Core::Snowflake channelId, Core::Snowflake messageId,
+                           const QList<int> &answerIds);
 
 public slots:
     void setActiveChannel(Snowflake channelId, Snowflake guildId = Snowflake::Invalid);
@@ -318,6 +355,7 @@ private:
 
     QList<AttachmentData> buildAttachmentData(const Discord::Message &msg) const;
     QList<ReactionData> buildReactionData(const Discord::Message &msg) const;
+    PollData buildPollData(const Discord::Message &msg) const;
     void warmCachesForMessage(const Discord::Message &msg);
     void ensureStickerMoviesForRow(int row, const QList<StickerData> &stickers);
 
@@ -362,6 +400,7 @@ private:
     AvatarUrlResolver avatarUrlResolver;
     DisplayNameResolver displayNameResolver;
     RoleColorResolver roleColorResolver;
+    ChannelNameResolver channelNameResolver;
 
     mutable AvatarRequestTracker<QPersistentModelIndex> avatarTracker;
     QSet<QString> pendingNonces;
@@ -402,3 +441,6 @@ Q_DECLARE_METATYPE(Acheron::EmbedData)
 Q_DECLARE_METATYPE(QList<Acheron::EmbedData>)
 Q_DECLARE_METATYPE(Acheron::ReactionData)
 Q_DECLARE_METATYPE(QList<Acheron::ReactionData>)
+Q_DECLARE_METATYPE(Acheron::PollAnswerData)
+Q_DECLARE_METATYPE(Acheron::PollData)
+Q_DECLARE_METATYPE(QList<Acheron::PollAnswerData>)

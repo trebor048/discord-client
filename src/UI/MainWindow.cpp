@@ -8,6 +8,8 @@
 #include <QStatusBar>
 #include <QTimer>
 
+#include <memory>
+
 #include "Chat/ChatModel.hpp"
 #include "Chat/ChatDelegate.hpp"
 #include "Chat/ChatView.hpp"
@@ -53,10 +55,12 @@
 #include "Dialogs/GuildSettingsDialog.hpp"
 #include "Discord/CdnUrls.hpp"
 #include "Core/ImageManager.hpp"
+#include "Core/Settings.hpp"
 #include "Core/MemberListManager.hpp"
 #include "Core/Session.hpp"
 #include "Core/Theme/Manager.hpp"
 #include "Core/AnimationUtils.hpp"
+#include "UI/Widgets/MePanel.hpp"
 #ifndef ACHERON_NO_VOICE
 #include "Core/AV/VoiceManager.hpp"
 #include "Core/AV/PushToTalkListener.hpp"
@@ -99,9 +103,25 @@ MainWindow::MainWindow(Session *session, QWidget *parent) : QMainWindow(parent),
 
     chatModel->setRoleColorResolver(
             [this](Snowflake userId, Snowflake guildId) { return resolveRoleColor(userId, guildId); });
+    chatModel->setChannelNameResolver(
+            [this](Snowflake channelId) -> QString {
+                if (!currentInstance)
+                    return {};
+                auto channel = currentInstance->getChannel(channelId);
+                return channel ? channel->name.getOr(QString()) : QString();
+            });
 
     typingTracker = new TypingTracker(this);
     memberListModel = new MemberListModel(session->getImageManager(), this);
+    memberListModel->setPresenceProvider([this](Snowflake userId)
+                                         -> std::optional<Core::ClientInstance::UserPresence> {
+        if (!currentInstance)
+            return std::nullopt;
+        return currentInstance->presence(userId);
+    });
+    memberListModel->setRoleColorProvider([this](Snowflake userId, Snowflake guildId) {
+        return resolveRoleColor(userId, guildId);
+    });
 
     channelListMode = (QSettings().value("ui/channelListMode").toString() == "classic")
                               ? ChannelListMode::Classic
@@ -307,6 +327,9 @@ void MainWindow::switchActiveInstance(Core::ClientInstance *newInstance)
 
     memberListModel->setManager(currentInstance->memberList());
 
+    if (mePanel)
+        mePanel->setInstance(currentInstance, session->getImageManager());
+
     forumModel->setManager(currentInstance->forums());
     trackInstanceConnection(currentInstance,
                             connect(currentInstance->forums(), &Core::ForumManager::loadingChanged, this,
@@ -494,8 +517,35 @@ void MainWindow::setupPermanentConnections(Core::ClientInstance *instance)
     instancesSignalsConnected.insert(instance->accountId());
 
     connect(instance, &QObject::destroyed, this,
-            [this, accountId = instance->accountId()]() {
+            [this, accountId = instance->accountId(), instance]() {
                 instancesSignalsConnected.remove(accountId);
+                // `currentInstance` is a raw pointer; clear it when the instance
+                // dies so the many `if (currentInstance)` guards don't deref
+                // freed memory (e.g. after a nested event loop such as a modal
+                // dialog processes a deleteLater during account teardown).
+                // Comparing captured addresses is safe (no deref).
+                if (currentInstance == instance)
+                    currentInstance = nullptr;
+                // The instance owned the MemberListManager / presence data the
+                // model and me panel reference; rebind so they don't dangle.
+                memberListModel->setManager(nullptr);
+                if (mePanel)
+                    mePanel->setInstance(nullptr, session->getImageManager());
+            });
+
+    // Refresh the member list when a user's presence changes.
+    connect(instance, &Core::ClientInstance::userPresenceChanged, this,
+            [this](Snowflake userId) {
+                if (currentInstance != qobject_cast<Core::ClientInstance *>(sender()))
+                    return;
+                memberListModel->notifyPresenceChanged(userId);
+            });
+
+    // Keep the bottom-left me panel in sync with the active instance.
+    connect(instance, &Core::ClientInstance::presenceStatusChanged, this,
+            [this, instance]() {
+                if (currentInstance == instance && mePanel)
+                    mePanel->refresh();
             });
 
     connect(instance, &Core::ClientInstance::guildCreated, this,
@@ -773,6 +823,42 @@ void MainWindow::setupUi()
 
     connect(serverRail, &ServerRailView::leaveGuildRequested, this, &MainWindow::confirmAndLeaveGuild);
     connect(serverRail, &ServerRailView::serverSettingsRequested, this, &MainWindow::openGuildSettings);
+
+    // "Listen to toasts" toggle for guilds (rail context menu).
+    serverRail->setNotifyListContains([this](Snowflake id) {
+        auto *mgr = notificationController ? notificationController->manager() : nullptr;
+        return mgr && mgr->notifyForList().contains(id.toString());
+    });
+    connect(serverRail, &ServerRailView::notifyListToggleRequested, this,
+            [this](Snowflake accountId, Snowflake guildId) {
+                Q_UNUSED(accountId);
+                auto *mgr = notificationController ? notificationController->manager() : nullptr;
+                if (!mgr)
+                    return;
+                const QString id = guildId.toString();
+                if (mgr->notifyForList().contains(id))
+                    mgr->removeFromNotifyList(id);
+                else
+                    mgr->addToNotifyList(id);
+            });
+
+    // "Ignore toasts" toggle for guilds (rail context menu).
+    serverRail->setIgnoreEntitiesContains([this](Snowflake id) {
+        auto *mgr = notificationController ? notificationController->manager() : nullptr;
+        return mgr && mgr->ignoreEntitiesList().contains(id.toString());
+    });
+    connect(serverRail, &ServerRailView::ignoreToggleRequested, this,
+            [this](Snowflake accountId, Snowflake guildId) {
+                Q_UNUSED(accountId);
+                auto *mgr = notificationController ? notificationController->manager() : nullptr;
+                if (!mgr)
+                    return;
+                const QString id = guildId.toString();
+                if (mgr->ignoreEntitiesList().contains(id))
+                    mgr->removeFromIgnoreSet(id);
+                else
+                    mgr->addToIgnoreSet(id);
+            });
 
     guildHeaderLabel = new QLabel(this);
     guildHeaderLabel->setContentsMargins(12, 8, 12, 8);
@@ -1097,6 +1183,55 @@ void MainWindow::setupUi()
         QTimer::singleShot(0, messageInput, &MessageInput::clear);
     });
 
+    connect(messageInput, &MessageInput::slashCommandSend, this,
+            [this](const Discord::ApplicationCommand &command,
+                   const QList<Discord::InteractionOptionValue> &options) {
+                if (!currentInstance)
+                    return;
+                Snowflake channelId = chatModel->getActiveChannelId();
+                if (!channelId.isValid())
+                    return;
+                // Resolve the guild from the active channel itself rather than a
+                // side-cache that can desync from the actual channel.
+                const Snowflake guildId =
+                        currentInstance->discord()->getGuildIdForChannel(channelId);
+                currentInstance->discord()->sendApplicationCommandInteraction(
+                        channelId, guildId, command, options);
+                QTimer::singleShot(0, messageInput, &MessageInput::clear);
+            });
+
+    connect(messageInput, &MessageInput::slashCommandIncomplete, this,
+            [this](const QString &reason) {
+                QMessageBox::information(this, tr("Incomplete Command"), reason);
+            });
+
+    // Debounced server-side slash command search while typing the command name.
+    connect(messageInput, &MessageInput::slashQueryChanged, this,
+            [this](const QString &query) {
+                if (!currentInstance || !currentInstance->discord())
+                    return;
+                const Snowflake channelId = chatModel->getActiveChannelId();
+                if (!channelId.isValid())
+                    return;
+                const quint64 generation = ++m_slashQueryGeneration;
+                const QPointer<MainWindow> guard(this);
+                Core::ClientInstance *queryInstance = currentInstance;
+                currentInstance->discord()->fetchApplicationCommands(
+                        channelId, query,
+                        [guard, this, channelId, generation, queryInstance](const Core::Result<QList<Discord::ApplicationCommand>> &res) {
+                            if (guard.isNull())
+                                return;
+                            if (generation != m_slashQueryGeneration)
+                                return; // stale response
+                            if (currentInstance != queryInstance)
+                                return; // account switched mid-flight
+                            if (chatModel->getActiveChannelId() != channelId)
+                                return;
+                            if (res.success())
+                                messageInput->setAvailableCommands(*res.value);
+                        });
+            });
+
     connect(chatView, &ChatView::historyRequested, this, [this]() {
         Snowflake oldestId = chatModel->getOldestMessageId();
 
@@ -1172,6 +1307,69 @@ void MainWindow::setupUi()
                 messageInput->setReplyTarget(messageId, tr("Unknown"), QString());
             });
 
+    connect(chatView, &ChatView::forwardMessageRequested, this,
+            [this](Snowflake channelId, Snowflake messageId) {
+                Q_UNUSED(channelId);
+                // Find the message text to forward.
+                QString content;
+                QList<EmbedData> embeds;
+                QList<AttachmentData> attachments;
+                for (int row = 0; row < chatModel->rowCount(); ++row) {
+                    QModelIndex idx = chatModel->index(row, 0);
+                    if (idx.data(ChatModel::MessageIdRole).toULongLong() == quint64(messageId)) {
+                        content = idx.data(ChatModel::ContentRole).toString();
+                        embeds = idx.data(ChatModel::EmbedsRole).value<QList<EmbedData>>();
+                        attachments = idx.data(ChatModel::AttachmentsRole).value<QList<AttachmentData>>();
+                        break;
+                    }
+                }
+                content = content.trimmed();
+                if (content.isEmpty()) {
+                    // Fall back to embed text so embed-only messages (e.g. bot
+                    // embeds with no plain-text body) can still be forwarded.
+                    for (const auto &embed : embeds) {
+                        if (!embed.title.isEmpty())
+                            content += embed.title + QLatin1Char('\n');
+                        if (!embed.description.isEmpty())
+                            content += embed.description + QLatin1Char('\n');
+                    }
+                    content = content.trimmed();
+                }
+                // Carry attachments as links so the forwarded message shows them.
+                for (const auto &att : attachments) {
+                    const QUrl link = !att.originalUrl.isEmpty() ? att.originalUrl : att.proxyUrl;
+                    if (!link.isEmpty()) {
+                        if (!content.isEmpty())
+                            content += QLatin1Char('\n');
+                        content += link.toString();
+                    }
+                }
+                if (content.isEmpty()) {
+                    QMessageBox::information(this, tr("Cannot Forward"),
+                                             tr("This message has nothing to forward."));
+                    return;
+                }
+
+                // Pick a destination channel via the quick switcher.
+                Discord::Client *discordClient = currentInstance ? currentInstance->discord() : nullptr;
+                ChannelQuickSwitch dialog(channelTreeModel, serverRailModel, currentChannelEntry(),
+                                          channelController->recentChannels, discordClient, this);
+                if (dialog.exec() != QDialog::Accepted)
+                    return;
+                const TabEntry entry = dialog.selectedEntry();
+                if (!entry.channelId.isValid())
+                    return;
+
+                auto *instance = currentInstance;
+                if (instance && instance->accountId() != entry.accountId)
+                    instance = session->client(entry.accountId);
+                // Only send if we have a live client for the destination account;
+                // otherwise the wrong token would be used against the wrong channel.
+                if (!instance || instance->accountId() != entry.accountId)
+                    return;
+                instance->messages()->sendMessage(entry.channelId, content);
+            });
+
     connect(chatView, &ChatView::addReactionRequested, this,
             [this](Snowflake channelId, Snowflake messageId, const QString &emoji) {
                 if (currentInstance)
@@ -1186,6 +1384,13 @@ void MainWindow::setupUi()
                     currentInstance->discord()->removeReaction(channelId, messageId, emoji, isBurst);
                 else
                     currentInstance->discord()->addReaction(channelId, messageId, emoji, isBurst);
+            });
+
+    connect(chatModel, &ChatModel::pollVoteRequested, this,
+            [this](Snowflake channelId, Snowflake messageId, const QList<int> &answerIds) {
+                if (!currentInstance || !currentInstance->discord())
+                    return;
+                currentInstance->discord()->votePoll(channelId, messageId, messageId, answerIds);
             });
 
     connect(chatView, &ChatView::userContextMenuRequested, this,
@@ -1274,6 +1479,65 @@ void MainWindow::setupUi()
     connect(channelTree, &ChannelTreeView::leaveGuildRequested, this, &MainWindow::confirmAndLeaveGuild);
     connect(channelTree, &ChannelTreeView::serverSettingsRequested, this, &MainWindow::openGuildSettings);
 
+    // "Listen to toasts" toggle for channels (tree context menu).
+    channelTree->setNotifyListContains([this](Snowflake id) {
+        auto *mgr = notificationController ? notificationController->manager() : nullptr;
+        return mgr && mgr->notifyForList().contains(id.toString());
+    });
+    connect(channelTree, &ChannelTreeView::notifyListToggleRequested, this,
+            [this](Snowflake channelId) {
+                auto *mgr = notificationController ? notificationController->manager() : nullptr;
+                if (!mgr)
+                    return;
+                const QString id = channelId.toString();
+                if (mgr->notifyForList().contains(id))
+                    mgr->removeFromNotifyList(id);
+                else
+                    mgr->addToNotifyList(id);
+            });
+
+    // "Ignore toasts" toggle for channels (tree context menu).
+    channelTree->setIgnoreEntitiesContains([this](Snowflake id) {
+        auto *mgr = notificationController ? notificationController->manager() : nullptr;
+        return mgr && mgr->ignoreEntitiesList().contains(id.toString());
+    });
+    connect(channelTree, &ChannelTreeView::ignoreToggleRequested, this,
+            [this](Snowflake channelId) {
+                auto *mgr = notificationController ? notificationController->manager() : nullptr;
+                if (!mgr)
+                    return;
+                const QString id = channelId.toString();
+                if (mgr->ignoreEntitiesList().contains(id))
+                    mgr->removeFromIgnoreSet(id);
+                else
+                    mgr->addToIgnoreSet(id);
+            });
+
+    // Local "Mute Channel" toggle (Settings channel override).
+    channelTree->setChannelMutedContains([](Snowflake id) {
+        auto ov = Core::Settings::instance().channelOverride(id);
+        return ov && ov->muted;
+    });
+    connect(channelTree, &ChannelTreeView::channelMuteToggleRequested, this,
+            [this](Snowflake channelId) {
+                auto &settings = Core::Settings::instance();
+                auto ov = settings.channelOverride(channelId);
+                if (ov && ov->muted) {
+                    // Unmute: clear only the mute bits, keep a non-default level.
+                    ov->muted = false;
+                    ov->muteUntilMs = 0;
+                    if (ov->level == Discord::MessageNotificationLevel::ALL_MESSAGES)
+                        settings.clearChannelOverride(channelId);
+                    else
+                        settings.setChannelOverride(channelId, *ov);
+                } else {
+                    Core::ChannelNotificationOverride ovNew = ov ? *ov : Core::ChannelNotificationOverride{};
+                    ovNew.muted = true;
+                    ovNew.muteUntilMs = 0;
+                    settings.setChannelOverride(channelId, ovNew);
+                }
+            });
+
 #ifndef ACHERON_NO_VOICE
     connect(channelTree, &ChannelTreeView::joinVoiceChannelRequested, this,
             [this](const QModelIndex &proxyIndex) {
@@ -1316,6 +1580,9 @@ QWidget *MainWindow::buildLeftSide()
             v->addWidget(voiceStatusBar, 0);
 #endif
         v->addWidget(customStatusLabel, 0);
+        if (!mePanel)
+            mePanel = new MePanel(container);
+        v->addWidget(mePanel, 0);
         h->addWidget(secondary, 1);
     } else {
         auto *v = new QVBoxLayout(container);
@@ -1328,6 +1595,26 @@ QWidget *MainWindow::buildLeftSide()
             v->addWidget(voiceStatusBar, 0);
 #endif
         v->addWidget(customStatusLabel, 0);
+        if (!mePanel)
+            mePanel = new MePanel(container);
+        v->addWidget(mePanel, 0);
+    }
+
+    if (mePanel && !mePanelWired) {
+        mePanelWired = true;
+        connect(mePanel, &MePanel::openSettingsPageRequested, this,
+                [this](const QString &page) { windowManager->openSettingsWindow(page); });
+        connect(mePanel, &MePanel::compactModeChanged, chatView, &ChatView::setCompactMode);
+        connect(mePanel, &MePanel::showTimestampsChanged, chatView, &ChatView::setShowTimestamps);
+        connect(mePanel, &MePanel::compactInputChanged, messageInput, &MessageInput::setCompact);
+        connect(mePanel, &MePanel::streamerModeChanged, this, [this](bool enabled) {
+            QSettings().setValue(QStringLiteral("streamer/enabled"), enabled);
+            notificationController->setStreamerModeEnabled(enabled);
+        });
+        connect(mePanel, &MePanel::notificationSoundsChanged, this, [this](bool enabled) {
+            Q_UNUSED(enabled);
+            notificationController->reloadSettings();
+        });
     }
 
     container->setMinimumWidth(200);
@@ -2016,14 +2303,16 @@ void MainWindow::jumpToMessage(Snowflake channelId, Snowflake messageId)
     // Otherwise wait for the model to populate after the channel switch, then
     // scroll once the target row exists. A 5-second safety timeout prevents
     // leaking the connections if the message never loads.
-    auto *rowsConn = new QMetaObject::Connection;
-    auto *resetConn = new QMetaObject::Connection;
+    auto rowsConn = std::make_shared<QMetaObject::Connection>();
+    auto resetConn = std::make_shared<QMetaObject::Connection>();
+    auto done = std::make_shared<bool>(false);
 
-    auto cleanup = [rowsConn, resetConn]() {
+    auto cleanup = [rowsConn, resetConn, done]() {
+        if (*done)
+            return;
+        *done = true;
         disconnect(*rowsConn);
         disconnect(*resetConn);
-        delete rowsConn;
-        delete resetConn;
     };
 
     *rowsConn = connect(chatModel, &QAbstractItemModel::rowsInserted, this,

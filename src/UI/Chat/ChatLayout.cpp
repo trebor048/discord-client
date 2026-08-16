@@ -56,12 +56,20 @@ QString richTextStyleSheet()
     codeBlock += QStringLiteral(".code-com { color: %1; }").arg(codeComment.name(QColor::HexRgb));
     codeBlock += QStringLiteral(".code-num { color: %1; }").arg(codeNumber.name(QColor::HexRgb));
 
+    // Spoilers render as a solid gray box with the text the same color as the
+    // box (hidden). Selecting the box reveals the text via the selection
+    // highlight — QTextDocument does not support :hover, so selection is the
+    // reveal affordance.
+    const QColor spoilerColor = Manager::instance().color(Token::AlternateBaseBg);
+    QString spoiler = QStringLiteral(".spoiler { background-color: %1; color: %1; border-radius: 3px; }")
+                              .arg(spoilerColor.name(QColor::HexRgb));
+
     return QStringLiteral("a { color: %1; } "
                           ".mention { color: %2; background-color: %3; text-decoration: none; } ")
                    .arg(link.name(QColor::HexRgb))
                    .arg(mentionText.name(QColor::HexRgb))
                    .arg(mentionBgRgba) +
-           code + codeBlock;
+           code + codeBlock + spoiler;
 }
 
 static QString editedMarkerText()
@@ -794,6 +802,69 @@ MessageLayout calculateMessageLayout(const LayoutContext &ctx)
         totalHeight += layout.reactionsTotalHeight;
     }
 
+    // --- Poll ---
+    layout.pollTop = layout.reactionsTop + layout.reactionsTotalHeight;
+    layout.pollTotalHeight = 0;
+
+    if (ctx.hasPoll) {
+        const int pollWidth = std::min(textWidth, pollMaxWidth());
+        const int contentLeft = textLeft + pollPadding();
+        const int contentWidth = pollWidth - pollPadding() * 2;
+
+        PollLayout pollLayout = {};
+        pollLayout.pollRect = QRect(textLeft, layout.pollTop, pollWidth, 0);
+
+        int currentY = layout.pollTop + pollPadding();
+
+        if (!ctx.poll.question.isEmpty()) {
+            QFont questionFont = ctx.font;
+            questionFont.setBold(true);
+            QTextDocument *cached = ctx.model ? ctx.model->getCachedDocument(pollQuestionDocKey(ctx.messageId))
+                                              : nullptr;
+            int questionHeight;
+            if (cached) {
+                if (int(cached->textWidth()) != contentWidth)
+                    cached->setTextWidth(contentWidth);
+                questionHeight = int(std::ceil(cached->size().height()));
+            } else {
+                QTextDocument questionDoc;
+                questionDoc.setDefaultFont(questionFont);
+                questionDoc.setTextWidth(contentWidth);
+                questionDoc.setHtml(ctx.poll.question.toHtmlEscaped());
+                questionHeight = int(std::ceil(questionDoc.size().height()));
+            }
+            pollLayout.questionRect = QRect(contentLeft, currentY, contentWidth, questionHeight);
+            currentY += questionHeight + pollQuestionSpacing();
+        }
+
+        for (int i = 0; i < ctx.poll.answers.size(); ++i) {
+            PollAnswerLayout answerLayout;
+            answerLayout.answerIndex = i;
+            answerLayout.optionRect =
+                    QRect(contentLeft, currentY, contentWidth, pollOptionHeight());
+            answerLayout.barRect = QRect(contentLeft + 2,
+                                         answerLayout.optionRect.bottom() + pollAnswerSpacing(),
+                                         contentWidth - 4, pollProgressBarHeight());
+            pollLayout.answerLayouts.append(answerLayout);
+            currentY = answerLayout.barRect.bottom() + pollOptionSpacing();
+        }
+
+        {
+            QFont footerFont = ctx.font;
+            footerFont.setPointSize(footerFont.pointSize() - 2);
+            QFontMetrics footerFm(footerFont);
+            int footerHeight = footerFm.height() + 4;
+            pollLayout.footerRect = QRect(contentLeft, currentY, contentWidth, footerHeight);
+            currentY += footerHeight;
+        }
+
+        pollLayout.totalHeight = (currentY - layout.pollTop) + pollPadding();
+        pollLayout.pollRect.setHeight(pollLayout.totalHeight);
+        layout.pollLayouts.append(pollLayout);
+        layout.pollTotalHeight = pollLayout.totalHeight + padding();
+        totalHeight += layout.pollTotalHeight;
+    }
+
     // Floating quick-reaction bar overlay. Positioned at the far right of the
     // row, vertically centered on the first content line (header or text). It
     // does not contribute to totalHeight — the delegate paints it over the row
@@ -886,6 +957,12 @@ MessageLayout calculateMessageLayout(const LayoutContext &ctx)
 
     for (const auto &rl : layout.reactionLayouts)
         layout.hitRegions.append({ HitRegion::Kind::Reaction, rl.pillRect, rl.reactionIndex, -1, {} });
+
+    for (const auto &pollLayout : layout.pollLayouts) {
+        for (const auto &answerLayout : pollLayout.answerLayouts)
+            layout.hitRegions.append({ HitRegion::Kind::PollVote, answerLayout.optionRect,
+                                       answerLayout.answerIndex, -1, {} });
+    }
 
     return layout;
 }
@@ -1078,6 +1155,9 @@ LayoutContext buildContext(const QAbstractItemView *view, const QModelIndex &ind
     ctx.embeds = index.data(ChatModel::EmbedsRole).value<QList<EmbedData>>();
     ctx.stickers = index.data(ChatModel::StickersRole).value<QList<StickerData>>();
     ctx.reactions = index.data(ChatModel::ReactionsRole).value<QList<ReactionData>>();
+    ctx.hasPoll = index.data(ChatModel::PollRole).isValid();
+    if (ctx.hasPoll)
+        ctx.poll = index.data(ChatModel::PollRole).value<PollData>();
     ctx.isSystemMessage = index.data(ChatModel::IsSystemMessageRole).toBool();
     ctx.compactMode = view->property("compactMode").toBool();
     ctx.model = qobject_cast<const ChatModel *>(index.model());

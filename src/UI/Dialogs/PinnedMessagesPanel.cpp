@@ -7,6 +7,7 @@
 #include "Core/PermissionManager.hpp"
 #include "Core/TimeUtils.hpp"
 #include "Core/UserManager.hpp"
+#include "Core/Theme/Manager.hpp"
 #include "Discord/CdnUrls.hpp"
 #include "Discord/Enums.hpp"
 
@@ -191,7 +192,8 @@ void PinnedMessagesPanel::addMessageItem(const Discord::Message &msg)
     frame->setObjectName(QStringLiteral("pinnedMessageItem"));
     frame->setStyleSheet(QStringLiteral(
             "#pinnedMessageItem { background: rgba(128, 128, 128, 0.06); border: 1px solid "
-            "rgba(128, 128, 128, 0.18); border-radius: 6px; }"));
+            "rgba(128, 128, 128, 0.18); border-radius: %1px; }")
+                                 .arg(Core::Theme::Manager::instance().roundness()));
 
     auto *root = new QVBoxLayout(frame);
     root->setContentsMargins(10, 10, 10, 10);

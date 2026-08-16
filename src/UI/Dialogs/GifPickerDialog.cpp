@@ -1,6 +1,7 @@
 #include "GifPickerDialog.hpp"
 #include "Core/AnimationUtils.hpp"
 #include "Core/Logging.hpp"
+#include "Core/Theme/Manager.hpp"
 
 #include <QAbstractButton>
 #include <QApplication>
@@ -587,9 +588,10 @@ QWidget *GifPickerDialog::createGifWidget(const Discord::GifItem &item)
     container->setAutoRaise(true);
     container->setToolButtonStyle(Qt::ToolButtonIconOnly);
     container->setStyleSheet(
-            QStringLiteral("QToolButton { border: 1px solid #3f4147; border-radius: 6px; "
+            QStringLiteral("QToolButton { border: 1px solid #3f4147; border-radius: %1px; "
                            "background: #2b2d31; }"
-                           "QToolButton:hover { border-color: #5865f2; }"));
+                           "QToolButton:hover { border-color: #5865f2; }")
+                    .arg(Core::Theme::Manager::instance().roundness()));
 
     container->setToolTip(item.contentDescription.isEmpty()
                                   ? item.title.isEmpty() ? item.url : item.title

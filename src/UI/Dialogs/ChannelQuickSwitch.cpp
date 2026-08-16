@@ -1,6 +1,7 @@
 #include "ChannelQuickSwitch.hpp"
 
 #include "Core/AnimationUtils.hpp"
+#include "Core/Theme/Manager.hpp"
 
 #include <QApplication>
 #include <QCoreApplication>
@@ -142,7 +143,8 @@ ChannelQuickSwitch::ChannelQuickSwitch(ChannelTreeModel *model, ServerRailModel 
     panel->setObjectName(QStringLiteral("quickSwitchPanel"));
     panel->setStyleSheet(QStringLiteral(
             "#quickSwitchPanel { background: palette(window); border: 1px solid palette(mid); "
-            "border-radius: 12px; }"));
+            "border-radius: %1px; }")
+                                 .arg(Core::Theme::Manager::instance().roundness()));
     panelOpacity = new QGraphicsOpacityEffect(panel);
     panelOpacity->setOpacity(0.0);
     panel->setGraphicsEffect(panelOpacity);
@@ -169,12 +171,14 @@ ChannelQuickSwitch::ChannelQuickSwitch(ChannelTreeModel *model, ServerRailModel 
     sectionTabs->addTab(new QWidget(sectionTabs), tr("Recent"));
     layout->addWidget(sectionTabs, 1);
 
+    const int rSmall = std::max(2, Core::Theme::Manager::instance().roundness() / 2);
     const QString treeStyle = QStringLiteral(
             "QTreeWidget { background: transparent; border: none; }"
-            "QTreeWidget::item { padding: 6px 4px; border-radius: 6px; }"
+            "QTreeWidget::item { padding: 6px 4px; border-radius: %1px; }"
             "QTreeWidget::item:has-children { margin-top: 6px; padding-top: 8px; color: palette(text); }"
             "QTreeWidget::item:!has-children { padding-left: 8px; }"
-            "QTreeWidget::item:selected { background: palette(highlight); color: palette(highlighted-text); }");
+            "QTreeWidget::item:selected { background: palette(highlight); color: palette(highlighted-text); }")
+                                      .arg(rSmall);
 
     auto configureTree = [&](QTreeWidget *tree, bool grouped) {
         tree->setColumnCount(1);

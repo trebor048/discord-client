@@ -16,6 +16,7 @@
 #include <QNetworkRequest>
 #include <QPainter>
 #include <QPushButton>
+#include <QSet>
 #include <QShowEvent>
 #include <QStandardPaths>
 #include <QUrlQuery>
@@ -110,6 +111,7 @@ AttachmentGallery::AttachmentGallery(const QList<AttachmentData> &atts, int star
     zoomInButton = new QPushButton(tr("Zoom In"), this);
     fitButton = new QPushButton(tr("Fit"), this);
     saveButton = new QPushButton(tr("Save As"), this);
+    saveAllButton = new QPushButton(tr("Save All"), this);
     copyLinkButton = new QPushButton(tr("Copy Link"), this);
     auto *closeButton = new QPushButton(tr("Close"), this);
 
@@ -123,6 +125,7 @@ AttachmentGallery::AttachmentGallery(const QList<AttachmentData> &atts, int star
     toolbar->addWidget(fitButton);
     toolbar->addStretch();
     toolbar->addWidget(saveButton);
+    toolbar->addWidget(saveAllButton);
     toolbar->addWidget(copyLinkButton);
     toolbar->addWidget(closeButton);
 
@@ -143,6 +146,7 @@ AttachmentGallery::AttachmentGallery(const QList<AttachmentData> &atts, int star
     connect(zoomOutButton, &QPushButton::clicked, this, [this]() { zoomBy(1.0 / 1.25); });
     connect(fitButton, &QPushButton::clicked, this, [this]() { fitToWindow(); });
     connect(saveButton, &QPushButton::clicked, this, [this]() { saveCurrent(); });
+    connect(saveAllButton, &QPushButton::clicked, this, [this]() { saveAll(); });
     connect(copyLinkButton, &QPushButton::clicked, this, [this]() { copyLink(); });
     connect(closeButton, &QPushButton::clicked, this, &QDialog::close);
 
@@ -332,33 +336,83 @@ void AttachmentGallery::saveAttachment(const AttachmentData &att, QWidget *paren
     if (path.isEmpty())
         return;
 
-    if (att.isImage && !att.pixmap.isNull()) {
-        att.pixmap.save(path);
-        return;
-    }
+    saveAttachmentTo(att, path, parent);
+}
 
-    if (att.originalUrl.isLocalFile()) {
-        QFile::remove(path);
-        QFile::copy(att.originalUrl.toLocalFile(), path);
-        return;
-    }
+void AttachmentGallery::saveAttachmentTo(const AttachmentData &att, const QString &path,
+                                         QWidget *parent)
+{
+    // Prefer the full-resolution source URL. `att.pixmap` is the downscaled chat
+    // thumbnail (capped ~400x300), so it must only be a last resort for images
+    // that never had a CDN URL (e.g. pasted previews).
+    const QUrl source = !att.originalUrl.isEmpty() ? att.originalUrl : att.proxyUrl;
 
-    auto *network = new QNetworkAccessManager(parent);
-    QNetworkReply *reply = network->get(QNetworkRequest(att.originalUrl));
-    QObject::connect(reply, &QNetworkReply::finished, network, [reply, network, path]() {
-        reply->deleteLater();
-        if (reply->error() != QNetworkReply::NoError) {
-            network->deleteLater();
+    if (!source.isEmpty()) {
+        if (source.isLocalFile()) {
+            QFile::remove(path);
+            QFile::copy(source.toLocalFile(), path);
             return;
         }
-        QByteArray data = reply->readAll();
-        QFile file(path);
-        if (file.open(QIODevice::WriteOnly)) {
-            file.write(data);
-            file.close();
+
+        auto *network = new QNetworkAccessManager(parent);
+        QNetworkReply *reply = network->get(QNetworkRequest(source));
+        QObject::connect(reply, &QNetworkReply::finished, network, [reply, network, path]() {
+            reply->deleteLater();
+            if (reply->error() != QNetworkReply::NoError) {
+                network->deleteLater();
+                return;
+            }
+            QByteArray data = reply->readAll();
+            QFile file(path);
+            if (file.open(QIODevice::WriteOnly)) {
+                file.write(data);
+                file.close();
+            }
+            network->deleteLater();
+        });
+        return;
+    }
+
+    if (att.isImage && !att.pixmap.isNull())
+        att.pixmap.save(path, "PNG");
+}
+
+void AttachmentGallery::saveAll()
+{
+    QString startDir = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+    if (startDir.isEmpty())
+        startDir = QDir::homePath();
+
+    const QString dir = QFileDialog::getExistingDirectory(this, tr("Save All Attachments"), startDir);
+    if (dir.isEmpty())
+        return;
+
+    // Seed with names already present on disk so existing files aren't silently
+    // overwritten by the dedup.
+    QSet<QString> usedNames;
+    const QDir targetDir(dir);
+    const QStringList existing = targetDir.entryList(QDir::Files);
+    for (const QString &name : existing)
+        usedNames.insert(name.toCaseFolded());
+
+    for (const AttachmentData &att : attachments) {
+        QString name = att.filename.isEmpty() ? QFileInfo(att.originalUrl.path()).fileName()
+                                              : att.filename;
+        if (name.isEmpty())
+            name = tr("attachment");
+
+        QString base = QFileInfo(name).completeBaseName();
+        QString suffix = QFileInfo(name).suffix();
+        QString candidate = name;
+        int counter = 1;
+        while (usedNames.contains(candidate.toCaseFolded())) {
+            candidate = base + QStringLiteral(" (%1)").arg(counter++)
+                          + (suffix.isEmpty() ? QString() : "." + suffix);
         }
-        network->deleteLater();
-    });
+        usedNames.insert(candidate.toCaseFolded());
+
+        saveAttachmentTo(att, targetDir.filePath(candidate), this);
+    }
 }
 
 } // namespace UI

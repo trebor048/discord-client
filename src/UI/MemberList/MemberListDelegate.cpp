@@ -5,6 +5,7 @@
 
 #include "MemberListModel.hpp"
 #include "Core/MemberListManager.hpp"
+#include "Core/Theme/Icons.hpp"
 
 constexpr static int GroupHeight = 22;
 constexpr static int MemberHeight = 28;
@@ -120,8 +121,25 @@ void MemberListDelegate::paintMember(QPainter *painter, const QStyleOptionViewIt
     }
 
     x += AvatarSize + AvatarTextSpacing;
-    int textWidth = option.rect.right() - x - HorizontalPadding;
-    QRect nameRect(x, option.rect.top(), textWidth, option.rect.height());
+
+    // Presence icon (device glyph colored by status) + role icon (if the top
+    // role has one) are drawn right-aligned.
+    const int PresenceIconSize = 11;
+    const int RoleIconSize = 14;
+    const int IconSpacing = 5;
+    const QVariantMap presenceMap = index.data(MemberListModel::PresenceRole).toMap();
+    const bool hasPresence = presenceMap.contains("status");
+    const QPixmap roleIconPm = index.data(MemberListModel::RoleIconRole).value<QPixmap>();
+    const bool hasRoleIcon = !roleIconPm.isNull();
+    int rightIconsWidth = 0;
+    if (hasPresence)
+        rightIconsWidth += PresenceIconSize + IconSpacing;
+    if (hasRoleIcon)
+        rightIconsWidth += RoleIconSize + IconSpacing;
+
+    int textWidth = option.rect.right() - x - HorizontalPadding - rightIconsWidth;
+    const int nameWidth = qMax(0, textWidth);
+    QRect nameRect(x, option.rect.top(), nameWidth, option.rect.height());
 
     QString displayName = index.data(MemberListModel::UsernameRole).toString();
     QColor roleColor = index.data(MemberListModel::RoleColorRole).value<QColor>();
@@ -140,8 +158,70 @@ void MemberListDelegate::paintMember(QPainter *painter, const QStyleOptionViewIt
     painter->setPen(nameColor);
 
     QFontMetrics fm(font);
-    QString elidedName = fm.elidedText(displayName, Qt::ElideRight, textWidth);
+    QString elidedName = fm.elidedText(displayName, Qt::ElideRight, nameWidth);
     painter->drawText(nameRect, Qt::AlignLeft | Qt::AlignVCenter, elidedName);
+
+    const int iconCenterY = option.rect.top() + option.rect.height() / 2;
+    int iconX = option.rect.right() - HorizontalPadding;
+
+    if (hasRoleIcon) {
+        iconX -= RoleIconSize;
+        painter->drawPixmap(QRect(iconX, iconCenterY - RoleIconSize / 2, RoleIconSize, RoleIconSize),
+                            roleIconPm);
+        iconX -= IconSpacing;
+    }
+
+    if (hasPresence) {
+        iconX -= PresenceIconSize;
+        drawPresenceIcon(painter, presenceMap,
+                         QRect(iconX, iconCenterY - PresenceIconSize / 2, PresenceIconSize, PresenceIconSize));
+    }
+
+    // Role badge: small filled dot with the member's highest role color,
+    // overlapping the avatar's bottom-right corner. Skipped when no provider
+    // is set or the color is invalid.
+    const QColor roleBadgeColor = index.data(MemberListModel::RoleBadgeColorRole).value<QColor>();
+    if (roleBadgeColor.isValid()) {
+        constexpr int RoleBadgeSize = 8;
+        const QRect badgeRect(avatarRect.right() - RoleBadgeSize / 2,
+                              avatarRect.bottom() - RoleBadgeSize / 2,
+                              RoleBadgeSize, RoleBadgeSize);
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(roleBadgeColor);
+        painter->drawEllipse(badgeRect);
+    }
+}
+
+void MemberListDelegate::drawPresenceIcon(QPainter *painter, const QVariantMap &presence,
+                                          const QRect &rect) const
+{
+    const QString status = presence.value("status").toString();
+    const QString device = presence.value("device").toString();
+    const QString deviceStatus = presence.value("deviceStatus").toString();
+
+    // No active device -> a plain status dot.
+    if (device.isEmpty()) {
+        const QString colorStatus = deviceStatus.isEmpty() ? status : deviceStatus;
+        QColor color;
+        if (colorStatus == QLatin1String("online"))
+            color = QColor(0x23, 0xA5, 0x5A);
+        else if (colorStatus == QLatin1String("idle"))
+            color = QColor(0xF0, 0xB2, 0x32);
+        else if (colorStatus == QLatin1String("dnd"))
+            color = QColor(0xF2, 0x3F, 0x43);
+        else
+            color = QColor(0x80, 0x84, 0x8E);
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(color);
+        painter->drawEllipse(rect);
+        return;
+    }
+
+    const qreal dpr = painter->device() ? painter->device()->devicePixelRatioF() : 1.0;
+    const QPixmap pm = Core::Theme::Icons::presencePixmap(status, device, deviceStatus,
+                                                          rect.width(), dpr);
+    if (!pm.isNull())
+        painter->drawPixmap(rect, pm);
 }
 
 void MemberListDelegate::paintPlaceholder(QPainter *painter,

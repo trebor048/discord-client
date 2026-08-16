@@ -31,6 +31,7 @@ public:
 
     void openAccountsWindow();
     void openSettingsWindow();
+    void openSettingsWindow(const QString &page);
     void openFriendsWindow();
     void showUserProfile(Core::Snowflake userId, Core::Snowflake guildId = Core::Snowflake::Invalid);
 

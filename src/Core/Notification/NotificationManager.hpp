@@ -54,6 +54,13 @@ public:
     // Image provider for toast avatars and attachment thumbnails
     void setImageManager(Core::ImageManager *imageManager) { m_imageManager = imageManager; }
 
+    // Accessors for resolving notify-list IDs to names/icons in the settings UI.
+    [[nodiscard]] Core::ClientInstance *instance() const { return m_instance; }
+    [[nodiscard]] Core::ImageManager *imageManager() const { return m_imageManager; }
+
+    // Parent widget for in-window toasts (the main window).
+    void setInWindowParent(QWidget *parent) { m_inWindowParent = parent; }
+
     // Notification display
     void showNotification(const Notification::ToastNotificationData &data);
     void dismissAllNotifications();
@@ -65,10 +72,13 @@ public:
     // List management
     QSet<QString> notifyForList() const;
     QSet<QString> ignoreUsersList() const;
+    QSet<QString> ignoreEntitiesList() const;
     void addToNotifyList(const QString &id);
     void removeFromNotifyList(const QString &id);
     void addToIgnoreList(const QString &id);
     void removeFromIgnoreList(const QString &id);
+    void addToIgnoreSet(const QString &id);
+    void removeFromIgnoreSet(const QString &id);
 
     // Sound overrides
     Notification::SoundOverride getSoundOverride(const QString &soundId) const;
@@ -106,6 +116,7 @@ private:
     // Notification logic
     bool shouldShowNotification(const Discord::Message &message, const Discord::Channel &channel);
     bool shouldShowVoiceNotification(const Discord::VoiceState &newState, const Discord::VoiceState *oldState);
+    bool isInQuietHours() const;
     Notification::ToastNotificationData createMessageNotification(const Discord::Message &message, const Discord::Channel &channel);
     Notification::ToastNotificationData createVoiceNotification(const Discord::User &user, const Discord::Channel &channel, const QString &action);
     Notification::ToastNotificationData createRelationshipNotification(const Discord::Relationship &relationship);
@@ -138,6 +149,8 @@ private:
 
     // In-app toast display, including grouping collapse
     void displayToast(const Notification::ToastNotificationData &data);
+    // Re-applies the toast placement (in-window vs monitor) from settings.
+    void applyToastPlacement();
 
     // Sends an inline-reply composed inside a toast and reports the outcome
     // back to that toast's busy/sent/failed indicator.
@@ -147,6 +160,7 @@ private:
 
     Core::ClientInstance *m_instance = nullptr;
     Core::ImageManager *m_imageManager = nullptr;
+    QWidget *m_inWindowParent = nullptr;
     Notification::NotificationSettings m_settings;
 
     SoundManager m_soundManager;
@@ -157,6 +171,7 @@ private:
     mutable QMutex m_notifyListMutex;
     QSet<QString> m_notifyForSet;
     QSet<QString> m_ignoreUsersSet;
+    QSet<QString> m_ignoreSet; // channels and guilds to suppress toasts for
     bool m_listsLoaded = false;
 
     QHash<QString, Notification::SoundOverride> m_soundOverrides;
