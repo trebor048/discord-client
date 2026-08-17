@@ -1,99 +1,66 @@
-# === Build directories ===
+# Build output
 /build/
-build-*/
-out/
-.firecrawl/
-
-# === CMake ===
-CMakeUserPresets.json
-CMakeFiles/
+/build-*/
+/out/
 cmake-build-*/
-CTestTestfile.cmake
-cmake_install.cmake
+CMakeFiles/
+CMakeCache.txt
+CMakeUserPresets.json
 compile_commands.json
-*.cmake.in
-!vendor/qtkeychain/QtKeychainConfig.cmake.in
-!vendor/mlspp/cmake/config.cmake.in
+cmake_install.cmake
+CTestTestfile.cmake
 
-# === IDE / Editor ===
+# vcpkg
+vcpkg_installed/
+
+# IDE / editors
 .vs/
 .vscode/
 .idea/
 *.user
-*.user.*
-*.aps
 *.suo
-*.sln.docstates
+*.aps
 
-# === Qt generated (in source tree) ===
+# Qt / compiler generated
 moc_*.cpp
 qrc_*.cpp
 ui_*.h
 *.moc
+*.obj
+*.o
 
-# === vcpkg ===
-vcpkg_installed/
-vcpkg-install-run.log
-vcpkg-manifest-install.log
+# Binaries / deploy artifacts
+*.dll
+*.exe
+*.so
+*.dylib
 
-# === Planning docs ===
+# Local tooling, scratch, and caches
+.opencode/
+.swarm/
+.qwen/
+.oneshot/
+.firecrawl/
 .planning/
-docs/
-brainstorm-qol.md
-full-qol-plan.md
-new-features-plan.md
-remaining-qol-plan.md
-FEATURES.md
-build-full.log
+.env
+tools/
 
-# === Scripts output ===
+# Vendored third-party extras (unused by the build)
+vendor/miniaudio/website/
+
+# Docs / planning (not shipped)
+docs/
+AGENTS.md
+PLAN.md
+FEATURES.md
+
+# Release artifacts
+/releases/
+
+# Scripts (only the CI smoke script is committed)
 scripts/*
 !scripts/windows-runtime-smoke.ps1
 
-# === Local app/runtime deployment ===
-*.dll
-*.pdb
-*.lib
-acheron.exe
-D3Dcompiler_47.dll
-icuuc.dll
-libcurl.dll
-opus.dll
-zlib.dll
-
-# === Local copied runtime folders ===
-fonts/
-generic/
-iconengines/
-imageformats/
-networkinformation/
-platforms/
-sqldrivers/
-styles/
-/tls/
-
-# === Release artifacts (published via GitHub Releases, not committed) ===
-/releases/
-
-# === Local tools / scratch ===
-.qwen/
-.opencode/
-.swarm/
-.oneshot/
-.env
-CMakeLists.txt.bak
-curl-impersonate/
-libcurl-impersonate.tar.gz
-tools/.cache/
-
-# === OS files ===
+# OS
 Thumbs.db
 .DS_Store
-*.swp
-*.swo
-*~
-
-
-# == MD ===
-PLAN.md
-AGENTS.md
