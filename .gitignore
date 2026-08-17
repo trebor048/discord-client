@@ -38,12 +38,12 @@ vcpkg-manifest-install.log
 
 # === Planning docs ===
 .planning/
+docs/
 brainstorm-qol.md
 full-qol-plan.md
 new-features-plan.md
 remaining-qol-plan.md
-docs/improvement-plan.md
-docs/maestro/
+FEATURES.md
 build-full.log
 
 # === Scripts output ===
