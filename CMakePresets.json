@@ -36,11 +36,13 @@
     {
       "name": "windows",
       "configurePreset": "windows",
-      "configuration": "RelWithDebInfo"
+      "configuration": "RelWithDebInfo",
+      "jobs": 0
     },
     {
       "name": "linux",
-      "configurePreset": "linux"
+      "configurePreset": "linux",
+      "jobs": 0
     }
   ],
   "testPresets": [

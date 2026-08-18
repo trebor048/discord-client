@@ -27,8 +27,9 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
 
-# Unity/jumbo builds: merge source files into batches to reduce header re-parsing
-# ~2-4x faster compilation on MSVC.
+# Unity/jumbo builds: merge source files into batches to reduce header re-parsing.
+# Disabled: with ~180 TUs and 12+ cores the app already compiles in parallel, and
+# unity batches defeat ccache's per-file caching on incremental rebuilds.
 set(CMAKE_UNITY_BUILD OFF)
 set(CMAKE_UNITY_BUILD_BATCH_SIZE 8)
 
@@ -349,7 +350,6 @@ else()
 endif()
 
 qt_add_executable(${PROJECT_NAME} ${PROJECT_SOURCES})
-set_target_properties(${PROJECT_NAME} PROPERTIES UNITY_BUILD OFF)
 
 target_include_directories(${PROJECT_NAME} PRIVATE vendor/emoji-segmenter)
 if(TARGET unofficial::nayuki-qr-code-generator::nayuki-qr-code-generator)
