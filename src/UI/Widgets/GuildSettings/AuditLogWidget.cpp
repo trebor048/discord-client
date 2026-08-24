@@ -9,6 +9,7 @@
 #include <QVBoxLayout>
 
 #include "Core/ClientInstance.hpp"
+#include "Core/Logging.hpp"
 #include "Discord/Client.hpp"
 
 namespace Acheron {
@@ -65,8 +66,11 @@ void AuditLogWidget::setupUi()
         { 40, QStringLiteral("Invite Create") },
         { 42, QStringLiteral("Invite Delete") },
         { 50, QStringLiteral("Emoji Create") },
+        { 51, QStringLiteral("Emoji Update") },
         { 52, QStringLiteral("Emoji Delete") },
-        { 60, QStringLiteral("Message Delete") },
+        { 60, QStringLiteral("Sticker Create") },
+        { 61, QStringLiteral("Sticker Update") },
+        { 62, QStringLiteral("Sticker Delete") },
         { 72, QStringLiteral("Message Bulk Delete") },
         { 80, QStringLiteral("Webhook Create") },
         { 81, QStringLiteral("Webhook Update") },
@@ -114,7 +118,16 @@ void AuditLogWidget::load()
         actionType = Snowflake::Invalid;
 
     m_instance->discord()->fetchGuildAuditLog(m_guildId, userId, actionType,
-                                                Snowflake::Invalid, 50, [](const auto &) {});
+                                                Snowflake::Invalid, 50, [this](const auto &result) {
+        if (!result.success()) {
+            m_loading = false;
+            m_loadMoreButton->setEnabled(false);
+            m_logList->clear();
+            auto *item = new QListWidgetItem(m_logList);
+            item->setText(QStringLiteral("Failed to load audit log: %1").arg(result.error));
+            item->setFlags(item->flags() & ~Qt::ItemIsEnabled & ~Qt::ItemIsSelectable);
+        }
+    });
 }
 
 void AuditLogWidget::onLogFetched(Core::Snowflake guildId, const Discord::AuditLogData &log)
@@ -177,7 +190,13 @@ void AuditLogWidget::onLoadMore()
         actionType = Snowflake::Invalid;
 
     m_instance->discord()->fetchGuildAuditLog(m_guildId, userId, actionType,
-                                                m_lastEntryId, 50, [](const auto &) {});
+                                                m_lastEntryId, 50, [this](const auto &result) {
+        m_loading = false;
+        if (!result.success()) {
+            m_loadMoreButton->setEnabled(true);
+            qCWarning(LogDiscord) << "Failed to load more audit log entries:" << result.error;
+        }
+    });
 }
 
 void AuditLogWidget::onFilterChanged()

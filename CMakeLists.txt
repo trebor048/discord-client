@@ -202,6 +202,8 @@ set(PROJECT_SOURCES
     src/Core/ClientInstance.cpp
     src/Core/Session.cpp
     src/Core/Logging.cpp
+    src/Core/Animation/AnimationConfig.cpp
+    src/Core/Animation/HoverAnimator.cpp
     src/Core/MessageManager.cpp
     src/Core/ForumManager.cpp
     src/Core/ImageManager.cpp
@@ -247,6 +249,7 @@ set(PROJECT_SOURCES
     src/UI/Settings/AuthorizedAppsPage.cpp
     src/UI/Settings/StreamerModePage.cpp
     src/UI/Widgets/CustomStatusEdit.cpp
+    src/UI/Widgets/FadeInDelegate.cpp
     src/UI/Widgets/ToastNotification.cpp
     src/UI/Widgets/ToastContainer.cpp
     src/UI/ChannelList/ChannelDelegate.cpp

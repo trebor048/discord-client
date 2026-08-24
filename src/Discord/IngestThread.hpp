@@ -51,7 +51,14 @@ private:
     // chunks rather than grow memory unboundedly.
     static constexpr size_t maxQueuedBytes = 4 * 1024 * 1024;
     static constexpr size_t maxQueuedMessages = 1000;
-    QByteArray decompressedBuffer;
+    // Accumulated compressed input not yet delimited by a 00 00 FF FF marker —
+    // a websocket frame can carry several payloads or end mid-payload, so the
+    // compressed bytes are buffered here and split on the marker (which lives
+    // in the compressed stream, never in the decompressed output).
+    QByteArray pendingInput;
+    // Cap for the compressed-but-not-yet-delimited buffer; beyond this the
+    // stream is assumed broken and a reconnect is forced.
+    static constexpr int kMaxBufferedBytes = 16 * 1024 * 1024;
 
     z_stream stream;
     bool streamActive = false;

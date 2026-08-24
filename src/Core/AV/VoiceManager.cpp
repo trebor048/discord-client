@@ -635,6 +635,15 @@ void VoiceManager::stopVoiceThread()
         qCWarning(LogVoice) << "Voice thread did not stop in time, terminating";
         voiceThread->terminate();
         voiceThread->wait();
+
+        // The queued stop() may never have run — stop synchronously so the voice
+        // gateway's network/heartbeat threads are joined and audio resources are
+        // released before the objects are deleted (a joinable std::thread in a
+        // destructor would std::terminate).
+        if (ap)
+            ap->stop();
+        if (vc)
+            vc->stop();
     }
 
     delete audioPipeline;

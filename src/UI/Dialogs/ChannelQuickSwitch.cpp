@@ -1,6 +1,7 @@
 #include "ChannelQuickSwitch.hpp"
 
 #include "Core/AnimationUtils.hpp"
+#include "Core/Animation/AnimationConfig.hpp"
 #include "Core/Theme/Manager.hpp"
 
 #include <QApplication>
@@ -149,7 +150,7 @@ ChannelQuickSwitch::ChannelQuickSwitch(ChannelTreeModel *model, ServerRailModel 
     panelOpacity->setOpacity(0.0);
     panel->setGraphicsEffect(panelOpacity);
     panelFadeAnimation = new QPropertyAnimation(panelOpacity, "opacity", this);
-    panelFadeAnimation->setDuration(160);
+    panelFadeAnimation->setDuration(Core::AnimationConfig::instance().scaled(220));
     panelFadeAnimation->setEasingCurve(QEasingCurve::OutCubic);
 
     auto *layout = new QVBoxLayout(panel);

@@ -125,6 +125,13 @@ void GuildSettingsDialog::setupUi()
 
     mainLayout->addWidget(m_splitter, 1);
 
+    // Status bar for per-page progress/error messages (statusMessage signal).
+    m_statusLabel = new QLabel(this);
+    m_statusLabel->setContentsMargins(16, 6, 16, 6);
+    m_statusLabel->setWordWrap(true);
+    m_statusLabel->hide();
+    mainLayout->addWidget(m_statusLabel);
+
     // Populate guild info
     auto guild = m_instance->getGuild(m_guildId);
     if (guild) {
@@ -233,6 +240,22 @@ void GuildSettingsDialog::addPage(Page page, const QString &title, GuildSettings
 
     m_navList->item(index)->setText(title);
     m_pageStack->addWidget(widget);
+
+    // Surface per-page status/error messages in the dialog's status bar instead
+    // of silently dropping them.
+    connect(widget, &GuildSettingsPage::statusMessage, this, &GuildSettingsDialog::onStatusMessage);
+}
+
+void GuildSettingsDialog::onStatusMessage(const QString &message)
+{
+    if (!m_statusLabel)
+        return;
+    if (message.isEmpty()) {
+        m_statusLabel->hide();
+        return;
+    }
+    m_statusLabel->setText(message);
+    m_statusLabel->show();
 }
 
 void GuildSettingsDialog::onPageChanged(int index)

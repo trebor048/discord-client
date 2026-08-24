@@ -290,6 +290,21 @@ public:
     /// Row of a loaded message, or -1 when it isn't in the current channel view.
     [[nodiscard]] int rowForMessage(Core::Snowflake messageId) const;
 
+    struct MessageSearchHit
+    {
+        Core::Snowflake messageId;
+        QString authorName;
+        Core::Snowflake authorId;
+        QString authorAvatarHash;
+        QString content;      // raw (non-HTML) content
+        qint64 timestampSecs = 0;
+        int row = -1;         // row in this model, -1 when the message isn't loaded
+    };
+
+    /// Case-insensitive substring search over the messages currently loaded for
+    /// the active channel. Results are ordered oldest → newest.
+    [[nodiscard]] QList<MessageSearchHit> searchLoadedMessages(const QString &query, int limit = 200) const;
+
     [[nodiscard]] Core::Snowflake getOldestMessageId() const;
     [[nodiscard]] Core::Snowflake getActiveChannelId() const;
     [[nodiscard]] Core::Snowflake getActiveGuildId() const;
@@ -389,10 +404,8 @@ private:
     mutable QHash<Snowflake, QList<EmbedData>> embedCache;
     mutable QHash<Snowflake, QList<AttachmentData>> attachmentCache;
     mutable QHash<Snowflake, QList<ReactionData>> reactionCache;
-    mutable QHash<Snowflake, QList<StickerData>> stickerCache;
     mutable QCache<DocCacheKey, QTextDocument> docCache{ 500 };
     mutable QHash<Snowflake, QSet<int>> docCacheSubIds;
-    mutable int docCacheWidth = 0;
 
     Snowflake currentChannelId = Snowflake::Invalid;
     Snowflake currentGuildId = Snowflake::Invalid;
@@ -422,8 +435,6 @@ private:
     mutable QSet<QUrl> failedGifUrls; // GIF URLs that failed to load/decode; don't re-create every paint
 
     mutable QSet<Snowflake> newMessageIds; // IDs of recently inserted messages for highlight animation
-    int lastNewMessageStart = -1;          // row index where the most recent batch of new messages began
-    int lastNewMessageCount = 0;           // count of messages in the most recent new-message batch
 
     friend class ChatDelegate;
 };

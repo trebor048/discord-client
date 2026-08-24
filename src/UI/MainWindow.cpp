@@ -47,6 +47,7 @@
 #include "ConnectionBanner.hpp"
 #include "BrowserCaptchaResolver.hpp"
 #include "Dialogs/ChannelQuickSwitch.hpp"
+#include "Dialogs/ChannelSearchPopup.hpp"
 #include "Dialogs/ConfirmPopup.hpp"
 #include "Dialogs/EditProfileDialog.hpp"
 #include "Dialogs/PinnedMessagesPanel.hpp"
@@ -304,6 +305,9 @@ void MainWindow::disconnectInstanceConnections(Core::ClientInstance *instance)
 
 void MainWindow::switchActiveInstance(Core::ClientInstance *newInstance)
 {
+    if (!newInstance)
+        return;
+
     if (currentInstance) {
         currentInstance->forums()->setCurrentForum({});
 
@@ -901,7 +905,18 @@ void MainWindow::setupUi()
     pinnedMessagesButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     pinnedMessagesButton->setAutoRaise(true);
     pinnedMessagesButton->setCursor(Qt::PointingHandCursor);
-    connect(pinnedMessagesButton, &QToolButton::clicked, this, &MainWindow::openPinnedMessages);
+    connect(pinnedMessagesButton, &QToolButton::clicked, this,
+            [this]() { openPinnedMessages(chatModel->getActiveChannelId()); });
+
+    searchButton = new QToolButton(rightSideWidget);
+    searchButton->setText(tr("Search"));
+    searchButton->setIcon(Core::Theme::Icons::icon(Core::Theme::Icons::Name::Search, Core::Theme::Token::PrimaryText));
+    searchButton->setIconSize(QSize(16, 16));
+    searchButton->setToolTip(tr("Search this channel (Ctrl+F)"));
+    searchButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    searchButton->setAutoRaise(true);
+    searchButton->setCursor(Qt::PointingHandCursor);
+    connect(searchButton, &QToolButton::clicked, this, &MainWindow::openChannelSearch);
 
     channelNameLabel = new QLabel(rightSideWidget);
     {
@@ -922,6 +937,7 @@ void MainWindow::setupUi()
     channelToolbarLayout->addWidget(channelNameLabel, 1);
     channelToolbarLayout->addWidget(pinnedMessagesButton, 0);
     channelToolbarLayout->addWidget(threadBrowserButton, 0);
+    channelToolbarLayout->addWidget(searchButton, 0);
     channelToolbar->setStyleSheet(
             "#channelToolbar { border-bottom: 1px solid rgba(128, 128, 128, 0.25); }");
     channelToolbar->hide();
@@ -1280,8 +1296,7 @@ void MainWindow::setupUi()
 
     connect(chatView, &ChatView::pinnedMessagesRequested, this,
             [this](Snowflake channelId) {
-                Q_UNUSED(channelId);
-                openPinnedMessages();
+                openPinnedMessages(channelId);
             });
 
     connect(chatView, &ChatView::editMessageRequested, this,
@@ -2125,6 +2140,12 @@ void MainWindow::setupMenu()
     connect(quickSwitchAction, &QAction::triggered, this, openQuickSwitch);
     connect(tabBar, &TabBar::addTabRequested, this, handleNewTab);
 
+    auto *channelSearchAction = new QAction(tr("Search in &Channel"), this);
+    channelSearchAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_F));
+    channelSearchAction->setShortcutContext(Qt::ApplicationShortcut);
+    addAction(channelSearchAction);
+    connect(channelSearchAction, &QAction::triggered, this, &MainWindow::openChannelSearch);
+
     auto *shortcutSheetAction = new QAction(tr("Keyboard &Shortcuts"), this);
     shortcutSheetAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Slash));
     shortcutSheetAction->setShortcutContext(Qt::ApplicationShortcut);
@@ -2166,9 +2187,10 @@ TabEntry MainWindow::currentChannelEntry() const
     return windowManager->currentChannelEntry();
 }
 
-void MainWindow::openChannelInNewWindow(const TabEntry &entry, bool tileToSide)
+void MainWindow::openChannelInNewWindow(const TabEntry &entry, bool tileToSide,
+                                        Core::Snowflake jumpMessageId)
 {
-    windowManager->openChannelInNewWindow(entry, tileToSide);
+    windowManager->openChannelInNewWindow(entry, tileToSide, jumpMessageId);
 }
 
 void MainWindow::openDetachedWindow(bool tileToSide)
@@ -2352,9 +2374,79 @@ void MainWindow::openThreadBrowser()
     channelController->openThreadBrowser();
 }
 
-void MainWindow::openPinnedMessages()
+void MainWindow::openPinnedMessages(Snowflake channelId)
 {
-    channelController->openPinnedMessages();
+    channelController->openPinnedMessages(channelId);
+}
+
+void MainWindow::openChannelSearch()
+{
+    if (!currentInstance)
+        return;
+
+    const Snowflake channelId = chatModel->getActiveChannelId();
+    if (!channelId.isValid())
+        return;
+
+    if (!channelSearchPopup) {
+        channelSearchPopup = new ChannelSearchPopup(chatModel, currentInstance->discord(),
+                                                    session->getImageManager(), this);
+        connect(channelSearchPopup, &ChannelSearchPopup::jumpRequested, this,
+                &MainWindow::jumpToMessage);
+        connect(channelSearchPopup, &ChannelSearchPopup::openInNewTabRequested, this,
+                &MainWindow::openSearchResultInNewTab);
+        connect(channelSearchPopup, &ChannelSearchPopup::openInNewWindowRequested, this,
+                &MainWindow::openSearchResultInNewWindow);
+        connect(channelSearchPopup, &ChannelSearchPopup::openInTiledViewRequested, this,
+                &MainWindow::openSearchResultInTiledView);
+    }
+
+    channelSearchPopup->setClient(currentInstance->discord());
+    channelSearchPopup->setChannel(channelId, channelFullName);
+    channelSearchPopup->show();
+    channelSearchPopup->raise();
+    channelSearchPopup->activateWindow();
+}
+
+void MainWindow::openSearchResultInNewTab(Core::Snowflake channelId, Core::Snowflake messageId)
+{
+    if (!channelId.isValid())
+        return;
+
+    TabEntry entry = currentChannelEntry();
+    if (entry.channelId != channelId) {
+        // Search always targets the active channel, but stay correct anyway:
+        // fall back to the tab entry for this channel from the tree.
+        entry.channelId = channelId;
+    }
+    if (!entry.channelId.isValid())
+        return;
+
+    tabBar->openNewTab(entry);
+    // openNewTab emits tabChanged -> channel switch; jump once loaded.
+    jumpToMessage(channelId, messageId);
+}
+
+void MainWindow::openSearchResultInNewWindow(Core::Snowflake channelId, Core::Snowflake messageId)
+{
+    TabEntry entry = currentChannelEntry();
+    if (entry.channelId != channelId)
+        entry.channelId = channelId;
+    if (!entry.channelId.isValid())
+        return;
+
+    openChannelInNewWindow(entry, false, messageId);
+}
+
+void MainWindow::openSearchResultInTiledView(Core::Snowflake channelId, Core::Snowflake messageId)
+{
+    TabEntry entry = currentChannelEntry();
+    if (entry.channelId != channelId)
+        entry.channelId = channelId;
+    if (!entry.channelId.isValid())
+        return;
+
+    openChannelInNewWindow(entry, true, messageId);
 }
 
 void MainWindow::navigateToChannel(Core::Snowflake channelId)

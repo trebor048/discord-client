@@ -33,10 +33,14 @@ PrivacySettingsPage::PrivacySettingsPage(QWidget *parent)
     : QWidget(parent)
 {
     auto *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(14);
 
     // === Privacy section ===
     auto *privacyGroup = new QGroupBox(tr("Privacy"), this);
     auto *privacyLayout = new QFormLayout(privacyGroup);
+    privacyLayout->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    privacyLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
 
     dmFilterCombo = new QComboBox(this);
     dmFilterCombo->addItem(tr("Everyone"), 0);
@@ -64,6 +68,7 @@ PrivacySettingsPage::PrivacySettingsPage(QWidget *parent)
     // === Friend request checkboxes ===
     auto *friendGroup = new QGroupBox(tr("Friend Requests"), this);
     auto *friendLayout = new QVBoxLayout(friendGroup);
+    friendLayout->setSpacing(10);
 
     friendRequestFromEveryone = new QCheckBox(tr("Everyone"), this);
     friendRequestFromEveryone->setChecked(
@@ -85,6 +90,8 @@ PrivacySettingsPage::PrivacySettingsPage(QWidget *parent)
     // === Safety section ===
     auto *safetyGroup = new QGroupBox(tr("Safety"), this);
     auto *safetyLayout = new QFormLayout(safetyGroup);
+    safetyLayout->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    safetyLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
 
     explicitImageFilterCombo = new QComboBox(this);
     explicitImageFilterCombo->addItem(tr("Keep Me Safe (scan all DMs)"), 0);
@@ -99,7 +106,7 @@ PrivacySettingsPage::PrivacySettingsPage(QWidget *parent)
     auto *explicitFilterNote = new QLabel(
             tr("Sent to your account; Acheron does not scan images locally."), safetyGroup);
     explicitFilterNote->setWordWrap(true);
-    explicitFilterNote->setStyleSheet(QStringLiteral("color: gray; font-size: 11px;"));
+    explicitFilterNote->setStyleSheet(QStringLiteral("color: palette(mid); font-size: 0.8em;"));
     safetyLayout->addRow(explicitFilterNote);
 
     layout->addWidget(safetyGroup);

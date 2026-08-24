@@ -270,6 +270,7 @@ signals:
     void stateChanged(Core::ConnectionState state);
     void ready(const Ready &data);
     void readySupplemental(const ReadySupplemental &data);
+    void resumed();
     void messageCreated(const Message &msg);
     void messageUpdated(const Message &msg);
     void messageDeleted(const MessageDelete &event);
@@ -352,6 +353,7 @@ private slots:
 
     void onGatewayReady(const Ready &data);
     void onGatewayReadySupplemental(const ReadySupplemental &data);
+    void onGatewayResumed();
     void onGatewayMessageCreate(const Message &msg);
     void onGatewayMessageUpdate(const Message &msg);
     void onGatewayMessageDelete(const MessageDelete &event);

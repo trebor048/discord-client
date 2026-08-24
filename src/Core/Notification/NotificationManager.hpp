@@ -142,6 +142,7 @@ private:
     // Sound selection
     QString selectSoundForNotification(const Notification::ToastNotificationData &data);
     bool shouldPlaySoundForType(const Notification::ToastNotificationData &data) const;
+    bool shouldUseUserSound(const Notification::ToastNotificationData &data) const;
 
     // Native notifications
     bool ensureNativeNotificationTray(QString *errorMessage = nullptr);
@@ -208,16 +209,6 @@ private:
     std::optional<Discord::User> m_cachedCurrentUser;
     qint64 m_cachedCurrentUserTime = 0;
     static constexpr qint64 CURRENT_USER_CACHE_TTL = 1000;
-
-    // Notification context for user-specific sounds
-    struct NotificationContext {
-        QString authorId;
-        QString channelId;
-        bool isDM = false;
-        bool userOnNotifyList = false;
-        bool channelOnNotifyList = false;
-    };
-    std::optional<NotificationContext> m_lastNotificationContext;
 };
 
 } // namespace Core

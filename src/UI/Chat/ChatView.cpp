@@ -6,6 +6,7 @@
 #include "Core/Theme/Manager.hpp"
 #include "UI/Dialogs/EmojiPickerDialog.hpp"
 #include "Core/AnimationUtils.hpp"
+#include "Core/Animation/AnimationConfig.hpp"
 #include <QMenu>
 #include <QGraphicsOpacityEffect>
 #include <QRegularExpression>
@@ -320,11 +321,11 @@ ChatView::ChatView(QWidget *parent) : QListView(parent), hoveredRow(-1), hovered
         effect->setOpacity(0.0);
 
     jumpToBottomAnimation = new QPropertyAnimation(effect, "opacity", this);
-    jumpToBottomAnimation->setDuration(140);
+    jumpToBottomAnimation->setDuration(Core::AnimationConfig::instance().scaled(140));
     jumpToBottomAnimation->setEasingCurve(QEasingCurve::InOutQuad);
 
     scrollAnimation = new QPropertyAnimation(verticalScrollBar(), "value", this);
-    scrollAnimation->setDuration(180);
+    scrollAnimation->setDuration(Core::AnimationConfig::instance().scaled(180));
     scrollAnimation->setEasingCurve(QEasingCurve::OutCubic);
 
     // Empty/loading placeholder, centered over the viewport. Shown while a
@@ -379,6 +380,9 @@ void ChatView::setModel(QAbstractItemModel *model)
         anchorIndex = QPersistentModelIndex();
         hoverLayoutRow = -1;
         cancelPendingJump();
+        appearRows.clear();
+        if (appearAnimation)
+            appearAnimation->stop();
         QTimer::singleShot(0, this, &ChatView::scrollToBottom);
         // A reset with no rows means a channel switch with a fetch in flight
         // (requestLoadChannel runs right after); say so instead of showing a
@@ -811,6 +815,14 @@ void ChatView::onRowsAboutToBeInserted(const QModelIndex &parent, int start, int
     // Row indices shift on insertion — the hover layout cache is stale.
     hoverLayoutRow = -1;
 
+    // History pagination inserts at the top: row indices of any rows still
+    // fading in would be wrong, so drop the fade instead of misplacing it.
+    if (!parent.isValid() && start == 0) {
+        appearRows.clear();
+        if (appearAnimation)
+            appearAnimation->stop();
+    }
+
     QScrollBar *vbar = verticalScrollBar();
     atBottom = (vbar->value() + vbar->pageStep() >= vbar->maximum());
 
@@ -912,6 +924,24 @@ void ChatView::onMessageJumpFailed(Core::Snowflake channelId, Core::Snowflake me
 
 void ChatView::onRowsInserted(const QModelIndex &parent, int start, int end)
 {
+    // New messages arriving at the bottom fade in. History pagination inserts
+    // at the top (start == 0) and must not animate.
+    if (atBottom && !parent.isValid() && start > 0 && model()) {
+        if (!appearAnimation) {
+            appearAnimation = new QVariantAnimation(this);
+            appearAnimation->setStartValue(0.0);
+            appearAnimation->setEndValue(1.0);
+            appearAnimation->setDuration(Core::AnimationUtils::duration(300));
+            appearAnimation->setEasingCurve(QEasingCurve::OutCubic);
+            connect(appearAnimation, &QVariantAnimation::valueChanged, this,
+                    [this](const QVariant &v) { onAppearTick(v.toReal()); });
+        }
+        for (int row = start; row <= end; ++row)
+            appearRows.insert(row, 0.0);
+        appearAnimation->stop();
+        appearAnimation->start();
+    }
+
     if (atBottom) {
         scrollToBottom();
     } else if (start == 0 && anchorIndex.isValid()) {
@@ -1012,7 +1042,7 @@ void ChatView::beginChannelCrossfade()
     auto *animation = new QVariantAnimation(this);
     animation->setStartValue(1.0);
     animation->setEndValue(0.0);
-    animation->setDuration(100);
+    animation->setDuration(Core::AnimationConfig::instance().scaled(100));
     animation->setEasingCurve(QEasingCurve::OutCubic);
 
     connect(animation, &QVariantAnimation::valueChanged, this,
@@ -1488,6 +1518,23 @@ bool ChatView::isActiveSearchMatchRow(int row) const
 {
     return activeSearchMatch >= 0 && activeSearchMatch < searchMatches.size() &&
            searchMatches[activeSearchMatch] == row;
+}
+
+qreal ChatView::rowAppearOpacity(int row) const
+{
+    auto it = appearRows.constFind(row);
+    if (it == appearRows.constEnd())
+        return 1.0;
+    return it.value();
+}
+
+void ChatView::onAppearTick(qreal progress)
+{
+    for (auto &opacity : appearRows)
+        opacity = progress;
+    viewport()->update();
+    if (progress >= 1.0)
+        appearRows.clear();
 }
 
 void ChatView::showSearchBar()

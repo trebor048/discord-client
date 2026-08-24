@@ -4,6 +4,7 @@
 #include <QComboBox>
 #include <QFormLayout>
 #include <QGroupBox>
+#include <QHBoxLayout>
 #include <QPushButton>
 #include <QSettings>
 #include <QVBoxLayout>
@@ -18,26 +19,43 @@ GeneralPage::GeneralPage(QWidget *parent)
     : QWidget(parent)
 {
     auto *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(14);
 
     // Edit Profile button at top
+    auto *profileRow = new QHBoxLayout();
     editProfileBtn = new QPushButton(tr("Edit Profile"), this);
-    layout->addWidget(editProfileBtn);
+    profileRow->addWidget(editProfileBtn);
+    profileRow->addStretch(1);
+    layout->addLayout(profileRow);
     connect(editProfileBtn, &QPushButton::clicked, this, &GeneralPage::editProfileRequested);
 
-    inMemoryCacheCheckbox = new QCheckBox(tr("In-memory cache database (requires restart)"), this);
+    auto *generalGroup = new QGroupBox(tr("General"), this);
+    auto *generalLayout = new QVBoxLayout(generalGroup);
+    generalLayout->setSpacing(12);
+
+    inMemoryCacheCheckbox = new QCheckBox(tr("In-memory cache database (requires restart)"), generalGroup);
     inMemoryCacheCheckbox->setChecked(QSettings().value("general/in_memory_cache", false).toBool());
-    layout->addWidget(inMemoryCacheCheckbox);
+    generalLayout->addWidget(inMemoryCacheCheckbox);
 
-    notificationSoundsCheckbox = new QCheckBox(tr("Play a sound for new messages outside the current channel"), this);
+    notificationSoundsCheckbox = new QCheckBox(tr("Play a sound for new messages outside the current channel"), generalGroup);
     notificationSoundsCheckbox->setChecked(QSettings().value("notifications/sounds", true).toBool());
-    layout->addWidget(notificationSoundsCheckbox);
+    generalLayout->addWidget(notificationSoundsCheckbox);
 
-    developerModeCheckbox = new QCheckBox(tr("Developer Mode"), this);
+    developerModeCheckbox = new QCheckBox(tr("Developer Mode"), generalGroup);
     developerModeCheckbox->setChecked(Core::Settings::instance().developerMode());
-    layout->addWidget(developerModeCheckbox);
+    generalLayout->addWidget(developerModeCheckbox);
+
+    layout->addWidget(generalGroup);
+
+    auto *tabsGroup = new QGroupBox(tr("Tabs & Status"), this);
+    auto *tabsGroupLayout = new QVBoxLayout(tabsGroup);
+    tabsGroupLayout->setSpacing(12);
 
     auto *tabsLayout = new QFormLayout();
-    newTabBehaviorCombo = new QComboBox(this);
+    tabsLayout->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    tabsLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    newTabBehaviorCombo = new QComboBox(tabsGroup);
     newTabBehaviorCombo->addItem(tr("Open channel picker"), "picker");
     newTabBehaviorCombo->addItem(tr("Duplicate current channel"), "duplicate");
     const QString newTabBehavior = QSettings().value("ui/newTabBehavior", "picker").toString();
@@ -46,21 +64,26 @@ GeneralPage::GeneralPage(QWidget *parent)
         newTabIdx = 0;
     newTabBehaviorCombo->setCurrentIndex(newTabIdx);
     tabsLayout->addRow(tr("When opening a new tab:"), newTabBehaviorCombo);
-    layout->addLayout(tabsLayout);
+    tabsGroupLayout->addLayout(tabsLayout);
 
     auto *statusLayout = new QFormLayout();
-    customStatusWidget = new CustomStatusEdit(this);
+    statusLayout->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    statusLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    customStatusWidget = new CustomStatusEdit(tabsGroup);
     statusLayout->addRow(tr("Custom status"), customStatusWidget);
-    layout->addLayout(statusLayout);
+    tabsGroupLayout->addLayout(statusLayout);
+
+    layout->addWidget(tabsGroup);
 
     auto *mediaGroup = new QGroupBox(tr("Media"), this);
     auto *mediaLayout = new QVBoxLayout(mediaGroup);
+    mediaLayout->setSpacing(12);
 
-    autoplayGifsCheckbox = new QCheckBox(tr("Autoplay GIFs"), this);
+    autoplayGifsCheckbox = new QCheckBox(tr("Autoplay GIFs"), mediaGroup);
     autoplayGifsCheckbox->setChecked(QSettings().value("ui/gifAutoplay", true).toBool());
     mediaLayout->addWidget(autoplayGifsCheckbox);
 
-    autoplayVideosCheckbox = new QCheckBox(tr("Autoplay Videos"), this);
+    autoplayVideosCheckbox = new QCheckBox(tr("Autoplay Videos"), mediaGroup);
     autoplayVideosCheckbox->setChecked(QSettings().value("ui/videoAutoplay", true).toBool());
     mediaLayout->addWidget(autoplayVideosCheckbox);
 

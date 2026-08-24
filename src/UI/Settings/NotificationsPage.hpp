@@ -5,6 +5,8 @@
 #include <QHash>
 #include <QVector>
 
+#include "UI/Widgets/FadeInDelegate.hpp"
+
 class QCheckBox;
 class QSlider;
 class QComboBox;
@@ -135,6 +137,9 @@ private:
     QListWidget *m_ignoreUsersList = nullptr;
     // url string -> rows in m_notifyForFancyList awaiting that icon.
     QHash<QString, QVector<int>> m_notifyIconRows;
+    FadeInDelegate *m_notifyFadeDelegate = nullptr;
+    FadeInDelegate *m_ignoreFadeDelegate = nullptr;
+    FadeInDelegate *m_userSoundsFadeDelegate = nullptr;
 };
 
 } // namespace UI

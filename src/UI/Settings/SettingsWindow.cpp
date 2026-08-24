@@ -3,13 +3,17 @@
 #include "Core/AnimationUtils.hpp"
 
 #include <QAbstractItemView>
+#include <QEvent>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLayout>
+#include <QScrollArea>
 #include <QToolButton>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <functional>
 
 #include "AppearancePage.hpp"
 #include "AuthorizedAppsPage.hpp"
@@ -35,6 +39,60 @@
 namespace Acheron {
 namespace UI {
 
+namespace {
+
+// Re-pins a settings page's minimum height to its preferred content height so
+// the wrapping scroll area never compresses rows below their text (which
+// overlaps at large UI fonts). Re-runs on LayoutRequest — the event Qt emits
+// whenever any child layout invalidates — so tab switches, dynamic content
+// (loaded app lists, sound-override widgets) and font changes all re-pin.
+// The pin is guarded against no-ops so the min-height set here cannot retrigger
+// an endless LayoutRequest loop.
+class MinHeightRefresher : public QObject
+{
+public:
+    MinHeightRefresher(QWidget *page, QObject *parent = nullptr)
+        : QObject(parent), page(page)
+    {
+    }
+
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (watched == page) {
+            switch (event->type()) {
+            case QEvent::ApplicationFontChange:
+            case QEvent::FontChange:
+            case QEvent::LayoutRequest:
+                refresh();
+                break;
+            default:
+                break;
+            }
+        }
+        return QObject::eventFilter(watched, event);
+    }
+
+    void refresh()
+    {
+        if (!page)
+            return;
+        // QWidget::sizeHint() returns layout()->totalSizeHint(), which for a
+        // page whose layout holds a QTabWidget can be far smaller than the
+        // layout's real preferred size (the tab widget sizes to its tallest
+        // page). Take the larger of the two so the pin never crushes content.
+        int preferred = page->sizeHint().height();
+        if (QLayout *lay = page->layout())
+            preferred = std::max(preferred, lay->sizeHint().height());
+        if (page->minimumHeight() != preferred)
+            page->setMinimumHeight(preferred);
+    }
+
+private:
+    QWidget *page;
+};
+
+} // namespace
+
 SettingsWindow::SettingsWindow(QWidget *parent)
     : BasePopup(parent)
 {
@@ -47,18 +105,16 @@ void SettingsWindow::setClient(Discord::Client *c)
 {
     client = c;
 
-    // Propagate to pages that need the client
-    for (int i = 0; i < pages->count(); ++i) {
-        auto *page = pages->widget(i);
-        if (auto *generalPage = qobject_cast<GeneralPage *>(page))
-            generalPage->setClient(c);
-        else if (auto *privacyPage = qobject_cast<PrivacySettingsPage *>(page))
-            privacyPage->setClient(c);
-        else if (auto *connPage = qobject_cast<ConnectionsPage *>(page))
-            connPage->setClient(c);
-        else if (auto *appsPage = qobject_cast<AuthorizedAppsPage *>(page))
-            appsPage->setClient(c);
-    }
+    // Propagate to pages that need the client. Pages live inside scroll-area
+    // wrappers, so locate them by type anywhere in the page stack.
+    if (auto *generalPage = findChild<GeneralPage *>())
+        generalPage->setClient(c);
+    if (auto *privacyPage = findChild<PrivacySettingsPage *>())
+        privacyPage->setClient(c);
+    if (auto *connPage = findChild<ConnectionsPage *>())
+        connPage->setClient(c);
+    if (auto *appsPage = findChild<AuthorizedAppsPage *>())
+        appsPage->setClient(c);
 }
 
 void SettingsWindow::setImageManager(Core::ImageManager *mgr)
@@ -111,12 +167,12 @@ QStringList SettingsWindow::pageNames() const
 void SettingsWindow::setupUi()
 {
     auto *container = getContainer();
-    container->setMinimumSize(900, 600);
-    container->setMaximumWidth(1100);
+    container->setMinimumSize(1040, 640);
+    container->setMaximumWidth(1500);
     container->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
     auto *outerLayout = new QVBoxLayout(container);
-    outerLayout->setContentsMargins(24, 20, 24, 24);
+    outerLayout->setContentsMargins(28, 22, 28, 26);
     outerLayout->setSpacing(0);
 
     auto *headerLayout = new QHBoxLayout();
@@ -154,7 +210,7 @@ void SettingsWindow::setupUi()
 
     auto *mainLayout = new QHBoxLayout();
     mainLayout->setContentsMargins(0, 0, 0, 0);
-    mainLayout->setSpacing(20);
+    mainLayout->setSpacing(24);
 
     categoryList = new QListWidget(container);
     categoryList->setObjectName(QStringLiteral("settingsCategoryList"));
@@ -179,9 +235,29 @@ void SettingsWindow::setupUi()
     pages = new QStackedWidget(container);
     pages->setObjectName(QStringLiteral("settingsPages"));
 
+    // Wrap every page in a scroll area so large fonts (or a short window)
+    // scroll the content instead of letting the stack compress the layouts,
+    // which makes text overlap.
     auto addPage = [this](const QString &name, QWidget *page) {
+        auto *scroll = new QScrollArea(this);
+        scroll->setObjectName(QStringLiteral("settingsPageScroll"));
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        scroll->setWidget(page);
+        // The scroll area resizes its widget toward the viewport size but never
+        // below minimumSizeHint — and a layout's minimums are far smaller than
+        // the text they contain (especially with a large UI font), so rows got
+        // compressed and their text overlapped. Pin the minimum height to the
+        // preferred content height so the page scrolls instead of crushing;
+        // MinHeightRefresher re-pins on LayoutRequest (tab switches, dynamic
+        // content) and font changes.
+        auto *refresher = new MinHeightRefresher(page, this);
+        page->installEventFilter(refresher);
+        refresher->refresh();
         categoryList->addItem(name);
-        pages->addWidget(page);
+        pages->addWidget(scroll);
     };
 
     // Existing pages
@@ -231,12 +307,22 @@ void SettingsWindow::setupUi()
     addPage(tr("Audio"), new AudioPage(this));
 #endif
 
+    // Fit the category list to its widest label so long names (e.g. under a
+    // large UI font) stay readable instead of clipping into the page area.
+    int widestLabel = 0;
+    for (int i = 0; i < categoryList->count(); ++i)
+        widestLabel = std::max(widestLabel,
+                               categoryList->fontMetrics().horizontalAdvance(
+                                       categoryList->item(i)->text()));
+    // item padding (10px x2) + list padding (4px x2) + borders (1px x2)
+    categoryList->setFixedWidth(std::clamp(widestLabel + 30, 190, 420));
+
     categoryList->setCurrentRow(0);
 
     connect(categoryList, &QListWidget::currentRowChanged, this, [this](int index) {
         pages->setCurrentIndex(index);
         if (auto *page = pages->currentWidget())
-            Acheron::Core::AnimationUtils::fadeIn(page, 150);
+            Acheron::Core::AnimationUtils::fadeIn(page, 180);
     });
 
     mainLayout->addWidget(categoryList);

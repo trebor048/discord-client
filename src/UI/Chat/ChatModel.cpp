@@ -1289,6 +1289,7 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
             attachmentCache.remove(oldId);
             embedCache.remove(oldId);
             reactionCache.remove(oldId);
+            invalidateDocCacheForMessage(oldId);
             reactionCache.remove(incomingMsg.id);
             attachmentCache.remove(incomingMsg.id);
             messageRowIndexDirty = true; // message ID changed
@@ -1311,9 +1312,6 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
 
         if (!newMessages.isEmpty()) {
             beginInsertRows({}, messages.size(), messages.size() + newMessages.size() - 1);
-
-            lastNewMessageStart = messages.size();
-            lastNewMessageCount = newMessages.size();
 
             messages = messages + newMessages;
             for (const auto &msg : newMessages)
@@ -1615,6 +1613,36 @@ int ChatModel::rowForMessage(Snowflake messageId) const
     return messageRowById.value(messageId, -1);
 }
 
+QList<ChatModel::MessageSearchHit> ChatModel::searchLoadedMessages(const QString &query,
+                                                                   int limit) const
+{
+    QList<MessageSearchHit> hits;
+    const QString needle = query.trimmed().toCaseFolded();
+    if (needle.isEmpty() || limit <= 0)
+        return hits;
+
+    for (int row = 0; row < messages.size() && hits.size() < limit; ++row) {
+        const Discord::Message &msg = messages.at(row);
+        if (!msg.content.hasValue())
+            continue;
+        if (!msg.content.get().toCaseFolded().contains(needle))
+            continue;
+
+        MessageSearchHit hit;
+        hit.messageId = msg.id.get();
+        const Discord::User author = msg.author.getOr(Discord::User{});
+        hit.authorName = resolveAuthorName(author);
+        hit.authorId = author.id.getOr(Core::Snowflake::Invalid);
+        hit.authorAvatarHash = author.avatar.getOr(QString());
+        hit.content = msg.content.get();
+        if (msg.timestamp.hasValue())
+            hit.timestampSecs = msg.timestamp.get().toSecsSinceEpoch();
+        hit.row = row;
+        hits.append(hit);
+    }
+    return hits;
+}
+
 void ChatModel::ensureMessageRowIndex() const
 {
     if (!messageRowIndexDirty)
@@ -1771,7 +1799,6 @@ void ChatModel::invalidateDocCache()
 {
     docCache.clear();
     docCacheSubIds.clear();
-    docCacheWidth = 0;
 }
 
 void ChatModel::invalidateLayout()

@@ -1,0 +1,1 @@
+- [reference] reference：Completed full bug-fix pass: 27 code fixes across Gateway/Client/Voice/DAVE/UI/Storage/Notification subsystems + verified 3 false positives + 1 feature-deferral; build green, ctest 8/8, smoke OK. → reference.md

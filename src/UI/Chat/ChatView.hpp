@@ -8,6 +8,7 @@
 #include <QVariantAnimation>
 
 #include <functional>
+#include <QHash>
 
 #include "ChatLayout.hpp"
 #include "ChatModel.hpp"
@@ -51,6 +52,9 @@ public:
     int editingRow() const { return currentEditingIndex.isValid() ? currentEditingIndex.row() : -1; }
     bool isSearchMatchRow(int row) const { return searchMatches.contains(row); }
     bool isActiveSearchMatchRow(int row) const;
+    /// Opacity (0..1) for a row that is still fading in as a newly inserted
+    /// message; 1.0 for everything else. Consulted by ChatDelegate::paint.
+    qreal rowAppearOpacity(int row) const;
 
     static constexpr int InlineEditMinHeight = 60;
 
@@ -130,6 +134,7 @@ private slots:
     void onRowsInserted(const QModelIndex &parent, int start, int end);
     void onMessageJumpReady(Core::Snowflake channelId, Core::Snowflake messageId);
     void onMessageJumpFailed(Core::Snowflake channelId, Core::Snowflake messageId);
+    void onAppearTick(qreal progress);
 
 private:
     void copySelectedText();
@@ -175,7 +180,6 @@ private:
     ChatCursor selectionHead;
 
     bool isFetchingTop = false;
-    bool isFetchingBottom = false;
 
     QPersistentModelIndex anchorIndex;
     int anchorDistanceFromBottom = 0;
@@ -204,6 +208,10 @@ private:
     QVariantAnimation *channelFadeAnimation = nullptr;
     QPointer<QWidget> channelFadeOverlay;
     QVector<QMetaObject::Connection> modelConnections;
+
+    // Newly inserted rows fade in over ~300ms (drives ChatDelegate opacity).
+    QVariantAnimation *appearAnimation = nullptr;
+    QHash<int, qreal> appearRows;   // row -> current opacity (0..1)
 };
 } // namespace UI
 } // namespace Acheron

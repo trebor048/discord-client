@@ -91,7 +91,7 @@ void Manager::setOverride(Token token, const QColor &color)
 
 void Manager::clearOverride(Token token)
 {
-    if (overrides.remove(token) > 0)
+    if (overrides.remove(token))
         scheduleApply(true, false);
 }
 
@@ -121,7 +121,7 @@ void Manager::setFontOverride(FontRole role, const QFont &font)
 
 void Manager::clearFontOverride(FontRole role)
 {
-    if (fontOverrides.remove(role) > 0)
+    if (fontOverrides.remove(role))
         scheduleApply(false, true);
 }
 

@@ -22,10 +22,12 @@ AuthorizedAppsPage::AuthorizedAppsPage(QWidget *parent)
     : QWidget(parent)
 {
     auto *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(12);
 
     auto *headerLayout = new QHBoxLayout();
     auto *titleLabel = new QLabel(tr("Authorized Apps"), this);
-    titleLabel->setStyleSheet(QStringLiteral("font-weight: bold; font-size: 14px;"));
+    titleLabel->setStyleSheet(QStringLiteral("font-weight: bold;"));
     headerLayout->addWidget(titleLabel);
     headerLayout->addStretch();
 

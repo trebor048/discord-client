@@ -1,6 +1,8 @@
 #include "ToastContainer.hpp"
 #include "ToastNotification.hpp"
 
+#include "Core/Animation/AnimationConfig.hpp"
+
 #include <QScreen>
 #include <QGuiApplication>
 #include <QPropertyAnimation>
@@ -263,7 +265,7 @@ void ToastContainer::animateNotification(ToastNotification *notification, const 
     }
 
     auto *anim = new QPropertyAnimation(notification, "pos", notification);
-    anim->setDuration(isEntry ? 300 : 250);
+    anim->setDuration(Core::AnimationConfig::instance().scaled(isEntry ? 300 : 250));
     anim->setStartValue(notification->pos());
     anim->setEndValue(targetPos);
     // Entries get a gentle overshoot settle; reflows stay smooth and plain.

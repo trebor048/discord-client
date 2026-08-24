@@ -49,6 +49,7 @@ protected:
 
 private slots:
     void onPageChanged(int index);
+    void onStatusMessage(const QString &message);
 
 private:
     void setupUi();
@@ -63,6 +64,7 @@ private:
     QStackedWidget *m_pageStack = nullptr;
     QLabel *m_guildNameLabel = nullptr;
     QLabel *m_guildIconLabel = nullptr;
+    QLabel *m_statusLabel = nullptr;
     QPushButton *m_closeButton = nullptr;
     QNetworkAccessManager *m_iconLoader = nullptr;
 

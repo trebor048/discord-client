@@ -4,6 +4,7 @@
 #include <QPainterPath>
 #include <cmath>
 #include "Core/AnimationUtils.hpp"
+#include "Core/Animation/AnimationConfig.hpp"
 #include "Core/ImageManager.hpp"
 
 namespace Acheron {
@@ -52,7 +53,7 @@ TypingIndicator::TypingIndicator(QWidget *parent) : QWidget(parent)
     });
 
     fadeAnimation = new QPropertyAnimation(opacityEffect, "opacity", this);
-    fadeAnimation->setDuration(180);
+    fadeAnimation->setDuration(Core::AnimationConfig::instance().scaled(180));
     fadeAnimation->setEasingCurve(QEasingCurve::InOutQuad);
     connect(fadeAnimation, &QPropertyAnimation::finished, this, [this]() {
         if (opacityEffect->opacity() <= 0.0) {

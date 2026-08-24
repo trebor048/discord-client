@@ -79,7 +79,7 @@ public:
 
     void setThreadBrowserTarget(Core::Snowflake channelId);
     void openThreadBrowser();
-    void openPinnedMessages();
+    void openPinnedMessages(Core::Snowflake channelId);
     void updateChannelToolbarVisibility();
 
 private:

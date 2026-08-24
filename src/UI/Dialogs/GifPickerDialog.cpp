@@ -1,5 +1,6 @@
 #include "GifPickerDialog.hpp"
 #include "Core/AnimationUtils.hpp"
+#include "Core/Animation/AnimationConfig.hpp"
 #include "Core/Logging.hpp"
 #include "Core/Theme/Manager.hpp"
 
@@ -672,7 +673,7 @@ void GifPickerDialog::fetchThumbnail(QToolButton *btn, const QUrl &url)
         guard->setGraphicsEffect(effect);
         effect->setOpacity(0.01);
         auto *anim = new QPropertyAnimation(effect, "opacity", guard);
-        anim->setDuration(180);
+        anim->setDuration(Core::AnimationConfig::instance().scaled(180));
         anim->setStartValue(0.01);
         anim->setEndValue(1.0);
         anim->setEasingCurve(QEasingCurve::OutCubic);

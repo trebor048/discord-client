@@ -18,11 +18,14 @@ protected:
     void paintEvent(QPaintEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void showEvent(QShowEvent *event) override;
+    void accept() override;
+    void reject() override;
     bool eventFilter(QObject *obj, QEvent *event) override;
 
 private:
     QFrame *container;
     QWidget *fadeHost;
+    bool exitAnimating = false;
 };
 
 } // namespace UI

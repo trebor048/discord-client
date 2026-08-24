@@ -1443,6 +1443,21 @@ void ChannelTreeModel::updateChannel(const Discord::ChannelUpdate &update, Snowf
         if (!guildNode)
             return;
 
+        // Resolve the destination FIRST: if the target category cannot be
+        // found, bail out before touching the tree. Otherwise the node would
+        // be removed from its old parent and then dropped (unique_ptr freed)
+        // on the early return, silently vanishing from the model.
+        ChannelNode *newParent = nullptr;
+        if (newParentId.isValid())
+            newParent = findCategoryNode(newParentId, guildNode);
+        else
+            newParent = guildNode;
+
+        if (!newParent) {
+            qCWarning(LogUI) << "Could not find new parent for channel:" << channel.id.get();
+            return;
+        }
+
         QModelIndex oldParentIdx = indexForNode(oldParent);
         int oldRow = -1;
         for (size_t i = 0; i < oldParent->children.size(); ++i) {
@@ -1466,17 +1481,6 @@ void ChannelTreeModel::updateChannel(const Discord::ChannelUpdate &update, Snowf
         node->isPrivate = isChannelPrivate(channel, guildNode->id);
         if (node->type == ChannelNode::Type::VoiceChannel && channel.userLimit.hasValue())
             node->userLimit = channel.userLimit.get();
-
-        ChannelNode *newParent = nullptr;
-        if (newParentId.isValid())
-            newParent = findCategoryNode(newParentId, guildNode);
-        else
-            newParent = guildNode;
-
-        if (!newParent) {
-            qCWarning(LogUI) << "Could not find new parent for channel:" << channel.id.get();
-            return;
-        }
 
         // throw it wherever cuz the proxy will sort it
         int insertRow = newParent->children.size();

@@ -40,7 +40,11 @@ public:
     void closeAllWindows();
 
     TabEntry currentChannelEntry() const;
-    void openChannelInNewWindow(const TabEntry &entry, bool tileToSide);
+    /// Open `entry` in a new top-level window. When `jumpMessageId` is valid,
+    /// the new window scrolls to that message once it loads. `tileToSide`
+    /// places the new window beside this one.
+    void openChannelInNewWindow(const TabEntry &entry, bool tileToSide,
+                                Core::Snowflake jumpMessageId = Core::Snowflake::Invalid);
     void openDetachedWindow(bool tileToSide);
     void setDetachedWindow(bool detached);
 

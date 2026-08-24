@@ -20,6 +20,12 @@
 namespace Acheron {
 namespace Discord {
 
+namespace {
+// Discord's documented default heartbeat interval (ms), used when a malformed
+// HELLO omits or zeroes the server-provided interval.
+constexpr int kDefaultHeartbeatInterval = 41'250;
+} // namespace
+
 Gateway::Gateway(const QString &token, const QString &gatewayUrl, ClientIdentity &identity,
                  QObject *parent)
     : QObject(parent), token(token), gatewayUrl(gatewayUrl), identity(identity), running(false)
@@ -348,6 +354,9 @@ void Gateway::handleDispatch(const Inbound &data)
     case GatewayEvent::CHANNEL_PINS_UPDATE:
         handleChannelPinsUpdate(data);
         break;
+    case GatewayEvent::RESUMED:
+        handleResumed();
+        break;
     case GatewayEvent::UNKNOWN:
         qCInfo(LogDiscord) << "Unknown gateway event: " << t;
         break;
@@ -376,6 +385,13 @@ void Gateway::handleReady(const Inbound &data)
     reconnectAttempts = 0;
 
     emit gatewayReady(msg);
+}
+
+void Gateway::handleResumed()
+{
+    qCInfo(LogDiscord) << "Session resumed successfully";
+    reconnectAttempts = 0;
+    emit gatewayResumed();
 }
 
 void Gateway::handleReadySupplemental(const Inbound &data)
@@ -734,8 +750,13 @@ void Gateway::handleHello(const Inbound &data)
     isResuming = false;
 
     if (msg.heartbeatInterval <= 0) {
-        qCWarning(LogDiscord) << "Invalid heartbeat interval in hello:" << msg.heartbeatInterval;
-        return;
+        // A malformed HELLO must not strand the caller: the early return below
+        // used to skip emitting gatewayHello(), so anything waiting on it
+        // (session bootstrap) hung forever. Fall back to Discord's documented
+        // default interval and continue as normal.
+        qCWarning(LogDiscord) << "Invalid heartbeat interval in hello:" << msg.heartbeatInterval
+                              << "- falling back to" << kDefaultHeartbeatInterval;
+        heartbeatInterval = kDefaultHeartbeatInterval;
     }
 
 
@@ -874,6 +895,7 @@ void Gateway::networkLoop()
         emit connected();
 
         char chunk[8192];
+        bool alreadyEmittedDisconnect = false;
         size_t rlen = 0;
         const curl_ws_frame *meta = nullptr;
 
@@ -956,6 +978,16 @@ void Gateway::networkLoop()
                                    << "reason:" << closeReason;
                 CloseCode cc = static_cast<CloseCode>(closeCode);
                 emit disconnected(cc, closeReason);
+                alreadyEmittedDisconnect = true;
+                // 4006 (SESSION_NO_LONGER_VALID) and 4007 (INVALID_SEQ) mean
+                // the resume session is dead — clear it so the reconnect does a
+                // fresh IDENTIFY instead of looping RESUME → 4006 forever.
+                if (cc == CloseCode::SESSION_NO_LONGER_VALID ||
+                    cc == CloseCode::INVALID_SEQ) {
+                    canResume = false;
+                    std::lock_guard lock(sessionMutex);
+                    sessionId.clear();
+                }
                 // Reconnect even before READY (canResume false): a network blip
                 // while identifying must not permanently kill the gateway.
                 if (!wantToClose && !isFatalCloseCode(cc))
@@ -977,11 +1009,15 @@ void Gateway::networkLoop()
         }
 
         // If shouldReconnect was set (by RECONNECT/INVALID_SESSION opcode handlers
-        // or by zombie detection), prepare for reconnection
+        // or by zombie detection), prepare for reconnection.
+        // Don't emit a second "attempts exhausted" disconnect if the close-frame
+        // handler already emitted the real close code — that would override the
+        // true reason with a misleading INTERNAL code.
         if (shouldReconnect && running && reconnectAttempts >= maxReconnectAttempts) {
             shouldReconnect = false;
-            emit disconnected(CloseCode::INTERNAL,
-                              QStringLiteral("Gateway reconnect attempts exhausted"));
+            if (!alreadyEmittedDisconnect)
+                emit disconnected(CloseCode::INTERNAL,
+                                  QStringLiteral("Gateway reconnect attempts exhausted"));
             break;
         }
 
@@ -1219,10 +1255,10 @@ int Gateway::reconnectBackoffMs(int attempt) const
 
 bool Gateway::waitInterruptible(std::chrono::milliseconds delay) const
 {
-    // Sleep in small slices so hardStop() (which clears `running` and joins
-    // this thread) is never blocked by a long backoff wait.
+    // Sleep in small slices so hardStop() (which clears `running`) and stop()
+    // (which sets `wantToClose`) are never blocked by a long backoff wait.
     const auto deadline = std::chrono::steady_clock::now() + delay;
-    while (running) {
+    while (running && !wantToClose) {
         const auto remaining =
                 std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
         if (remaining <= std::chrono::milliseconds(0))

@@ -2,11 +2,15 @@
 #include "VoiceWindow.hpp"
 
 #include "Core/AV/VoiceManager.hpp"
+#include "Core/Animation/AnimationConfig.hpp"
 
 #include <QGraphicsOpacityEffect>
 #include <QHBoxLayout>
 #include <QMouseEvent>
 #include <QPainter>
+
+#include <algorithm>
+#include <cmath>
 
 namespace Acheron {
 namespace UI {
@@ -28,7 +32,9 @@ VoiceStatusBar::VoiceStatusBar(QWidget *parent) : QWidget(parent)
     dotFx->setOpacity(1.0);
     statusDot->setGraphicsEffect(dotFx);
     pulseAnim = new QPropertyAnimation(dotFx, "opacity", this);
-    pulseAnim->setDuration(1200);
+    // Loop: scale by speed but never collapse to 0 (it is an infinite pulse).
+    pulseAnim->setDuration(std::max(300, static_cast<int>(std::lround(
+            1200.0 / Core::AnimationConfig::instance().speed()))));
     pulseAnim->setStartValue(1.0);
     pulseAnim->setEndValue(0.35);
     pulseAnim->setEasingCurve(QEasingCurve::InOutSine);

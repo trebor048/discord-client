@@ -1,5 +1,6 @@
 #include "BasePopup.hpp"
 #include "Core/AnimationUtils.hpp"
+#include "Core/Animation/AnimationConfig.hpp"
 #include "Core/Theme/Manager.hpp"
 #include <QGraphicsDropShadowEffect>
 #include <QVBoxLayout>
@@ -71,6 +72,26 @@ void BasePopup::mousePressEvent(QMouseEvent *event)
     }
 }
 
+void BasePopup::accept()
+{
+    if (exitAnimating) {
+        QDialog::accept();
+        return;
+    }
+    exitAnimating = true;
+    Core::AnimationUtils::popupExit(fadeHost, [this]() { QDialog::accept(); });
+}
+
+void BasePopup::reject()
+{
+    if (exitAnimating) {
+        QDialog::reject();
+        return;
+    }
+    exitAnimating = true;
+    Core::AnimationUtils::popupExit(fadeHost, [this]() { QDialog::reject(); });
+}
+
 void BasePopup::showEvent(QShowEvent *event)
 {
     if (parentWidget() && parentWidget()->window()) {
@@ -79,7 +100,8 @@ void BasePopup::showEvent(QShowEvent *event)
         topLevel->installEventFilter(this);
     }
     QDialog::showEvent(event);
-    Acheron::Core::AnimationUtils::fadeIn(fadeHost);
+    exitAnimating = false;
+    Core::AnimationUtils::popupEnter(fadeHost);
 }
 
 bool BasePopup::eventFilter(QObject *obj, QEvent *event)

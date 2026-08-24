@@ -191,6 +191,7 @@ enum class GatewayEvent {
     GUILD_MEMBER_REMOVE,
     MESSAGE_DELETE_BULK,
     USER_UPDATE,
+    RESUMED,
 };
 
 enum class RelationshipType {
@@ -273,6 +274,7 @@ inline GatewayEvent parseGatewayEvent(const QString &event)
         { "GUILD_MEMBER_REMOVE", GatewayEvent::GUILD_MEMBER_REMOVE },
         { "MESSAGE_DELETE_BULK", GatewayEvent::MESSAGE_DELETE_BULK },
         { "USER_UPDATE", GatewayEvent::USER_UPDATE },
+        { "RESUMED", GatewayEvent::RESUMED },
     };
 
     return events.value(event, GatewayEvent::UNKNOWN);

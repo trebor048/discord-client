@@ -80,7 +80,14 @@ void WebhooksWidget::load()
     item->setText(QStringLiteral("Loading webhooks..."));
     item->setFlags(item->flags() & ~Qt::ItemIsEnabled & ~Qt::ItemIsSelectable);
 
-    m_instance->discord()->fetchGuildWebhooks(m_guildId, [](const auto &) {});
+    m_instance->discord()->fetchGuildWebhooks(m_guildId, [this](const auto &result) {
+        if (!result.success()) {
+            m_webhookList->clear();
+            auto *item = new QListWidgetItem(m_webhookList);
+            item->setText(QStringLiteral("Failed to load webhooks: %1").arg(result.error));
+            item->setFlags(item->flags() & ~Qt::ItemIsEnabled & ~Qt::ItemIsSelectable);
+        }
+    });
 }
 
 void WebhooksWidget::onWebhooksFetched(Core::Snowflake guildId,

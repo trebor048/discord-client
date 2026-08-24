@@ -4,6 +4,7 @@
 #include "Core/Theme/Generator.hpp"
 #include "Core/Theme/Manager.hpp"
 #include "Core/Theme/Tokens.hpp"
+#include "Core/Animation/AnimationConfig.hpp"
 
 #include <QColorDialog>
 #include <QCheckBox>
@@ -49,35 +50,46 @@ AppearancePage::AppearancePage(QWidget *parent)
 {
     auto *outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 0, 0, 0);
+    outer->setSpacing(14);
 
     seedColor = Manager::instance().color(Token::Highlight);
 
     auto *genGroup = new QGroupBox(tr("Generate from a color"), this);
-    auto *genLayout = new QHBoxLayout(genGroup);
+    auto *genLayout = new QFormLayout(genGroup);
+    genLayout->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    genLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    genLayout->setVerticalSpacing(10);
 
-    genLayout->addWidget(new QLabel(tr("Base:"), genGroup));
-
+    // Row: base color + scheme + mode
+    auto *baseRow = new QHBoxLayout();
+    baseRow->setSpacing(10);
     seedSwatch = new QPushButton(genGroup);
-    seedSwatch->setFixedSize(48, 22);
+    seedSwatch->setFixedSize(52, 26);
     seedSwatch->setCursor(Qt::PointingHandCursor);
     seedSwatch->setStyleSheet(swatchStyle(seedColor));
-    genLayout->addWidget(seedSwatch);
+    seedSwatch->setToolTip(tr("Pick a base color"));
+    baseRow->addWidget(seedSwatch);
 
     auto *schemeCombo = new QComboBox(genGroup);
     for (int i = 0; i < Core::Theme::schemeCount; ++i)
         schemeCombo->addItem(Core::Theme::schemeName(static_cast<Core::Theme::Scheme>(i)));
-    genLayout->addWidget(schemeCombo);
+    baseRow->addWidget(schemeCombo, 1);
 
     auto *modeCombo = new QComboBox(genGroup);
     modeCombo->addItem(tr("Dark"));
     modeCombo->addItem(tr("Light"));
-    genLayout->addWidget(modeCombo);
+    baseRow->addWidget(modeCombo);
+    genLayout->addRow(tr("Base:"), baseRow);
 
+    // Row: actions
+    auto *actionRow = new QHBoxLayout();
+    actionRow->setSpacing(10);
     auto *genBtn = new QPushButton(tr("Generate"), genGroup);
     auto *randBtn = new QPushButton(tr("Randomize"), genGroup);
-    genLayout->addWidget(genBtn);
-    genLayout->addWidget(randBtn);
-    genLayout->addStretch(1);
+    actionRow->addWidget(genBtn);
+    actionRow->addWidget(randBtn);
+    actionRow->addStretch(1);
+    genLayout->addRow(QString(), actionRow);
 
     outer->addWidget(genGroup);
 
@@ -133,6 +145,39 @@ AppearancePage::AppearancePage(QWidget *parent)
         roundnessSpin->setValue(Manager::instance().roundness());
     });
 
+    // --- Motion (global animation preferences) ---
+    auto *motionGroup = new QGroupBox(tr("Motion"), this);
+    auto *motionLayout = new QFormLayout(motionGroup);
+    motionLayout->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+
+    auto *speedSlider = new QSlider(Qt::Horizontal, motionGroup);
+    speedSlider->setRange(0, 3);
+    speedSlider->setSingleStep(1);
+    speedSlider->setPageStep(1);
+    speedSlider->setTickPosition(QSlider::TicksBelow);
+    speedSlider->setTickInterval(1);
+    const float currentSpeed = Core::AnimationConfig::instance().speed();
+    speedSlider->setValue(currentSpeed <= 0.6f ? 0 : currentSpeed <= 1.4f ? 1 : currentSpeed <= 2.4f ? 2 : 3);
+    motionLayout->addRow(tr("Animation speed:"), speedSlider);
+
+    auto *speedHint = new QLabel(tr("Slow  ·  Normal  ·  Fast  ·  Turbo"), motionGroup);
+    speedHint->setStyleSheet(QStringLiteral("color: palette(mid);"));
+    motionLayout->addRow(QString(), speedHint);
+
+    auto *reduceMotionCheck = new QCheckBox(tr("Reduce motion (disable transitions)"), motionGroup);
+    reduceMotionCheck->setChecked(Core::AnimationConfig::instance().reduceMotion());
+    motionLayout->addRow(reduceMotionCheck);
+
+    outer->addWidget(motionGroup);
+
+    connect(speedSlider, &QSlider::valueChanged, this, [](int index) {
+        const float speed = index == 0 ? 0.5f : index == 1 ? 1.0f : index == 2 ? 1.75f : 2.5f;
+        Core::AnimationConfig::instance().setSpeed(speed);
+    });
+    connect(reduceMotionCheck, &QCheckBox::toggled, this, [](bool on) {
+        Core::AnimationConfig::instance().setReduceMotion(on);
+    });
+
     connect(compactToggle, &QCheckBox::toggled, this, [this](bool compact) {
         QSettings().setValue("ui/compactMessages", compact);
         emit compactModeChanged(compact);
@@ -170,43 +215,40 @@ AppearancePage::AppearancePage(QWidget *parent)
         generateInto(seedColor, scheme, modeCombo->currentIndex() == 0);
     });
 
-    auto *scroll = new QScrollArea(this);
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-
-    auto *content = new QWidget(scroll);
-    auto *layout = new QVBoxLayout(content);
-
-    auto *fontsHeader = new QLabel(tr("Fonts"), content);
+    // Fonts & colors live directly in the page layout — the SettingsWindow
+    // wrapper scroll area handles overflow. A nested QScrollArea here would
+    // fight the wrapper (crushing this section to near-zero height).
+    auto *fontsHeader = new QLabel(tr("Fonts"), this);
     {
         QFont hf = fontsHeader->font();
         hf.setBold(true);
         fontsHeader->setFont(hf);
     }
-    layout->addWidget(fontsHeader);
+    outer->addWidget(fontsHeader);
 
     for (const Core::Theme::FontDescriptor &fd : Core::Theme::fontRegistry()) {
         const FontRole role = fd.role;
 
         auto *row = new QHBoxLayout();
-        row->addWidget(new QLabel(QString::fromUtf8(fd.label), content));
+        row->setSpacing(10);
+        row->addWidget(new QLabel(QString::fromUtf8(fd.label), this));
         row->addStretch(1);
 
-        auto *family = new QFontComboBox(content);
+        auto *family = new QFontComboBox(this);
         family->setCurrentFont(Manager::instance().font(role));
         row->addWidget(family);
 
-        auto *size = new QSpinBox(content);
+        auto *size = new QSpinBox(this);
         size->setRange(6, 40);
         size->setSuffix(" pt");
         size->setValue(QFontInfo(Manager::instance().font(role)).pointSize());
         row->addWidget(size);
 
-        auto *reset = new QToolButton(content);
+        auto *reset = new QToolButton(this);
         reset->setText(tr("Reset"));
         row->addWidget(reset);
 
-        layout->addLayout(row);
+        outer->addLayout(row);
 
         familyCombos.insert(role, family);
         sizeSpins.insert(role, size);
@@ -240,30 +282,31 @@ AppearancePage::AppearancePage(QWidget *parent)
         const QString group = QString::fromUtf8(d.group);
         if (group != currentGroup) {
             currentGroup = group;
-            if (layout->count() > 0)
-                layout->addSpacing(8);
-            auto *header = new QLabel(group, content);
+            if (outer->count() > 1)
+                outer->addSpacing(8);
+            auto *header = new QLabel(group, this);
             QFont f = header->font();
             f.setBold(true);
             header->setFont(f);
-            layout->addWidget(header);
+            outer->addWidget(header);
         }
 
         auto *row = new QHBoxLayout();
-        row->addWidget(new QLabel(QString::fromUtf8(d.label), content));
+        row->setSpacing(10);
+        row->addWidget(new QLabel(QString::fromUtf8(d.label), this));
         row->addStretch(1);
 
-        auto *swatch = new QPushButton(content);
+        auto *swatch = new QPushButton(this);
         swatch->setFixedSize(48, 22);
         swatch->setCursor(Qt::PointingHandCursor);
         swatch->setStyleSheet(swatchStyle(Manager::instance().color(d.token)));
         row->addWidget(swatch);
 
-        auto *reset = new QToolButton(content);
+        auto *reset = new QToolButton(this);
         reset->setText(tr("Reset"));
         row->addWidget(reset);
 
-        layout->addLayout(row);
+        outer->addLayout(row);
 
         const Token token = d.token;
         const bool supportsAlpha = d.supportsAlpha;
@@ -292,9 +335,7 @@ AppearancePage::AppearancePage(QWidget *parent)
         });
     }
 
-    layout->addStretch(1);
-    scroll->setWidget(content);
-    outer->addWidget(scroll, 1);
+    outer->addStretch(1);
 
     auto *actions = new QHBoxLayout();
     auto *resetAll = new QPushButton(tr("Reset all"), this);

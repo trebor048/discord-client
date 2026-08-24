@@ -29,7 +29,6 @@
 #include <QJsonArray>
 #include <QInputDialog>
 #include <QMenu>
-#include <QScrollArea>
 #include <QStandardPaths>
 #include <QApplication>
 #include <QSystemTrayIcon>
@@ -48,9 +47,11 @@ void NotificationsPage::setupUi()
 {
     auto *mainLayout = new QVBoxLayout(this);
     mainLayout->setContentsMargins(0, 0, 0, 0);
-
     m_tabWidget = new QTabWidget(this);
     mainLayout->addWidget(m_tabWidget);
+    // With 8 tabs at a large UI font the tab bar can be narrower than its
+    // labels; elide instead of showing (and overlapping) scroll buttons.
+    m_tabWidget->tabBar()->setElideMode(Qt::ElideRight);
 
     // Create tabs
     auto *appearanceTab = new QWidget();
@@ -84,17 +85,16 @@ void NotificationsPage::setupUi()
 void NotificationsPage::setupAppearanceTab(QWidget *tab)
 {
     auto *layout = new QVBoxLayout(tab);
-    auto *scroll = new QScrollArea();
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-    auto *content = new QWidget();
+    auto *content = new QWidget(tab);
     auto *contentLayout = new QVBoxLayout(content);
-    scroll->setWidget(content);
-    layout->addWidget(scroll);
+    contentLayout->setSpacing(14);
+    layout->addWidget(content);
 
     // General
     auto *generalGroup = new QGroupBox(tr("General"), content);
     auto *generalLayout = new QFormLayout(generalGroup);
+    generalLayout->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    generalLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
 
     m_enabledCheck = new QCheckBox(tr("Enable notifications"), generalGroup);
     m_enabledCheck->setChecked(true);
@@ -121,6 +121,8 @@ void NotificationsPage::setupAppearanceTab(QWidget *tab)
     // Position
     auto *positionGroup = new QGroupBox(tr("Position & Layout"), content);
     auto *positionLayout = new QFormLayout(positionGroup);
+    positionLayout->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    positionLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
 
     m_positionCombo = new QComboBox(positionGroup);
     m_positionCombo->addItem(tr("Bottom Left"), "bottom-left");
@@ -202,13 +204,10 @@ void NotificationsPage::setupAppearanceTab(QWidget *tab)
 void NotificationsPage::setupNotificationTypesTab(QWidget *tab)
 {
     auto *layout = new QVBoxLayout(tab);
-    auto *scroll = new QScrollArea();
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-    auto *content = new QWidget();
+    auto *content = new QWidget(tab);
     auto *contentLayout = new QVBoxLayout(content);
-    scroll->setWidget(content);
-    layout->addWidget(scroll);
+    contentLayout->setSpacing(14);
+    layout->addWidget(content);
 
     auto *group = new QGroupBox(tr("When to Notify"), content);
     auto *groupLayout = new QVBoxLayout(group);
@@ -271,11 +270,13 @@ void NotificationsPage::setupNotificationTypesTab(QWidget *tab)
     m_notifyForFancyList = new QListWidget(notifyGroup);
     m_notifyForFancyList->setIconSize(QSize(20, 20));
     m_notifyForFancyList->setUniformItemSizes(true);
+    m_notifyFadeDelegate = new FadeInDelegate(m_notifyForFancyList);
+    m_notifyForFancyList->setItemDelegate(m_notifyFadeDelegate);
     notifyLayout->addWidget(m_notifyForFancyList);
 
     // Raw ID list below, as a plain reference.
     auto *rawLabel = new QLabel(tr("Raw IDs"), notifyGroup);
-    rawLabel->setStyleSheet(QStringLiteral("QLabel { color: palette(mid); font-size: 11px; }"));
+    rawLabel->setStyleSheet(QStringLiteral("QLabel { color: palette(mid); font-size: 0.8em; }"));
     notifyLayout->addWidget(rawLabel);
     m_notifyForList = new QListWidget(notifyGroup);
     m_notifyForList->setMaximumHeight(110);
@@ -298,6 +299,8 @@ void NotificationsPage::setupNotificationTypesTab(QWidget *tab)
     auto *ignoreGroup = new QGroupBox(tr("Ignore Users"), content);
     auto *ignoreLayout = new QVBoxLayout(ignoreGroup);
     m_ignoreUsersList = new QListWidget(ignoreGroup);
+    m_ignoreFadeDelegate = new FadeInDelegate(m_ignoreUsersList);
+    m_ignoreUsersList->setItemDelegate(m_ignoreFadeDelegate);
     ignoreLayout->addWidget(m_ignoreUsersList);
     auto *ignoreBtnLayout = new QHBoxLayout();
     auto *addIgnoreBtn = new QPushButton(tr("Add..."), ignoreGroup);
@@ -324,16 +327,15 @@ void NotificationsPage::setupNotificationTypesTab(QWidget *tab)
 void NotificationsPage::setupPrivacyTab(QWidget *tab)
 {
     auto *layout = new QVBoxLayout(tab);
-    auto *scroll = new QScrollArea();
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-    auto *content = new QWidget();
+    auto *content = new QWidget(tab);
     auto *contentLayout = new QVBoxLayout(content);
-    scroll->setWidget(content);
-    layout->addWidget(scroll);
+    contentLayout->setSpacing(14);
+    layout->addWidget(content);
 
     auto *group = new QGroupBox(tr("Streamer Mode"), content);
     auto *groupLayout = new QFormLayout(group);
+    groupLayout->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    groupLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
 
     m_disableStreamerModeCheck = new QCheckBox(tr("Disable notifications while in Streamer Mode"), group);
     m_disableStreamerModeCheck->setChecked(true);
@@ -355,16 +357,15 @@ void NotificationsPage::setupPrivacyTab(QWidget *tab)
 void NotificationsPage::setupVoiceTab(QWidget *tab)
 {
     auto *layout = new QVBoxLayout(tab);
-    auto *scroll = new QScrollArea();
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-    auto *content = new QWidget();
+    auto *content = new QWidget(tab);
     auto *contentLayout = new QVBoxLayout(content);
-    scroll->setWidget(content);
-    layout->addWidget(scroll);
+    contentLayout->setSpacing(14);
+    layout->addWidget(content);
 
     auto *group = new QGroupBox(tr("Voice Channel Notifications"), content);
     auto *groupLayout = new QFormLayout(group);
+    groupLayout->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    groupLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
 
     m_voiceJoinsCheck = new QCheckBox(tr("Notify when watched users join/leave voice channels"), group);
     m_voiceJoinsCheck->setChecked(false);
@@ -387,17 +388,16 @@ void NotificationsPage::setupVoiceTab(QWidget *tab)
 void NotificationsPage::setupSoundTab(QWidget *tab)
 {
     auto *layout = new QVBoxLayout(tab);
-    auto *scroll = new QScrollArea();
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-    auto *content = new QWidget();
+    auto *content = new QWidget(tab);
     auto *contentLayout = new QVBoxLayout(content);
-    scroll->setWidget(content);
-    layout->addWidget(scroll);
+    contentLayout->setSpacing(14);
+    layout->addWidget(content);
 
     // Global volume
     auto *volumeGroup = new QGroupBox(tr("Global Volume"), content);
     auto *volumeLayout = new QFormLayout(volumeGroup);
+    volumeLayout->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    volumeLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
 
     m_globalVolumeSlider = new QSlider(Qt::Horizontal, volumeGroup);
     m_globalVolumeSlider->setRange(0, 100);
@@ -453,6 +453,7 @@ void NotificationsPage::setupSoundTab(QWidget *tab)
         item->setData(Qt::UserRole, soundTypes[i]);
         
         auto *widget = new SoundOverrideWidget(soundTypes[i], soundTypeLabels[i], m_soundOverridesList);
+        connect(widget, &SoundOverrideWidget::changed, this, &NotificationsPage::onSettingChanged);
         m_soundOverridesList->setItemWidget(item, widget);
         item->setSizeHint(widget->sizeHint());
     }
@@ -487,13 +488,10 @@ void NotificationsPage::setupSoundTab(QWidget *tab)
 void NotificationsPage::setupUserSoundsTab(QWidget *tab)
 {
     auto *layout = new QVBoxLayout(tab);
-    auto *scroll = new QScrollArea();
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-    auto *content = new QWidget();
+    auto *content = new QWidget(tab);
     auto *contentLayout = new QVBoxLayout(content);
-    scroll->setWidget(content);
-    layout->addWidget(scroll);
+    contentLayout->setSpacing(14);
+    layout->addWidget(content);
 
     auto *infoLabel = new QLabel(tr("Configure custom notification sounds for specific users. Right-click a user in Discord to set their sound."), content);
     infoLabel->setWordWrap(true);
@@ -503,6 +501,8 @@ void NotificationsPage::setupUserSoundsTab(QWidget *tab)
     m_userSoundsList = new QListWidget(content);
     m_userSoundsList->setSelectionMode(QAbstractItemView::SingleSelection);
     m_userSoundsList->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_userSoundsFadeDelegate = new FadeInDelegate(m_userSoundsList);
+    m_userSoundsList->setItemDelegate(m_userSoundsFadeDelegate);
     contentLayout->addWidget(m_userSoundsList);
 
     auto *buttonLayout = new QHBoxLayout();
@@ -528,8 +528,18 @@ void NotificationsPage::setupUserSoundsTab(QWidget *tab)
         QMenu menu(this);
         auto *removeAction = menu.addAction(tr("Remove"));
         connect(removeAction, &QAction::triggered, this, [this, item]() {
-            delete m_userSoundsList->takeItem(m_userSoundsList->row(item));
-            onSettingChanged();
+            const int row = m_userSoundsList->row(item);
+            if (row < 0)
+                return;
+            if (m_userSoundsFadeDelegate) {
+                m_userSoundsFadeDelegate->fadeOutRow(row, [this, item]() {
+                    delete m_userSoundsList->takeItem(m_userSoundsList->row(item));
+                    onSettingChanged();
+                });
+            } else {
+                delete m_userSoundsList->takeItem(row);
+                onSettingChanged();
+            }
         });
         menu.exec(m_userSoundsList->mapToGlobal(pos));
     });
@@ -538,16 +548,15 @@ void NotificationsPage::setupUserSoundsTab(QWidget *tab)
 void NotificationsPage::setupNativeTab(QWidget *tab)
 {
     auto *layout = new QVBoxLayout(tab);
-    auto *scroll = new QScrollArea();
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-    auto *content = new QWidget();
+    auto *content = new QWidget(tab);
     auto *contentLayout = new QVBoxLayout(content);
-    scroll->setWidget(content);
-    layout->addWidget(scroll);
+    contentLayout->setSpacing(14);
+    layout->addWidget(content);
 
     auto *group = new QGroupBox(tr("Native OS Notifications"), content);
     auto *groupLayout = new QFormLayout(group);
+    groupLayout->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    groupLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
 
     m_nativeModeCombo = new QComboBox(group);
     m_nativeModeCombo->addItem(tr("Never"), "never");
@@ -560,7 +569,7 @@ void NotificationsPage::setupNativeTab(QWidget *tab)
 
     auto *noteLabel = new QLabel(tr("Native notifications use your operating system notification tray. This policy applies when the notification style (Appearance tab) is set to 'Both'. Click the button above to send the permission/test notification."), group);
     noteLabel->setWordWrap(true);
-    noteLabel->setStyleSheet("color: #72767d; font-size: 12px;");
+    noteLabel->setStyleSheet("color: palette(mid); font-size: 0.8em;");
     groupLayout->addRow(noteLabel);
 
     contentLayout->addWidget(group);
@@ -573,13 +582,10 @@ void NotificationsPage::setupNativeTab(QWidget *tab)
 void NotificationsPage::setupTestTab(QWidget *tab)
 {
     auto *layout = new QVBoxLayout(tab);
-    auto *scroll = new QScrollArea();
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-    auto *content = new QWidget();
+    auto *content = new QWidget(tab);
     auto *contentLayout = new QVBoxLayout(content);
-    scroll->setWidget(content);
-    layout->addWidget(scroll);
+    contentLayout->setSpacing(14);
+    layout->addWidget(content);
 
     auto *group = new QGroupBox(tr("Test Notifications"), content);
     auto *groupLayout = new QVBoxLayout(group);
@@ -700,6 +706,8 @@ void NotificationsPage::loadSettings()
                 item->setData(Qt::UserRole, it.key());
                 item->setData(Qt::UserRole + 1, o);
             }
+            if (m_userSoundsFadeDelegate)
+                m_userSoundsFadeDelegate->fadeInAll(m_userSoundsList->count());
         }
     }
 
@@ -804,7 +812,7 @@ void NotificationsPage::setNotificationManager(Core::NotificationManager *mgr)
     m_notificationManager = mgr;
     if (mgr && mgr->imageManager()) {
         connect(mgr->imageManager(), &Core::ImageManager::imageFetched,
-                this, &NotificationsPage::onNotifyIconFetched);
+                this, &NotificationsPage::onNotifyIconFetched, Qt::UniqueConnection);
     }
     refreshNotifyLists();
 }
@@ -905,6 +913,12 @@ void NotificationsPage::refreshNotifyLists()
     const auto ignore = m_notificationManager->ignoreUsersList();
     for (const auto &id : ignore)
         m_ignoreUsersList->addItem(id);
+
+    // Rows fade in after a (re)populate.
+    if (m_notifyFadeDelegate)
+        m_notifyFadeDelegate->fadeInAll(m_notifyForFancyList->count());
+    if (m_ignoreFadeDelegate)
+        m_ignoreFadeDelegate->fadeInAll(m_ignoreUsersList->count());
 }
 
 void NotificationsPage::onAddNotifyFor()
@@ -1022,6 +1036,8 @@ void NotificationsPage::onImportSettings()
             item->setData(Qt::UserRole, it.key());
             item->setData(Qt::UserRole + 1, o);
         }
+        if (m_userSoundsFadeDelegate)
+            m_userSoundsFadeDelegate->fadeInAll(m_userSoundsList->count());
     }
 
     onSettingChanged();
@@ -1077,6 +1093,10 @@ void NotificationsPage::onResetSounds()
             auto *item = m_soundOverridesList->item(i);
             item->setCheckState(Qt::Unchecked);
             item->setData(Qt::UserRole + 1, QJsonObject());
+            // Reset the widget's own state too — clearing only the item's data
+            // left the volume slider/combo/custom-file fields unchanged.
+            if (auto *widget = qobject_cast<SoundOverrideWidget *>(m_soundOverridesList->itemWidget(item)))
+                widget->loadFromJson(QJsonObject());
         }
         onSettingChanged();
     }

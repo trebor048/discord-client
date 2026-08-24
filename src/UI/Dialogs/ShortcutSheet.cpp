@@ -138,6 +138,7 @@ ShortcutSheet::ShortcutSheet(QWidget *parent) : QDialog(parent)
     chatLayout->setSpacing(8);
     chatLayout->addWidget(makeShortcutRow({tr("Back Mouse Button")}, tr("Navigate back in tab history"), chatRows));
     chatLayout->addWidget(makeShortcutRow({tr("Forward Mouse Button")}, tr("Navigate forward in tab history"), chatRows));
+    chatLayout->addWidget(makeShortcutRow({tr("Ctrl"), tr("F")}, tr("Search messages in the current channel"), chatRows));
     chatLayout->addWidget(makeShortcutRow({tr("Ctrl"), tr("K")}, tr("Open channel quick switch"), chatRows));
     contentLayout->addWidget(makeSection(tr("Chat"), chatRows, content));
 

@@ -65,6 +65,7 @@ class TypingIndicator;
 class SlowModeIndicator;
 class ConnectionBanner;
 class PinnedMessagesPanel;
+class ChannelSearchPopup;
 class MePanel;
 #ifndef ACHERON_NO_VOICE
 class VoiceStatusBar;
@@ -153,7 +154,8 @@ private:
     void setupUi();
     void setupMenu();
     void openDetachedWindow(bool tileToSide);
-    void openChannelInNewWindow(const TabEntry &entry, bool tileToSide);
+    void openChannelInNewWindow(const TabEntry &entry, bool tileToSide,
+                                Core::Snowflake jumpMessageId = Core::Snowflake::Invalid);
     void populateWindowMenu();
     void mergeAllWindows();
     void closeAllWindows();
@@ -171,7 +173,11 @@ private:
     void openThreadBrowser();
     void navigateToChannel(Core::Snowflake channelId);
     void setThreadBrowserTarget(Core::Snowflake channelId);
-    void openPinnedMessages();
+    void openPinnedMessages(Core::Snowflake channelId);
+    void openChannelSearch();
+    void openSearchResultInNewTab(Core::Snowflake channelId, Core::Snowflake messageId);
+    void openSearchResultInNewWindow(Core::Snowflake channelId, Core::Snowflake messageId);
+    void openSearchResultInTiledView(Core::Snowflake channelId, Core::Snowflake messageId);
     void setChannelName(const QString &name);
     void updateChannelNameElide();
 
@@ -206,8 +212,10 @@ private:
     QString channelFullName;
     QToolButton *threadBrowserButton = nullptr;
     QToolButton *pinnedMessagesButton = nullptr;
+    QToolButton *searchButton = nullptr;
     ThreadBrowserPopup *threadBrowser = nullptr;
     PinnedMessagesPanel *pinnedMessagesPanel = nullptr;
+    ChannelSearchPopup *channelSearchPopup = nullptr;
     MessageInput *messageInput;
     TypingIndicator *typingIndicator;
     SlowModeIndicator *slowModeIndicator;

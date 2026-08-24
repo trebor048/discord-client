@@ -406,6 +406,15 @@ void ReadStateManager::setActiveChannel(Snowflake channelId)
     if (activeChannelId == channelId)
         return;
 
+    // Flush any pending ack for the channel we're leaving: the 10s timer
+    // would otherwise drop it and the server keeps stale unread state for
+    // that channel (it would reappear unread on the next session).
+    if (activeChannelAckPending && activeChannelId.isValid()) {
+        auto entry = getReadStateEntry(activeChannelId);
+        if (entry && entry->lastMessageId.hasValue())
+            emit ackRequested(activeChannelId, entry->lastMessageId.get());
+    }
+
     if (channelId.isValid())
         ackIdAtSelect.insert(channelId, effectiveAckId(channelId, guildForChannel(channelId)));
 

@@ -14,6 +14,7 @@
 
 #include "Core/ImageManager.hpp"
 #include "Core/Theme/Manager.hpp"
+#include "Core/Animation/AnimationConfig.hpp"
 
 namespace Acheron {
 namespace UI {
@@ -387,7 +388,7 @@ void ToastNotification::setGroupExpanded(bool expanded)
     }
 
     auto *anim = new QPropertyAnimation(m_groupPanel, "maximumHeight", this);
-    anim->setDuration(180);
+    anim->setDuration(Core::AnimationConfig::instance().scaled(180));
     anim->setStartValue(m_groupPanel->maximumHeight());
     anim->setEndValue(targetHeight);
     anim->setEasingCurve(QEasingCurve::OutCubic);
@@ -682,8 +683,11 @@ void ToastNotification::resumeCountdown()
 void ToastNotification::animateIn()
 {
     if (m_fadeAnimation) {
+        // stop() on a DeleteWhenStopped animation frees it synchronously and
+        // the QPointer auto-nulls; only touch it if it survived.
         m_fadeAnimation->stop();
-        m_fadeAnimation->deleteLater();
+        if (m_fadeAnimation)
+            m_fadeAnimation->deleteLater();
     }
 
     if (!m_data.animationsEnabled) {
@@ -692,7 +696,7 @@ void ToastNotification::animateIn()
     }
 
     m_fadeAnimation = new QPropertyAnimation(this, "opacity", this);
-    m_fadeAnimation->setDuration(220);
+    m_fadeAnimation->setDuration(Core::AnimationConfig::instance().scaled(220));
     m_fadeAnimation->setStartValue(0.0);
     m_fadeAnimation->setEndValue(m_data.opacity / 100.0);
     m_fadeAnimation->setEasingCurve(QEasingCurve::OutCubic);
@@ -702,8 +706,11 @@ void ToastNotification::animateIn()
 void ToastNotification::animateOut()
 {
     if (m_fadeAnimation) {
+        // stop() on a DeleteWhenStopped animation frees it synchronously and
+        // the QPointer auto-nulls; only touch it if it survived.
         m_fadeAnimation->stop();
-        m_fadeAnimation->deleteLater();
+        if (m_fadeAnimation)
+            m_fadeAnimation->deleteLater();
     }
 
     const auto finishDismissal = [this]() {
@@ -726,14 +733,14 @@ void ToastNotification::animateOut()
     default: offset = QPoint(0, 40); break;
     }
     auto *slide = new QPropertyAnimation(this, "pos", this);
-    slide->setDuration(200);
+    slide->setDuration(Core::AnimationConfig::instance().scaled(200));
     slide->setStartValue(pos());
     slide->setEndValue(pos() + offset);
     slide->setEasingCurve(QEasingCurve::InCubic);
     slide->start(QAbstractAnimation::DeleteWhenStopped);
 
     m_fadeAnimation = new QPropertyAnimation(this, "opacity", this);
-    m_fadeAnimation->setDuration(200);
+    m_fadeAnimation->setDuration(Core::AnimationConfig::instance().scaled(200));
     m_fadeAnimation->setStartValue(m_opacity);
     m_fadeAnimation->setEndValue(0.0);
     m_fadeAnimation->setEasingCurve(QEasingCurve::InCubic);

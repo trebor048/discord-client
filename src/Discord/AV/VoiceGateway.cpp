@@ -17,6 +17,12 @@ namespace Acheron {
 namespace Discord {
 namespace AV {
 
+namespace {
+// Discord's voice servers request a heartbeat interval in HELLO; this is the
+// documented fallback used when an invalid (<= 0) value arrives.
+constexpr int kDefaultVoiceHeartbeatInterval = 41'250;
+} // namespace
+
 VoiceGateway::VoiceGateway(const QString &endpoint, Core::Snowflake serverId,
                            Core::Snowflake channelId, Core::Snowflake userId,
                            const QString &sessionId, const QString &token,
@@ -105,12 +111,18 @@ void VoiceGateway::sendSpeaking(int flags, int delay, quint32 ssrc)
 
 void VoiceGateway::sendBinaryPayload(int opcode, const QByteArray &data)
 {
+    // The receive parser expects [2B seq][opcode][payload]; prepend the
+    // sequence so the wire format matches on both sides.
     QByteArray frame;
-    frame.reserve(1 + data.size());
+    frame.reserve(3 + data.size());
+    const uint16_t seq = binarySeq++;
+    frame.append(static_cast<char>(seq >> 8));
+    frame.append(static_cast<char>(seq & 0xFF));
     frame.append(static_cast<char>(opcode));
     frame.append(data);
 
-    qCDebug(LogVoice) << "Voice binary >>> opcode =" << opcode << "size =" << data.size();
+    qCDebug(LogVoice) << "Voice binary >>> opcode =" << opcode << "seq =" << seq
+                      << "size =" << data.size();
 
     CurlUtils::wsSend(curl, curlMutex, frame.constData(), frame.size(), CURLWS_BINARY, "voice binary");
 }
@@ -208,7 +220,11 @@ void VoiceGateway::handleHello(const QJsonObject &data)
 
     qCInfo(LogVoice) << "Voice Hello, heartbeat interval:" << hello.heartbeatInterval << "ms";
 
-    heartbeatInterval = hello.heartbeatInterval;
+    // Clamp a missing/invalid interval to a sane default so the heartbeat loop
+    // always starts — an early return here would leave the connection with no
+    // heartbeat and get it dropped by the server.
+    const int helloInterval = static_cast<int>(hello.heartbeatInterval);
+    heartbeatInterval = helloInterval > 0 ? helloInterval : kDefaultVoiceHeartbeatInterval;
     heartbeatAckReceived = true;
 
     if (isResuming && canResume)
@@ -218,11 +234,9 @@ void VoiceGateway::handleHello(const QJsonObject &data)
 
     isResuming = false;
 
-    if (hello.heartbeatInterval <= 0) {
-        qCWarning(LogVoice) << "Invalid voice heartbeat interval in hello:" << hello.heartbeatInterval;
-        return;
-    }
-
+    if (helloInterval <= 0)
+        qCWarning(LogVoice) << "Invalid voice heartbeat interval in hello:"
+                            << helloInterval << "- using default" << heartbeatInterval << "ms";
 
     {
         std::lock_guard lock(heartbeatThreadMutex);
@@ -230,7 +244,7 @@ void VoiceGateway::handleHello(const QJsonObject &data)
             heartbeatThread = std::thread(&VoiceGateway::heartbeatLoop, this);
     }
 
-    emit helloReceived(hello.heartbeatInterval);
+    emit helloReceived(heartbeatInterval);
 }
 
 void VoiceGateway::handleReady(const QJsonObject &data)
@@ -489,13 +503,34 @@ void VoiceGateway::networkLoop()
                 res = curl_ws_recv(curl, chunk, sizeof(chunk), &rlen, &meta);
             }
 
-            if (res == CURLE_AGAIN || res == CURLE_GOT_NOTHING || !meta) {
+            if (res == CURLE_AGAIN) {
                 CurlUtils::wsRecvWait(curl, curlMutex);
 
                 if (shouldReconnect)
                     break;
 
                 continue;
+            }
+
+            // GOT_NOTHING means the peer closed without a clean WS close frame
+            // (recv returned 0 bytes); treat it as a dead connection and
+            // reconnect rather than busy-looping forever.
+            if (res == CURLE_GOT_NOTHING) {
+                qCWarning(LogVoice) << "Voice connection returned no data; reconnecting";
+                if (!wantToClose)
+                    shouldReconnect = true;
+                break;
+            }
+
+            // Any other error (e.g. CURLE_RECV_ERROR after the TCP socket drops)
+            // leaves meta == nullptr. Treat it as a dead connection instead of
+            // busy-looping at 100% CPU.
+            if (!meta) {
+                qCWarning(LogVoice) << "Voice recv error" << res
+                                    << "- treating as connection failure";
+                if (!wantToClose)
+                    shouldReconnect = true;
+                break;
             }
 
             if (meta->flags & CURLWS_CLOSE) {

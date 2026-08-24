@@ -215,7 +215,10 @@ void SlashCommandPopup::setSuggestions(const QStringList &names, const QStringLi
 
     for (const auto &s : scored) {
         const int idx = s.second;
-        suggestionInsertTexts_.append(insertTexts.at(idx));
+        // Lists are produced in lockstep, but guard like descriptions below:
+        // a mismatched insertTexts list must never index out of bounds.
+        suggestionInsertTexts_.append(idx < insertTexts.size() ? insertTexts.at(idx)
+                                                               : names.at(idx));
         auto *row = new QListWidgetItem(list_);
         QString text = names.at(idx);
         if (idx < descriptions.size() && !descriptions.at(idx).isEmpty())

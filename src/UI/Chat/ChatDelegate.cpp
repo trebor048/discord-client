@@ -308,6 +308,13 @@ void ChatDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
 {
     painter->save();
 
+    // Fade-in for newly arriving messages (see ChatView::onRowsInserted).
+    if (const ChatView *view = qobject_cast<const ChatView *>(option.widget)) {
+        const qreal opacity = view->rowAppearOpacity(index.row());
+        if (opacity < 1.0)
+            painter->setOpacity(std::max(0.0, opacity));
+    }
+
     if (auto *chatModel = qobject_cast<const ChatModel *>(index.model()))
         chatModel->suppressImageFetch = false;
 

@@ -278,7 +278,8 @@ TabEntry WindowManager::currentChannelEntry() const
     return m_window->tabBar->tabEntry(m_window->tabBar->activeTabIndex());
 }
 
-void WindowManager::openChannelInNewWindow(const TabEntry &entry, bool tileToSide)
+void WindowManager::openChannelInNewWindow(const TabEntry &entry, bool tileToSide,
+                                           Core::Snowflake jumpMessageId)
 {
     if (!entry.channelId.isValid())
         return;
@@ -294,6 +295,10 @@ void WindowManager::openChannelInNewWindow(const TabEntry &entry, bool tileToSid
     window->show();
     window->raise();
     window->activateWindow();
+
+    // Scroll the new window to the message once its channel loads.
+    if (jumpMessageId.isValid())
+        window->jumpToMessage(entry.channelId, jumpMessageId);
 
     if (!tileToSide)
         return;

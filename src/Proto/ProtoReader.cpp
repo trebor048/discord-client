@@ -181,7 +181,8 @@ std::optional<int64_t> readInt64Value(ProtoReader &reader)
             if (reader.readVarint(value))
                 return static_cast<int64_t>(value);
         } else {
-            reader.skipField(tag.wireType);
+            if (!reader.skipField(tag.wireType))
+                break; // unskippable wire type — abort to avoid misparse
         }
     }
     return std::nullopt;
@@ -197,7 +198,8 @@ std::optional<QString> readStringValue(ProtoReader &reader)
             if (reader.readLengthDelimited(bytes))
                 return QString::fromUtf8(bytes);
         } else {
-            reader.skipField(tag.wireType);
+            if (!reader.skipField(tag.wireType))
+                break; // unskippable wire type — abort to avoid misparse
         }
     }
     return std::nullopt;
@@ -213,7 +215,8 @@ std::optional<uint64_t> readUInt64Value(ProtoReader &reader)
             if (reader.readVarint(value))
                 return value;
         } else {
-            reader.skipField(tag.wireType);
+            if (!reader.skipField(tag.wireType))
+                break; // unskippable wire type — abort to avoid misparse
         }
     }
     return std::nullopt;

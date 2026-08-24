@@ -122,6 +122,10 @@ private:
     static constexpr int maxReconnectAttempts = 5;
 
     std::atomic<uint64_t> generation{ 0 };
+
+    // Sequence number for binary payloads ([2B seq][opcode][payload]); matches
+    // the receive parser's expected framing.
+    std::atomic<uint16_t> binarySeq{ 0 };
 };
 
 } // namespace AV

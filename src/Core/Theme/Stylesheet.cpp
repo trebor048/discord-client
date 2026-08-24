@@ -7,6 +7,7 @@
 #include <QColor>
 
 #include <algorithm>
+#include <cmath>
 
 namespace Acheron {
 namespace Core {
@@ -119,6 +120,31 @@ QString buildStyleSheet()
                           " QGroupBox, QFrame, QMenu {"
                           "  border-radius: %1px; }")
                    .arg(r);
+
+    // Group boxes: reserve room for the title so it never collides with the
+    // first child (visible at large UI fonts), and give the contents generous
+    // padding. `margin-top` lifts the title above the box border; `padding-top`
+    // pushes the content below it. Both scale with the UI font size so the
+    // title keeps its own row at any font size.
+    const qreal uiPt = uiPointSize > 0 ? uiPointSize : 9.0;
+    const int groupTitleMargin = static_cast<int>(std::lround(uiPt * 1.5)) + 4;
+    const int groupTitlePad = static_cast<int>(std::lround(uiPt * 0.6)) + 4;
+    const int groupSidePad = std::max(10, static_cast<int>(std::lround(uiPt * 0.8)) + 2);
+    qss += QStringLiteral("QGroupBox {"
+                          "  margin-top: %1px;"
+                          "  padding-top: %2px;"
+                          "  padding-left: %3px;"
+                          "  padding-right: %3px;"
+                          "  padding-bottom: %3px; }"
+                          "QGroupBox::title {"
+                          "  subcontrol-origin: margin;"
+                          "  left: 10px;"
+                          "  padding: 0 6px;"
+                          "  color: %4; }")
+                   .arg(groupTitleMargin)
+                   .arg(groupTitlePad)
+                   .arg(groupSidePad)
+                   .arg(hex(highlight));
 
     return qss;
 }

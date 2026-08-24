@@ -58,6 +58,7 @@ Client::Client(const QString &token, const QString &gatewayUrl, const QString &b
     });
     connect(gateway, &Gateway::gatewayReady, this, &Client::onGatewayReady);
     connect(gateway, &Gateway::gatewayReadySupplemental, this, &Client::onGatewayReadySupplemental);
+    connect(gateway, &Gateway::gatewayResumed, this, &Client::onGatewayResumed);
     connect(gateway, &Gateway::gatewayMessageCreate, this, &Client::onGatewayMessageCreate);
     connect(gateway, &Gateway::gatewayMessageUpdate, this, &Client::onGatewayMessageUpdate);
     connect(gateway, &Gateway::gatewayMessageDelete, this, &Client::onGatewayMessageDelete);
@@ -814,6 +815,11 @@ void Client::onDisconnected(CloseCode code, const QString &reason)
 
 void Client::onGatewayReady(const Ready &data)
 {
+    // A fresh IDENTIFY (READY) means Discord dropped all lazy guild
+    // subscriptions from the previous session — clear the set so
+    // ensureSubscriptionByChannel re-issues them for the active channel.
+    subscribedGuilds.clear();
+
     for (const auto &guild : data.guilds.get())
         indexGuildMappings(guild);
 
@@ -839,6 +845,17 @@ void Client::onGatewayReady(const Ready &data)
 void Client::onGatewayReadySupplemental(const ReadySupplemental &data)
 {
     emit readySupplemental(data);
+}
+
+void Client::onGatewayResumed()
+{
+    // A successful RESUME means the session is live again — transition to
+    // Connected and re-apply presence (the server preserves it, but the
+    // Client state was in Connecting/Reconnecting during the outage).
+    setState(Core::ConnectionState::Connected);
+    if (!m_lastPresenceStatus.isEmpty())
+        gateway->sendPresenceUpdate(m_lastPresenceStatus);
+    emit resumed();
 }
 
 void Client::onGatewayMessageCreate(const Message &msg)

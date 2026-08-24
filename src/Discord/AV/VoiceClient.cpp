@@ -392,13 +392,13 @@ void VoiceClient::onDatagram(const QByteArray &data)
     if (data.size() < 44)
         return;
 
-    // rtp header and extension header are unencrypted and used for aad in rtpsize.
-    // account for CSRC entries between fixed header and extension header.
-    int csrcCount = p[0] & 0x0F;
-    bool hasExtension = (p[0] >> 4) & 1;
-    int headerSize = RtpHeader::FIXED_SIZE + csrcCount * 4 + (hasExtension ? 4 : 0);
-
-    if (data.size() <= headerSize + 4)
+    // The RTP header (fixed header + CSRC list + full extension header) is
+    // unencrypted and used as AAD for DAVE decryption. Use the shared helper so
+    // the AAD covers the complete extension header — previously only the 4-byte
+    // extension prefix was included, which broke decryption of packets that
+    // carry an extension (and wrongly fed the extension data into the cipher).
+    const int headerSize = rtpHeaderSize(data);
+    if (headerSize < RtpHeader::FIXED_SIZE || data.size() <= headerSize + 4)
         return;
 
     RtpHeader header = RtpHeader::parse(data);
@@ -421,20 +421,8 @@ void VoiceClient::onDatagram(const QByteArray &data)
                           << "seq =" << header.sequence
                           << "pktSize =" << data.size()
                           << "hdrSize =" << headerSize
-                          << "ext =" << hasExtension
                           << "encSize =" << encryptedSection.size();
         return;
-    }
-
-    if (hasExtension) {
-        int extOffset = RtpHeader::FIXED_SIZE + csrcCount * 4;
-        if (data.size() < extOffset + 4)
-            return;
-        uint16_t extWords = (p[extOffset + 2] << 8) | p[extOffset + 3];
-        int extBytes = extWords * 4;
-        if (decrypted.size() <= extBytes)
-            return;
-        decrypted = decrypted.mid(extBytes);
     }
 
     if (daveSession) {

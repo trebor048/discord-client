@@ -72,7 +72,14 @@ void IntegrationsWidget::load()
     item->setText(QStringLiteral("Loading integrations..."));
     item->setFlags(item->flags() & ~Qt::ItemIsEnabled & ~Qt::ItemIsSelectable);
 
-    m_instance->discord()->fetchGuildIntegrations(m_guildId, [](const auto &) {});
+    m_instance->discord()->fetchGuildIntegrations(m_guildId, [this](const auto &result) {
+        if (!result.success()) {
+            m_integrationList->clear();
+            auto *item = new QListWidgetItem(m_integrationList);
+            item->setText(QStringLiteral("Failed to load integrations: %1").arg(result.error));
+            item->setFlags(item->flags() & ~Qt::ItemIsEnabled & ~Qt::ItemIsSelectable);
+        }
+    });
 }
 
 void IntegrationsWidget::onIntegrationsFetched(Core::Snowflake guildId,

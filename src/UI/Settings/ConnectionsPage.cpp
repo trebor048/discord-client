@@ -25,10 +25,12 @@ ConnectionsPage::ConnectionsPage(QWidget *parent)
     , m_nam(new QNetworkAccessManager(this))
 {
     auto *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(12);
 
     auto *headerLayout = new QHBoxLayout();
     auto *titleLabel = new QLabel(tr("Connected Accounts"), this);
-    titleLabel->setStyleSheet(QStringLiteral("font-weight: bold; font-size: 14px;"));
+    titleLabel->setStyleSheet(QStringLiteral("font-weight: bold;"));
     headerLayout->addWidget(titleLabel);
     headerLayout->addStretch();
 

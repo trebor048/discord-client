@@ -38,10 +38,14 @@ VoicePage::VoicePage(QWidget *parent)
     : QWidget(parent)
 {
     auto *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(14);
 
     // --- Input / Output ---
     auto *deviceGroup = new QGroupBox(tr("Audio Devices"), this);
     auto *deviceLayout = new QFormLayout(deviceGroup);
+    deviceLayout->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    deviceLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
 
     inputDeviceCombo = new QComboBox(this);
     inputDeviceCombo->setEditable(true);
@@ -56,6 +60,8 @@ VoicePage::VoicePage(QWidget *parent)
     // --- Input sensitivity ---
     auto *sensitivityGroup = new QGroupBox(tr("Input Sensitivity"), this);
     auto *sensitivityLayout = new QFormLayout(sensitivityGroup);
+    sensitivityLayout->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    sensitivityLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
 
     inputSensitivitySpin = new QDoubleSpinBox(this);
     inputSensitivitySpin->setRange(0.0, 100.0);
@@ -68,6 +74,8 @@ VoicePage::VoicePage(QWidget *parent)
     // --- Push-to-talk ---
     auto *pttGroup = new QGroupBox(tr("Push-to-Talk"), this);
     auto *pttLayout = new QFormLayout(pttGroup);
+    pttLayout->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    pttLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
 
     pushToTalkCheckbox = new QCheckBox(tr("Enable push-to-talk"), this);
     pushToTalkCheckbox->setChecked(QSettings().value("voice/push_to_talk", false).toBool());
@@ -82,6 +90,7 @@ VoicePage::VoicePage(QWidget *parent)
     // --- Processing ---
     auto *processingGroup = new QGroupBox(tr("Audio Processing"), this);
     auto *processingLayout = new QVBoxLayout(processingGroup);
+    processingLayout->setSpacing(10);
 
     // No AEC implementation exists in the audio stack yet (miniaudio + rnnoise
     // provide neither echo cancellation nor a reference-signal path), so this
@@ -177,6 +186,17 @@ void VoicePage::setVoiceManager(Core::AV::VoiceManager *manager)
     // setValue() only emits when the value changed; push the current setting
     // explicitly so the manager always has it.
     voiceManager->setVadSensitivity(static_cast<float>(inputSensitivitySpin->value()));
+
+    // Apply saved device + noise-suppression settings at startup. These are only
+    // pushed on user interaction otherwise, so they silently reverted to the
+    // backend defaults until the user touched the combos/checkboxes.
+    const QString savedInput = QSettings().value("voice/input_device").toString();
+    const QString savedOutput = QSettings().value("voice/output_device").toString();
+    if (!savedInput.isEmpty())
+        voiceManager->setInputDevice(savedInput.toUtf8());
+    if (!savedOutput.isEmpty())
+        voiceManager->setOutputDevice(savedOutput.toUtf8());
+    voiceManager->setNoiseSuppressionEnabled(noiseSuppressionCheckbox->isChecked());
 
     connect(voiceManager, &Core::AV::VoiceManager::devicesChanged, this, &VoicePage::refreshDevices,
             Qt::UniqueConnection);

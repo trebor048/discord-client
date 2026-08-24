@@ -247,6 +247,15 @@ void GifAnimation::unload()
     // Free the heavy buffers but keep the object alive so external raw
     // pointers (e.g. ChatModel's per-URL map) stay valid; play() reloads.
     pause();
+    // Abort any in-flight download — otherwise the reply finishes after
+    // eviction and re-populates buffers the LRU just freed, defeating the cap.
+    if (m_activeReply) {
+        disconnect(m_activeReply, nullptr, this, nullptr);
+        m_activeReply->abort();
+        m_activeReply->deleteLater();
+        m_activeReply = nullptr;
+    }
+    m_loading = false;
     if (m_movie) {
         m_movie->deleteLater();
         m_movie = nullptr;
@@ -548,8 +557,13 @@ QPixmap ImageManager::getImpl(const QUrl &url, const QSize &size, PinGroup pin, 
                                            Qt::SmoothTransformation);
                 pixmap.setDevicePixelRatio(dpr);
             } else {
-                if (pixmap.size() != size)
-                    pixmap = pixmap.scaled(size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                // Non-proxy CDN images also need HiDPI scaling, otherwise they
+                // render at 1x pixels and appear blurry on high-DPI displays.
+                QSize physicalSize(qRound(size.width() * dpr), qRound(size.height() * dpr));
+                if (pixmap.size() != physicalSize)
+                    pixmap = pixmap.scaled(physicalSize, Qt::KeepAspectRatio,
+                                           Qt::SmoothTransformation);
+                pixmap.setDevicePixelRatio(dpr);
             }
 
             if (pin != PinGroup::None) {
@@ -768,7 +782,11 @@ void ImageManager::storeFetchedPixmap(const ImageRequestKey &k, const QUrl &url,
                                    Qt::SmoothTransformation);
         pixmap.setDevicePixelRatio(dpr);
     } else {
-        pixmap = pixmap.scaled(size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        // Non-proxy CDN images also need HiDPI scaling, otherwise they render
+        // at 1x pixels and appear blurry on high-DPI displays.
+        QSize physicalSize(qRound(size.width() * dpr), qRound(size.height() * dpr));
+        pixmap = pixmap.scaled(physicalSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        pixmap.setDevicePixelRatio(dpr);
     }
 
     if (pin != PinGroup::None) {

@@ -6,6 +6,7 @@
 #include <QAudioBuffer>
 #include <QUrl>
 #include <QHash>
+#include <QList>
 #include <QBuffer>
 #include <QByteArray>
 #include <QMutex>
@@ -56,11 +57,19 @@ private:
         QString format;
     };
 
+    /// One bell-like partial in a generated chime.
+    struct ChimeNote {
+        double frequency;  // Hz
+        double start;      // seconds from chime start
+        double duration;   // seconds the partial rings for
+        double amplitude;  // 0..1, relative peak
+    };
+
     void ensurePlayer();
     QUrl getSoundUrl(const QString &soundId) const;
     void playFromBuffer(const QByteArray &data, const QString &format, int volume);
     void generateBuiltinSounds();
-    void generateTone(const QString& soundId, double frequency, double duration, int volume);
+    void generateChime(const QString &soundId, const QList<ChimeNote> &notes, double masterVolume);
     QByteArray audioBufferToWav(const QAudioBuffer& buffer);
 
     mutable QMutex m_cacheMutex;

@@ -5,6 +5,7 @@
 #include "Core/Logging.hpp"
 #include "Core/Theme/Manager.hpp"
 #include "Core/ScrollBarStyle.hpp"
+#include "Core/Animation/HoverAnimator.hpp"
 #include "Discord/CurlUtils.hpp"
 
 #include <curl/curl.h>
@@ -105,6 +106,9 @@ int main(int argc, char *argv[])
     Core::Theme::Manager::instance().load();
     Core::Theme::Manager::instance().apply();
     Core::Theme::Manager::instance().applyFonts();
+
+    // App-wide animated hover (wash layers on interactive widgets).
+    Core::HoverAnimator::instance().install();
 
     registerMetatypes();
 

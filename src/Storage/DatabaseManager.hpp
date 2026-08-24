@@ -31,6 +31,7 @@ private:
     void setupPersistentTables();
     void setupCacheTables(const QString &connName);
     void applyPersistentMigrations(QSqlDatabase &db);
+    void applyCacheMigrations(QSqlDatabase &db);
 
     QSqlDatabase persistentDb;
     QString persistentPath;

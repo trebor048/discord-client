@@ -108,19 +108,17 @@ void MessageManager::setChannelResolver(std::function<QString(Snowflake)> resolv
 void MessageManager::requestLoadChannel(Snowflake channelId)
 {
     if (fetchedChannels.contains(channelId)) {
-        // ram cache
+        // ram cache — return the FULL cached history so switching back to a
+        // channel preserves everything the user has already loaded, instead of
+        // truncating to the latest 30 messages and losing scroll/history.
         if (channelMessages.contains(channelId)) {
             const auto &order = channelMessages[channelId];
 
-            int count = order.size();
-            int startIndex = (count > 30) ? (count - 30) : 0;
-
             bool cached = true;
             QList<Discord::Message> result;
-            result.reserve(count - startIndex);
+            result.reserve(order.size());
 
-            for (int i = startIndex; i < count; i++) {
-                Snowflake msgId = order[i];
+            for (Snowflake msgId : order) {
                 if (auto *msg = messageCache.object(msgId)) {
                     result.append(*msg);
                 } else {
@@ -302,12 +300,15 @@ void MessageManager::cacheMessages(Snowflake channelId, const QList<Discord::Mes
     if (order.empty()) {
         for (const auto &msg : msgs)
             order.push_back(msg.id);
-    } else if (msgs.first().id >= order.back()) {
+    } else if (msgs.first().id > order.back()) {
         // Common fast path: incoming batch is entirely newer than what we have
-        // (Latest / new message batches). Append in O(n).
+        // (Latest / new message batches). Append in O(n). Strict comparison:
+        // a batch starting with an id we already hold (e.g. a single-message
+        // jump fetch of a loaded message) must fall through to the merge so it
+        // is deduplicated instead of appended twice.
         for (const auto &msg : msgs)
             order.push_back(msg.id);
-    } else if (msgs.last().id <= order.front()) {
+    } else if (msgs.last().id < order.front()) {
         // History batches are entirely older; prepend in O(n).
         for (auto it = msgs.crbegin(); it != msgs.crend(); ++it)
             order.push_front(it->id);

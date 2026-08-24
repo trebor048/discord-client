@@ -114,6 +114,10 @@ QString DatabaseManager::openCacheDatabase(Core::Snowflake accountId)
     }
 
     setupCacheTables(connName);
+    {
+        QSqlDatabase db = QSqlDatabase::database(connName);
+        applyCacheMigrations(db);
+    }
 
     return connName;
 }
@@ -329,5 +333,25 @@ void DatabaseManager::setupCacheTables(const QString &connName)
     query.exec("CREATE INDEX IF NOT EXISTS idx_channel_recipients_channel ON channel_recipients(channel_id);");
     query.exec("CREATE INDEX IF NOT EXISTS idx_channel_recipients_user ON channel_recipients(user_id);");
 }
+
+void DatabaseManager::applyCacheMigrations(QSqlDatabase &db)
+{
+    // The per-account cache DB previously had no version stamp — every schema
+    // change was "CREATE TABLE IF NOT EXISTS", which silently skipped new
+    // columns/tables on existing installs. Stamp a version now so future
+    // migrations can be applied incrementally.
+    constexpr int latestCacheSchemaVersion = 1;
+    const int version = schemaVersion(db);
+    if (version >= latestCacheSchemaVersion)
+        return;
+
+    QSqlQuery query(db);
+
+    // Migration 1 (stamp only): the current schema is the baseline. Add future
+    // column/table migrations here guarded by `version < N`.
+
+    setSchemaVersion(db, latestCacheSchemaVersion);
+}
+
 } // namespace Storage
 } // namespace Acheron

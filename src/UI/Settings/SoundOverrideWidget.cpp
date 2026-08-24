@@ -27,7 +27,13 @@ void SoundOverrideWidget::setupUi()
     
     m_enableCheck = new QCheckBox(this);
     m_enableCheck->setText(m_displayName.isEmpty() ? m_soundId : m_displayName);
-    m_enableCheck->setFont(QFont("sans-serif", 11, QFont::Bold));
+    // Inherit the theme's UI font (family + size) instead of hardcoding a
+    // generic family at a fixed size, which clashes with large UI fonts.
+    {
+        QFont headerFont = m_enableCheck->font();
+        headerFont.setBold(true);
+        m_enableCheck->setFont(headerFont);
+    }
     headerLayout->addWidget(m_enableCheck);
 
     headerLayout->addStretch();
@@ -56,8 +62,8 @@ void SoundOverrideWidget::setupUi()
     m_volumeSlider = new QSlider(Qt::Horizontal, this);
     m_volumeSlider->setRange(0, 100);
     m_volumeSlider->setValue(100);
-    m_volumeSlider->setFixedWidth(150);
-    volumeLayout->addWidget(m_volumeSlider);
+    m_volumeSlider->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    volumeLayout->addWidget(m_volumeSlider, 1);
     
     m_volumeLabel = new QLabel("100%", this);
     m_volumeLabel->setFixedWidth(40);

@@ -1,6 +1,7 @@
 #include "MessageInput.hpp"
 #include "AttachmentPreviewPanel.hpp"
 #include "Core/AnimationUtils.hpp"
+#include "Core/Animation/AnimationConfig.hpp"
 #include "Core/EmojiCatalog.hpp"
 #include "Core/Theme/Manager.hpp"
 #include "Discord/CdnUrls.hpp"
@@ -2102,7 +2103,7 @@ void MessageInput::showReplyBar()
         replyBarOpacity->setOpacity(startOpacity);
 
     replyBarFadeAnimation = new QPropertyAnimation(replyBarOpacity, "opacity", replyBar);
-    replyBarFadeAnimation->setDuration(180);
+    replyBarFadeAnimation->setDuration(Core::AnimationConfig::instance().scaled(180));
     replyBarFadeAnimation->setStartValue(startOpacity);
     replyBarFadeAnimation->setEndValue(1.0);
     replyBarFadeAnimation->setEasingCurve(QEasingCurve::OutCubic);
@@ -2126,7 +2127,7 @@ void MessageInput::hideReplyBar()
     }
 
     replyBarFadeAnimation = new QPropertyAnimation(replyBarOpacity, "opacity", replyBar);
-    replyBarFadeAnimation->setDuration(120);
+    replyBarFadeAnimation->setDuration(Core::AnimationConfig::instance().scaled(120));
     replyBarFadeAnimation->setStartValue(replyBarOpacity ? replyBarOpacity->opacity() : 1.0);
     replyBarFadeAnimation->setEndValue(0.0);
     replyBarFadeAnimation->setEasingCurve(QEasingCurve::InCubic);

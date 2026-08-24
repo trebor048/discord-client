@@ -71,8 +71,12 @@ void RemoteAuthClient::stop()
         networkThread.join();
     if (heartbeatThread.joinable())
         heartbeatThread.join();
+    // The HTTP login thread runs a curl_easy_perform with up to a 20s timeout;
+    // joining it here would freeze the UI while a login request is in-flight.
+    // Detach instead — the worker captures a QPointer and cleans up its own
+    // curl handle, so it is safe to let it finish independently.
     if (httpThread.joinable())
-        httpThread.join();
+        httpThread.detach();
 }
 
 bool RemoteAuthClient::generateKey()
@@ -242,6 +246,17 @@ void RemoteAuthClient::networkLoop()
             message.clear();
             QMetaObject::invokeMethod(this, [this, text] { handleMessage(text); }, Qt::QueuedConnection);
         }
+    }
+
+    // If we end up here without a terminal state (e.g. the server closed the
+    // socket with a normal close code before auth completed, or a silent
+    // exit), surface a failure instead of leaving the QR dialog hanging
+    // forever. Queued on `this`: if the client was destroyed via stop(), the
+    // invocation is dropped automatically. fail() is idempotent (done-guard).
+    if (!done.load()) {
+        QMetaObject::invokeMethod(this,
+                                  [this] { fail(RemoteAuthError::ConnectionFailed); },
+                                  Qt::QueuedConnection);
     }
 
     {

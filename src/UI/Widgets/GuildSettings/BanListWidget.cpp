@@ -68,7 +68,14 @@ void BanListWidget::load()
     item->setText(QStringLiteral("Loading bans..."));
     item->setFlags(item->flags() & ~Qt::ItemIsEnabled & ~Qt::ItemIsSelectable);
 
-    m_instance->discord()->fetchGuildBans(m_guildId, [](const auto &) {});
+    m_instance->discord()->fetchGuildBans(m_guildId, [this](const auto &result) {
+        if (!result.success()) {
+            m_banList->clear();
+            auto *item = new QListWidgetItem(m_banList);
+            item->setText(QStringLiteral("Failed to load bans: %1").arg(result.error));
+            item->setFlags(item->flags() & ~Qt::ItemIsEnabled & ~Qt::ItemIsSelectable);
+        }
+    });
 }
 
 void BanListWidget::onBansFetched(Core::Snowflake guildId, const QList<Discord::BanEntry> &bans)

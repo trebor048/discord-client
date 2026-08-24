@@ -31,7 +31,9 @@ void SoundManager::initialize()
     m_audioOutput->setVolume(m_globalVolume / 100.0);
 
     connect(m_player, &QMediaPlayer::errorOccurred, this, [this](QMediaPlayer::Error error, const QString &errorString) {
-        Q_UNUSED(error);
+        // Log here too — the errorOccurred signal had no receivers, so playback
+        // errors were silently dropped.
+        qWarning() << "Sound playback error:" << static_cast<int>(error) << errorString;
         emit errorOccurred(errorString);
     });
 
@@ -64,34 +66,55 @@ void SoundManager::shutdown()
 
 void SoundManager::generateBuiltinSounds()
 {
-    // Generate simple notification tones using sine waves
-    struct SoundDef {
-        const char* id;
-        double frequency;  // Hz
-        double duration;   // seconds
-        int volume;        // 0-100
+    // Pleasant two-tone chimes instead of harsh short beeps: each chime is a
+    // pair of bell-like notes with a soft quarter-sine attack and an
+    // exponential decay, so nothing sounds like a click. Frequency pairs are
+    // chosen as pleasant intervals (fifths/octaves).
+    struct ChimeDef {
+        const char *id;
+        double masterVolume; // 0..1 overall gain
+        QList<ChimeNote> notes;
     };
 
-    const SoundDef sounds[] = {
-        {DefaultNotification, 880.0, 0.15, 80},    // A5 - short beep
-        {Message1, 660.0, 0.2, 70},                 // E5 - message tone
-        {Message2, 784.0, 0.2, 70},                 // G5 - reply tone
-        {Message3, 523.0, 0.25, 65},                // C5 - DM tone
-        {Mention1, 1046.0, 0.1, 85},                // C6 - mention
-        {Mention2, 1318.0, 0.1, 90},                // E6 - @everyone
-        {Mention3, 1174.0, 0.1, 85},                // D6 - @here
+    const QList<ChimeDef> chimes = {
+        // Default: soft single "ding"
+        { DefaultNotification, 0.7,
+          { { 880.0, 0.00, 0.50, 1.0 }, { 1760.0, 0.00, 0.28, 0.35 } } },
+        // Message tones: gentle ascending fifths
+        { Message1, 0.7,
+          { { 523.25, 0.00, 0.45, 1.0 }, { 783.99, 0.10, 0.40, 0.7 } } },   // C5 -> G5
+        { Message2, 0.7,
+          { { 587.33, 0.00, 0.45, 1.0 }, { 880.00, 0.10, 0.40, 0.7 } } },   // D5 -> A5
+        { Message3, 0.72,
+          { { 659.25, 0.00, 0.45, 1.0 }, { 987.77, 0.10, 0.40, 0.7 } } },   // E5 -> B5
+        // Mentions: brighter and a touch louder
+        { Mention1, 0.78,
+          { { 783.99, 0.00, 0.45, 1.0 }, { 1174.66, 0.08, 0.42, 0.75 } } }, // G5 -> D6
+        { Mention2, 0.82,
+          { { 880.00, 0.00, 0.48, 1.0 }, { 1318.51, 0.08, 0.45, 0.8 } } },  // A5 -> E6
+        { Mention3, 0.78,
+          { { 830.61, 0.00, 0.45, 1.0 }, { 1244.51, 0.08, 0.42, 0.75 } } }, // G#5 -> D#6
     };
 
-    for (const auto& def : sounds) {
-        generateTone(def.id, def.frequency, def.duration, def.volume);
-    }
+    for (const auto &def : chimes)
+        generateChime(def.id, def.notes, def.masterVolume);
 }
 
-void SoundManager::generateTone(const QString& soundId, double frequency, double duration, int volume)
+void SoundManager::generateChime(const QString &soundId, const QList<ChimeNote> &notes,
+                                 double masterVolume)
 {
     const int sampleRate = 44100;
-    const int numSamples = static_cast<int>(sampleRate * duration);
-    
+    const double attackTime = 0.012; // 12 ms soft quarter-sine attack
+    const double releaseTime = 0.05; // 50 ms tail fade to zero
+
+    // Total duration covers the longest note plus a release tail.
+    double totalDuration = 0.0;
+    for (const auto &note : notes)
+        totalDuration = std::max(totalDuration, note.start + note.duration);
+    totalDuration += releaseTime;
+
+    const int numSamples = static_cast<int>(sampleRate * totalDuration) + 1;
+
     QAudioFormat format;
     format.setSampleRate(sampleRate);
     format.setChannelCount(2);
@@ -100,24 +123,45 @@ void SoundManager::generateTone(const QString& soundId, double frequency, double
     QByteArray sampleData(numSamples * 2 * static_cast<int>(sizeof(float)), Qt::Uninitialized);
     QAudioBuffer buffer(sampleData, format);
     float *data = buffer.data<float>();
-    
-    const float amplitude = volume / 100.0f * 0.3f;  // Scale to prevent clipping
-    const double phaseIncrement = 2.0 * M_PI * frequency / sampleRate;
-    double phase = 0.0;
+    std::memset(data, 0, static_cast<size_t>(numSamples) * 2 * sizeof(float));
 
-    for (int i = 0; i < numSamples; ++i) {
-        float sample = amplitude * std::sin(phase);
-        // Apply envelope (fade in/out to avoid clicks)
-        float envelope = 1.0f;
-        if (i < sampleRate * 0.01) envelope = i / (sampleRate * 0.01f);  // 10ms fade in
-        else if (i > numSamples - sampleRate * 0.01) envelope = (numSamples - i) / (sampleRate * 0.01f);  // 10ms fade out
-        
-        data[i * 2] = sample * envelope;     // Left channel
-        data[i * 2 + 1] = sample * envelope; // Right channel
-        phase += phaseIncrement;
+    const double overallGain = masterVolume * 0.22;
+
+    for (const auto &note : notes) {
+        const int startSample = static_cast<int>(note.start * sampleRate);
+        const int noteSamples = static_cast<int>(note.duration * sampleRate);
+        const int endSample = std::min(numSamples, startSample + noteSamples);
+        // Exponential decay so the partial rings out instead of cutting off.
+        // Target ~ -40 dB at the note's nominal end.
+        const double decayPerSec = std::log(100.0) / note.duration;
+        const double phaseIncrement = 2.0 * M_PI * note.frequency / sampleRate;
+
+        for (int i = startSample; i < endSample; ++i) {
+            const int t = i - startSample;
+            const double time = static_cast<double>(t) / sampleRate;
+
+            // Soft attack (quarter sine: zero slope at t=0, no click).
+            double env = 1.0;
+            const double attackSamples = attackTime * sampleRate;
+            if (t < attackSamples)
+                env = std::sin((M_PI / 2.0) * (t / attackSamples));
+            env *= std::exp(-decayPerSec * time);
+
+            const double sample = overallGain * note.amplitude * env * std::sin(phaseIncrement * t);
+
+            data[i * 2] += static_cast<float>(sample);
+            data[i * 2 + 1] += static_cast<float>(sample);
+        }
     }
 
-    // Store as WAV data in memory
+    // Fade the very end to exactly zero so playback ends silently.
+    const int releaseSamples = static_cast<int>(releaseTime * sampleRate);
+    for (int i = std::max(0, numSamples - releaseSamples); i < numSamples; ++i) {
+        const double fade = 1.0 - (static_cast<double>(i - (numSamples - releaseSamples)) / releaseSamples);
+        data[i * 2] *= static_cast<float>(fade);
+        data[i * 2 + 1] *= static_cast<float>(fade);
+    }
+
     QByteArray wavData = audioBufferToWav(buffer);
     m_soundBuffers[soundId] = wavData;
 }

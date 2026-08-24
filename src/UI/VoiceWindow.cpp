@@ -1,6 +1,7 @@
 #include "VoiceWindow.hpp"
 
 #include "Core/AnimationUtils.hpp"
+#include "Core/Animation/AnimationConfig.hpp"
 #include "Core/AV/VoiceManager.hpp"
 #include "Core/ImageManager.hpp"
 #include "Core/Logging.hpp"
@@ -26,6 +27,7 @@
 #include <QFrame>
 
 #include <algorithm>
+#include <cmath>
 
 namespace Acheron {
 namespace UI {
@@ -213,7 +215,9 @@ void VoiceUserWidget::setSpeaking(bool speaking)
         }
         if (!speakingGlowAnim) {
             speakingGlowAnim = new QPropertyAnimation(speakingGlowFx, "opacity", this);
-            speakingGlowAnim->setDuration(800);
+            // Loop: scale by speed but never collapse to 0 (infinite pulse).
+            speakingGlowAnim->setDuration(std::max(200, static_cast<int>(std::lround(
+                    800.0 / Core::AnimationConfig::instance().speed()))));
             speakingGlowAnim->setStartValue(1.0);
             speakingGlowAnim->setEndValue(0.82);
             speakingGlowAnim->setEasingCurve(QEasingCurve::InOutSine);
@@ -921,7 +925,7 @@ void VoiceWindow::onParticipantLeft(Core::Snowflake userId)
     w->setGraphicsEffect(fx);
     fx->setOpacity(1.0);
     auto *fade = new QPropertyAnimation(fx, "opacity", w);
-    fade->setDuration(150);
+    fade->setDuration(Core::AnimationConfig::instance().scaled(150));
     fade->setStartValue(1.0);
     fade->setEndValue(0.0);
     fade->setEasingCurve(QEasingCurve::InCubic);

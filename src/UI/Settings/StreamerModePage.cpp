@@ -10,12 +10,6 @@
 #include <QDebug>
 #include <QVBoxLayout>
 
-#ifdef Q_OS_WIN
-#include <windows.h>
-#include <psapi.h>
-#pragma comment(lib, "psapi.lib")
-#endif
-
 namespace Acheron {
 namespace UI {
 
@@ -23,10 +17,13 @@ StreamerModePage::StreamerModePage(QWidget *parent)
     : QWidget(parent)
 {
     auto *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(14);
 
     // === Streamer Mode toggle ===
     auto *mainGroup = new QGroupBox(tr("Streamer Mode"), this);
     auto *mainLayout = new QVBoxLayout(mainGroup);
+    mainLayout->setSpacing(10);
 
     streamerModeCheckbox = new QCheckBox(tr("Enable Streamer Mode"), this);
     streamerModeCheckbox->setChecked(QSettings().value("streamer/enabled", false).toBool());
@@ -47,6 +44,7 @@ StreamerModePage::StreamerModePage(QWidget *parent)
     // === Privacy options ===
     auto *privacyGroup = new QGroupBox(tr("Privacy"), this);
     auto *privacyLayout = new QVBoxLayout(privacyGroup);
+    privacyLayout->setSpacing(10);
 
     hidePersonalInfoCheckbox = new QCheckBox(tr("Hide personal information (email, phone)"), this);
     hidePersonalInfoCheckbox->setChecked(QSettings().value("streamer/hide_personal_info", true).toBool());
@@ -86,52 +84,21 @@ StreamerModePage::StreamerModePage(QWidget *parent)
 
 void StreamerModePage::checkForStreamingSoftware()
 {
+    // Detect OBS / Streamlabs / XSplit asynchronously so the UI thread never
+    // blocks on process enumeration. (The previous Windows path used
+    // EnumProcesses + GetModuleBaseNameW synchronously and also missed
+    // obs.exe and Streamlabs OBS.)
+    QStringList args;
 #ifdef Q_OS_WIN
-    // Enumerate processes and look for OBS or XSplit
-    DWORD processes[1024];
-    DWORD needed = 0;
-    if (!EnumProcesses(processes, sizeof(processes), &needed))
-        return;
-
-    DWORD count = needed / sizeof(DWORD);
-    bool found = false;
-
-    for (DWORD i = 0; i < count; ++i) {
-        if (processes[i] == 0)
-            continue;
-
-        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE,
-                                       processes[i]);
-        if (!hProcess)
-            continue;
-
-        wchar_t name[MAX_PATH] = {};
-        if (GetModuleBaseNameW(hProcess, nullptr, name, MAX_PATH) > 0) {
-            QString processName = QString::fromWCharArray(name).toLower();
-            if (processName.contains("obs64") || processName.contains("obs32") ||
-                processName.contains("xsplit")) {
-                found = true;
-            }
-        }
-        CloseHandle(hProcess);
-
-        if (found)
-            break;
-    }
-
-    if (found) {
-        detectionLabel->setText(tr("OBS/XSplit detected!"));
-        detectionLabel->setStyleSheet("color: green;");
-    } else {
-        detectionLabel->setText(tr("No streaming software detected"));
-        detectionLabel->setStyleSheet("color: gray;");
-    }
+    args = { QStringLiteral("tasklist"), QStringLiteral("/FO"), QStringLiteral("CSV"),
+             QStringLiteral("/NH") };
 #else
-    // On non-Windows platforms, check for OBS asynchronously so the UI never blocks.
     // pgrep is unavailable on stock macOS, so list processes via ps and match locally.
+    args = { QStringLiteral("ps"), QStringLiteral("-axco"), QStringLiteral("comm") };
+#endif
     auto *process = new QProcess(this);
-    connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError error) {
-        qDebug() << "StreamerModePage: process check failed to start:" << error;
+    connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError) {
+        qDebug() << "StreamerModePage: process check failed to start";
         detectionLabel->setText(tr("No streaming software detected"));
         detectionLabel->setStyleSheet("color: gray;");
         process->deleteLater();
@@ -141,20 +108,18 @@ void StreamerModePage::checkForStreamingSoftware()
                 bool found = false;
                 if (status == QProcess::NormalExit && exitCode == 0) {
                     const QString output = QString::fromLocal8Bit(process->readAllStandardOutput()).toLower();
-                    static const QRegularExpression pattern(QStringLiteral("\\b(obs|xsplit)"));
+                    // obs64.exe / obs32.exe (OBS Studio), obs.exe (older 32-bit
+                    // OBS), slobs.exe (Streamlabs OBS), xsplit (XSplit).
+                    static const QRegularExpression pattern(
+                            QStringLiteral("(obs64|obs32|\\bobs\\.exe|slobs|xsplit)"));
                     found = pattern.match(output).hasMatch();
                 }
-                if (found) {
-                    detectionLabel->setText(tr("OBS/XSplit detected!"));
-                    detectionLabel->setStyleSheet("color: green;");
-                } else {
-                    detectionLabel->setText(tr("No streaming software detected"));
-                    detectionLabel->setStyleSheet("color: gray;");
-                }
+                detectionLabel->setText(found ? tr("OBS/XSplit detected!")
+                                              : tr("No streaming software detected"));
+                detectionLabel->setStyleSheet(found ? "color: green;" : "color: gray;");
                 process->deleteLater();
             });
-    process->start("ps", QStringList{"-axco", "comm"});
-#endif
+    process->start(args.takeFirst(), args);
 }
 
 } // namespace UI

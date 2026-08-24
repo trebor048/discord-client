@@ -104,7 +104,7 @@ void IngestThread::threadLoop()
                 streamActive = false;
             }
             memset(&stream, 0, sizeof(stream));
-            decompressedBuffer.clear();
+            pendingInput.clear();
             activeGeneration = dataGen;
         }
 
@@ -119,42 +119,59 @@ void IngestThread::threadLoop()
             streamActive = true;
         }
 
-        const auto len = data.size();
-        const bool hasSuffix = len >= 4 && data[len - 4] == '\x00' && data[len - 3] == '\x00' &&
-                               data[len - 2] == '\xFF' && data[len - 1] == '\xFF';
+        // Discord's zlib-stream: one continuous deflate stream whose payloads
+        // are delimited by the 4-byte marker 00 00 FF FF. The marker lives in
+        // the COMPRESSED stream — it is a sync-flush empty stored block that
+        // inflate() consumes without emitting output — so it never shows up in
+        // the decompressed bytes and must be detected on the compressed input.
+        // WebSocket frame boundaries do NOT align with payload boundaries: one
+        // frame can carry several payloads and one payload can span frames, so
+        // accumulate the compressed bytes here and split on the marker as soon
+        // as it becomes complete, then inflate each complete segment alone.
+        pendingInput.append(data);
 
-        stream.next_in = reinterpret_cast<Bytef *>(data.data());
-        stream.avail_in = data.size();
+        const QByteArray delimiter("\x00\x00\xff\xff", 4);
+        int delimIndex = pendingInput.indexOf(delimiter);
+        while (delimIndex != -1) {
+            // Everything up to and including the marker is exactly one payload.
+            QByteArray segment = pendingInput.left(delimIndex + delimiter.size());
+            pendingInput.remove(0, delimIndex + delimiter.size());
 
-        std::array<char, 32768> out;
-        QByteArray decompressed;
+            std::array<char, 32768> out;
+            QByteArray decompressed;
 
-        int ret;
-        do {
-            stream.avail_out = sizeof(out);
-            stream.next_out = reinterpret_cast<Bytef *>(out.data());
+            int ret = Z_OK;
+            do {
+                stream.next_in = reinterpret_cast<Bytef *>(segment.data());
+                stream.avail_in = static_cast<uInt>(segment.size());
+                stream.avail_out = sizeof(out);
+                stream.next_out = reinterpret_cast<Bytef *>(out.data());
 
-            ret = inflate(&stream, Z_SYNC_FLUSH);
-            if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR) {
-                qCWarning(LogNetwork) << "inflate failed:" << ret;
-                inflateEnd(&stream);
-                streamActive = false;
-                decompressedBuffer.clear();
-                emit decompressionError();
-                break;
-            }
+                ret = inflate(&stream, Z_SYNC_FLUSH);
+                segment.remove(0, segment.size() - stream.avail_in);
 
-            int have = sizeof(out) - stream.avail_out;
-            decompressed.append(out.data(), have);
-        } while (stream.avail_out == 0);
+                if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR) {
+                    qCWarning(LogNetwork) << "inflate failed:" << ret;
+                    inflateEnd(&stream);
+                    streamActive = false;
+                    pendingInput.clear();
+                    emit decompressionError();
+                    break;
+                }
 
-        if (!decompressed.isEmpty()) {
-            decompressedBuffer.append(decompressed);
+                int have = sizeof(out) - stream.avail_out;
+                decompressed.append(out.data(), have);
 
-            if (hasSuffix) {
+                if (ret == Z_BUF_ERROR)
+                    break; // no progress possible with the current input
+            } while (stream.avail_out == 0);
+
+            if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR)
+                break; // stream was reset; stop processing this batch
+
+            if (!decompressed.trimmed().isEmpty()) {
                 QJsonParseError error;
-                QJsonDocument doc = QJsonDocument::fromJson(decompressedBuffer, &error);
-                decompressedBuffer.clear();
+                QJsonDocument doc = QJsonDocument::fromJson(decompressed, &error);
                 if (error.error != QJsonParseError::NoError) {
                     qCWarning(LogNetwork) << "Failed to parse messages:" << error.errorString();
                 } else if (doc.isObject()) {
@@ -163,6 +180,18 @@ void IngestThread::threadLoop()
                     emit payloadReceived(doc.object());
                 }
             }
+
+            delimIndex = pendingInput.indexOf(delimiter);
+        }
+
+        // Guard against a runaway buffer if the marker never arrives (stream
+        // corrupted or connection died mid-payload).
+        if (pendingInput.size() > kMaxBufferedBytes) {
+            qCWarning(LogNetwork) << "Compressed buffer overflow — forcing reconnect";
+            inflateEnd(&stream);
+            streamActive = false;
+            pendingInput.clear();
+            emit decompressionError();
         }
     }
 }

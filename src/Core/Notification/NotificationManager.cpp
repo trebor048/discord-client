@@ -455,13 +455,8 @@ void NotificationManager::showNotification(const Notification::ToastNotification
             bool userSoundSelected = false;
             if (data.authorId.isValid()) {
                 auto userSound = getUserSound(data.authorId.toString());
-                if (userSound.enabled) {
-                    bool shouldUse = false;
-                    if (m_lastNotificationContext.has_value()) {
-                        const auto &ctx = m_lastNotificationContext.value();
-                        shouldUse = ctx.userOnNotifyList || ctx.isDM || ctx.channelOnNotifyList;
-                    }
-                    if (shouldUse && soundId == userSound.selectedSound) {
+                if (userSound.enabled && shouldUseUserSound(data)) {
+                    if (soundId == userSound.selectedSound) {
                         volume = (volume * userSound.volume) / 100;
                         customFileId = userSound.customFileId;
                         customUrl = userSound.customUrl;
@@ -706,15 +701,6 @@ void NotificationManager::onMessageCreated(const Discord::Message &message)
         return;
     }
 
-    // Store notification context for user-specific sounds
-    m_lastNotificationContext = NotificationContext{
-        .authorId = authorId.toString(),
-        .channelId = channelId.toString(),
-        .isDM = channel->type.get() == Discord::ChannelType::DM,
-        .userOnNotifyList = m_notifyForSet.contains(authorId.toString()),
-        .channelOnNotifyList = m_notifyForSet.contains(channelId.toString())
-    };
-
     // Create and show notification
     auto notification = createMessageNotification(message, *channel);
 
@@ -839,13 +825,6 @@ void NotificationManager::onVoiceStateUpdated(const Discord::VoiceState &state)
     if (!oldChannelId.has_value() && state.channelId.hasValue()) {
         if (shouldNotify(newChannel)) {
             auto notification = createVoiceNotification(*user, *newChannel, "joined");
-            m_lastNotificationContext = NotificationContext{
-                .authorId = userId.toString(),
-                .channelId = state.channelId.get().toString(),
-                .isDM = false,
-                .userOnNotifyList = isWatched,
-                .channelOnNotifyList = m_notifyForSet.contains(newChannel->id.get().toString())
-            };
             showNotification(notification);
         }
     }
@@ -853,13 +832,6 @@ void NotificationManager::onVoiceStateUpdated(const Discord::VoiceState &state)
     else if (oldChannelId.has_value() && !state.channelId.hasValue()) {
         if (shouldNotify(oldChannel)) {
             auto notification = createVoiceNotification(*user, *oldChannel, "left");
-            m_lastNotificationContext = NotificationContext{
-                .authorId = userId.toString(),
-                .channelId = oldChannelId.value().toString(),
-                .isDM = false,
-                .userOnNotifyList = isWatched,
-                .channelOnNotifyList = m_notifyForSet.contains(oldChannel->id.get().toString())
-            };
             showNotification(notification);
         }
     }
@@ -868,25 +840,11 @@ void NotificationManager::onVoiceStateUpdated(const Discord::VoiceState &state)
         // Left old channel
         if (shouldNotify(oldChannel)) {
             auto notification = createVoiceNotification(*user, *oldChannel, "left");
-            m_lastNotificationContext = NotificationContext{
-                .authorId = userId.toString(),
-                .channelId = oldChannelId.value().toString(),
-                .isDM = false,
-                .userOnNotifyList = isWatched,
-                .channelOnNotifyList = m_notifyForSet.contains(oldChannel->id.get().toString())
-            };
             showNotification(notification);
         }
         // Joined new channel
         if (shouldNotify(newChannel)) {
             auto notification = createVoiceNotification(*user, *newChannel, "joined");
-            m_lastNotificationContext = NotificationContext{
-                .authorId = userId.toString(),
-                .channelId = state.channelId.get().toString(),
-                .isDM = false,
-                .userOnNotifyList = isWatched,
-                .channelOnNotifyList = m_notifyForSet.contains(newChannel->id.get().toString())
-            };
             showNotification(notification);
         }
     }
@@ -935,7 +893,6 @@ void NotificationManager::onReady(const Discord::Ready &ready)
     m_lastVoiceNotification.clear();
     m_voiceTimestamps.clear();
     m_lastVoiceUpdate = 0;
-    m_lastNotificationContext.reset();
 
     // Load notify/ignore lists from ready data if needed
 }
@@ -1479,50 +1436,59 @@ bool NotificationManager::shouldPlaySoundForType(const Notification::ToastNotifi
     }
 }
 
+bool NotificationManager::shouldUseUserSound(const Notification::ToastNotificationData &data) const
+{
+    // Derive the "should this user's custom sound play" context directly from the
+    // notification data instead of a shared member (which could be overwritten
+    // by a later notification before an earlier one's sound was selected).
+    const QSet<QString> notifyFor = notifyForList();
+    const bool userOnNotifyList = notifyFor.contains(data.authorId.toString());
+    const bool channelOnNotifyList = notifyFor.contains(data.channelId);
+    const bool isDM = data.type == Notification::NotificationType::DirectMessage;
+    return userOnNotifyList || isDM || channelOnNotifyList;
+}
+
 QString NotificationManager::selectSoundForNotification(const Notification::ToastNotificationData &data)
 {
     // Check user-specific sound first
     if (data.authorId.isValid()) {
         auto userSound = getUserSound(data.authorId.toString());
-        if (userSound.enabled) {
-            bool shouldUse = false;
-            if (m_lastNotificationContext.has_value()) {
-                const auto &ctx = m_lastNotificationContext.value();
-                shouldUse = ctx.userOnNotifyList || ctx.isDM || ctx.channelOnNotifyList;
-            }
-            if (shouldUse) {
-                return userSound.selectedSound;
-            }
+        if (userSound.enabled && shouldUseUserSound(data)) {
+            return userSound.selectedSound;
         }
     }
 
-    // Check channel-specific override
-    if (!data.channelId.isEmpty()) {
-        auto override = getSoundOverride(data.channelId);
-        if (override.enabled) {
-            return override.selectedSound;
-        }
-    }
-
-    // Default based on notification type
+    // Determine the default sound for this notification type, then apply any
+    // per-sound-type override. The "Sound Overrides" settings are keyed by sound
+    // type (e.g. "mention1"), not by channel — the previous channel-keyed lookup
+    // could never match and was dead code.
+    QString soundId;
     switch (data.type) {
     case Notification::NotificationType::Mention:
-        return SoundManager::Mention1;
+        soundId = SoundManager::Mention1;
+        break;
     case Notification::NotificationType::DirectMessage:
-        return SoundManager::Message3;
     case Notification::NotificationType::GroupMessage:
-        return SoundManager::Message3;
+        soundId = SoundManager::Message3;
+        break;
     case Notification::NotificationType::FriendRequest:
     case Notification::NotificationType::FriendAccepted:
-        return SoundManager::DefaultNotification;
     case Notification::NotificationType::VoiceJoin:
     case Notification::NotificationType::VoiceLeave:
     case Notification::NotificationType::VoiceMove:
-        return SoundManager::DefaultNotification;
+        soundId = SoundManager::DefaultNotification;
+        break;
     case Notification::NotificationType::Message:
     default:
-        return SoundManager::Message1;
+        soundId = SoundManager::Message1;
+        break;
     }
+
+    auto override = getSoundOverride(soundId);
+    if (override.enabled)
+        return override.selectedSound;
+
+    return soundId;
 }
 
 QSet<QString> NotificationManager::notifyForList() const

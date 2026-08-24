@@ -920,12 +920,16 @@ void ChannelSelectionController::openThreadBrowser()
     m_window->threadBrowser->raise();
 }
 
-void ChannelSelectionController::openPinnedMessages()
+void ChannelSelectionController::openPinnedMessages(Snowflake channelId)
 {
     if (!m_window->currentInstance)
         return;
 
-    Snowflake channelId = m_window->chatModel->getActiveChannelId();
+    // Fall back to the active channel when no specific channel is requested
+    // (e.g. the toolbar button). Right-click "View Pins" passes the target
+    // channel explicitly, which may differ from the active one.
+    if (!channelId.isValid())
+        channelId = m_window->chatModel->getActiveChannelId();
     if (!channelId.isValid())
         return;
 
