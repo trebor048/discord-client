@@ -300,6 +300,7 @@ set(PROJECT_SOURCES
     src/UI/MemberList/MemberListModel.cpp
     src/UI/MemberList/MemberListDelegate.cpp
     src/UI/MemberList/MemberListView.cpp
+    src/UI/MemberList/MemberListOverlay.cpp
     src/UI/Input/MessageInput.cpp
     src/UI/Input/AttachmentPreviewPanel.cpp
     src/Storage/DatabaseManager.cpp

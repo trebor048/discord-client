@@ -26,7 +26,7 @@ MemberListView::MemberListView(QWidget *parent)
 void MemberListView::showEvent(QShowEvent *event)
 {
     QListView::showEvent(event);
-    if (!hasBeenShown) {
+    if (!overlayMode_ && !hasBeenShown) {
         hasBeenShown = true;
         Core::AnimationUtils::fadeIn(this, 250);
     }

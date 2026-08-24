@@ -12,6 +12,8 @@ class MemberListView : public QListView
 public:
     explicit MemberListView(QWidget *parent = nullptr);
 
+    void setOverlayMode(bool overlayMode) { overlayMode_ = overlayMode; }
+
 signals:
     void visibleRangeChanged(int firstVisible, int lastVisible);
 
@@ -27,6 +29,7 @@ private:
     int lastFirstVisible = -1;
     int lastLastVisible = -1;
     bool hasBeenShown = false;
+    bool overlayMode_ = false;
 };
 
 } // namespace UI
