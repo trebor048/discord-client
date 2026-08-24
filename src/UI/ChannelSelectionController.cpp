@@ -355,7 +355,7 @@ void ChannelSelectionController::setMemberListVisible(bool visible)
 
 void ChannelSelectionController::updateMemberListVisibility()
 {
-    m_window->memberListView->setVisible(memberListWanted && viewMode == ViewMode::TextChannel);
+    m_window->setMemberListPaneVisible(memberListWanted && viewMode == ViewMode::TextChannel);
 }
 
 TabEntry ChannelSelectionController::makeTabEntry(ChannelNode *node, ChannelNode *accountNode)

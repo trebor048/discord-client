@@ -456,6 +456,49 @@ void MainWindow::setMemberListVisible(bool visible)
     channelController->setMemberListVisible(visible);
 }
 
+void MainWindow::switchMemberListMode(Core::Appearance::MemberListMode mode)
+{
+    if (mode == Core::Appearance::MemberListMode::SlideOut && !memberListOverlay) {
+        savedSplitterSizes = mainSplitter->sizes();
+
+        auto *placeholder = new QWidget(mainSplitter);
+        placeholder->setMinimumWidth(0);
+        mainSplitter->replaceWidget(2, placeholder);
+
+        memberListView->setMinimumWidth(0);
+        memberListView->setMaximumWidth(QWIDGETSIZE_MAX);
+        const bool wasVisible = memberListView->isVisible();
+
+        memberListOverlay = new MemberListOverlay(memberListView, centralWidget());
+        memberListOverlay->setVisible(wasVisible);
+        memberListView->setVisible(true);
+    } else if (mode == Core::Appearance::MemberListMode::ResizeHandle && memberListOverlay) {
+        const bool wasVisible = memberListOverlay->isVisible();
+
+        delete memberListOverlay;
+        memberListOverlay = nullptr;
+
+        QWidget *placeholder = mainSplitter->widget(2);
+        mainSplitter->replaceWidget(2, memberListView);
+        delete placeholder;
+
+        memberListView->setMinimumWidth(140);
+        memberListView->setMaximumWidth(400);
+        memberListView->setVisible(wasVisible);
+        mainSplitter->setCollapsible(2, false);
+        mainSplitter->setStretchFactor(2, 0);
+        if (savedSplitterSizes.size() == mainSplitter->count())
+            mainSplitter->setSizes(savedSplitterSizes);
+    }
+}
+
+void MainWindow::setMemberListPaneVisible(bool visible)
+{
+    if (memberListOverlay)
+        memberListOverlay->setVisible(visible);
+    memberListView->setVisible(visible);
+}
+
 void MainWindow::updateMemberListVisibility()
 {
     channelController->updateMemberListVisibility();
@@ -1110,6 +1153,26 @@ void MainWindow::setupUi()
     memberListView->setMaximumWidth(400);
 
     memberListView->hide();
+
+    connect(&Core::Appearance::AppearanceConfig::instance(),
+            &Core::Appearance::AppearanceConfig::memberListModeChanged, this,
+            &MainWindow::switchMemberListMode);
+
+    connect(&Core::Appearance::AppearanceConfig::instance(),
+            &Core::Appearance::AppearanceConfig::configChanged, this, [this]() {
+                memberListView->doItemsLayout();
+                memberListView->viewport()->update();
+                if (serverRail) {
+                    serverRail->doItemsLayout();
+                    serverRail->viewport()->update();
+                    serverRail->setFixedWidth(ServerRailDelegate::railWidth());
+                }
+                channelTree->doItemsLayout();
+                channelTree->viewport()->update();
+                const int icon = Core::Appearance::AppearanceConfig::scaledInt(
+                        24, Core::Appearance::AppearanceConfig::instance().channelScale());
+                channelTree->setIconSize(QSize(icon, icon));
+            });
 
     channelTree->setModel(channelFilterProxy);
     channelTree->setHeaderHidden(true);

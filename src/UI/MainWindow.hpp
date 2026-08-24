@@ -23,6 +23,8 @@
 #include "MemberList/MemberListView.hpp"
 #include "MemberList/MemberListModel.hpp"
 #include "MemberList/MemberListDelegate.hpp"
+#include "MemberList/MemberListOverlay.hpp"
+#include "Core/Appearance/AppearanceConfig.hpp"
 #include "TabBar/TabBar.hpp"
 #include "Discord/Entities.hpp"
 
@@ -165,6 +167,8 @@ private:
 
     void setViewMode(ChannelSelectionController::ViewMode mode);
     void setMemberListVisible(bool visible);
+    void switchMemberListMode(Core::Appearance::MemberListMode mode);
+    void setMemberListPaneVisible(bool visible);
     void updateMemberListVisibility();
     void openForumChannel(Core::ClientInstance *instance, Core::Snowflake forumId, Core::Snowflake guildId);
     void applyChannelChrome(Core::ClientInstance *instance, Core::Snowflake channelId, const QString &name, bool isDm, Core::Snowflake guildId);
@@ -221,6 +225,8 @@ private:
     SlowModeIndicator *slowModeIndicator;
     ConnectionBanner *connectionBanner;
     MemberListView *memberListView;
+    MemberListOverlay *memberListOverlay = nullptr;
+    QList<int> savedSplitterSizes;
     MemberListModel *memberListModel;
     Core::TypingTracker *typingTracker;
     MePanel *mePanel = nullptr;
