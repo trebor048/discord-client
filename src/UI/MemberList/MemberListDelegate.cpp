@@ -4,18 +4,31 @@
 #include <QPainterPath>
 
 #include "MemberListModel.hpp"
+#include "Core/Appearance/AppearanceConfig.hpp"
 #include "Core/MemberListManager.hpp"
 #include "Core/Theme/Icons.hpp"
 
-constexpr static int GroupHeight = 22;
-constexpr static int MemberHeight = 28;
-constexpr static int AvatarSize = 20;
-constexpr static int AvatarRadius = 4;
-constexpr static int HorizontalPadding = 8;
-constexpr static int AvatarTextSpacing = 8;
+constexpr static int kGroupHeight = 22;
+constexpr static int kMemberHeight = 28;
+constexpr static int kAvatarSize = 20;
+constexpr static int kAvatarRadius = 4;
+constexpr static int kHorizontalPadding = 8;
+constexpr static int kAvatarTextSpacing = 8;
+
+constexpr static int kPresenceIconSize = 11;
+constexpr static int kRoleIconSize = 14;
+constexpr static int kIconSpacing = 5;
+constexpr static int kRoleBadgeSize = 8;
+constexpr static int kGroupFontPx = 10;
+constexpr static int kMemberFontPx = 12;
 
 namespace Acheron {
 namespace UI {
+
+float memberScale()
+{
+    return Core::Appearance::AppearanceConfig::instance().memberCardScale();
+}
 
 MemberListDelegate::MemberListDelegate(QObject *parent)
     : QStyledItemDelegate(parent)
@@ -46,39 +59,45 @@ QSize MemberListDelegate::sizeHint(const QStyleOptionViewItem &option,
     int itemType = index.data(MemberListModel::ItemTypeRole).toInt();
 
     if (itemType == static_cast<int>(Core::MemberListItem::Type::Group))
-        return QSize(option.rect.width(), GroupHeight);
+        return QSize(option.rect.width(), Core::Appearance::AppearanceConfig::scaledInt(kGroupHeight, memberScale()));
 
-    return QSize(option.rect.width(), MemberHeight);
+    return QSize(option.rect.width(),
+                 Core::Appearance::AppearanceConfig::scaledInt(kMemberHeight, memberScale()));
 }
 
 void MemberListDelegate::paintGroup(QPainter *painter, const QStyleOptionViewItem &option,
                                     const QModelIndex &index) const
 {
-    QString groupName = index.data(MemberListModel::GroupNameRole).toString();
-    int groupCount = index.data(MemberListModel::GroupCountRole).toInt();
+    const QString groupName = index.data(MemberListModel::GroupNameRole).toString();
+    const int groupCount = index.data(MemberListModel::GroupCountRole).toInt();
+    const float scale = memberScale();
 
-    // separator except for the first
+    // separator except for the first (drawn in both modes)
     if (index.row() > 0) {
         QColor sepColor = option.palette.mid().color();
         sepColor.setAlpha(60);
         painter->setPen(QPen(sepColor, 1));
-        painter->drawLine(option.rect.left() + HorizontalPadding,
+        painter->drawLine(option.rect.left() + Core::Appearance::AppearanceConfig::scaledInt(kHorizontalPadding, scale),
                           option.rect.top(),
-                          option.rect.right() - HorizontalPadding,
+                          option.rect.right() - Core::Appearance::AppearanceConfig::scaledInt(kHorizontalPadding, scale),
                           option.rect.top());
     }
+
+    if (iconsOnly_)
+        return;
 
     QString text = groupName.toUpper() + QString::fromUtf8(" \u2014 ") + QString::number(groupCount);
 
     QFont font = option.font;
-    font.setPixelSize(10);
+    font.setPixelSize(Core::Appearance::AppearanceConfig::scaledInt(kGroupFontPx, scale));
     font.setWeight(QFont::DemiBold);
     font.setLetterSpacing(QFont::AbsoluteSpacing, 0.3);
     painter->setFont(font);
 
     painter->setPen(option.palette.color(QPalette::Disabled, QPalette::Text));
 
-    QRect textRect = option.rect.adjusted(HorizontalPadding, 0, -HorizontalPadding, 0);
+    QRect textRect = option.rect.adjusted(Core::Appearance::AppearanceConfig::scaledInt(kHorizontalPadding, scale), 0,
+                                          -Core::Appearance::AppearanceConfig::scaledInt(kHorizontalPadding, scale), 0);
     textRect.setTop(textRect.top() + 6);
     painter->drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, text);
 }
@@ -86,30 +105,60 @@ void MemberListDelegate::paintGroup(QPainter *painter, const QStyleOptionViewIte
 void MemberListDelegate::paintMember(QPainter *painter, const QStyleOptionViewItem &option,
                                      const QModelIndex &index) const
 {
+    const float scale = memberScale();
+    const int avatarSize = Core::Appearance::AppearanceConfig::scaledInt(kAvatarSize, scale);
+    const int avatarRadius = Core::Appearance::AppearanceConfig::scaledInt(kAvatarRadius, scale);
+    const int horizontalPadding = Core::Appearance::AppearanceConfig::scaledInt(kHorizontalPadding, scale);
+    const int avatarTextSpacing = Core::Appearance::AppearanceConfig::scaledInt(kAvatarTextSpacing, scale);
+
+    if (iconsOnly_) {
+        const int stripAvatar = qMax(avatarSize, option.rect.height() - 8);
+        const int x = option.rect.left() + (option.rect.width() - stripAvatar) / 2;
+        const int centerY = option.rect.top() + (option.rect.height() - stripAvatar) / 2;
+        QRect avatarRect(x, centerY, stripAvatar, stripAvatar);
+
+        QPixmap avatar = index.data(MemberListModel::AvatarRole).value<QPixmap>();
+        if (!avatar.isNull()) {
+            QPainterPath clipPath;
+            clipPath.addRoundedRect(avatarRect, avatarRadius, avatarRadius);
+            painter->save();
+            painter->setClipPath(clipPath);
+            avatar = avatar.scaled(stripAvatar, stripAvatar,
+                                   Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+            painter->drawPixmap(avatarRect, avatar);
+            painter->restore();
+        } else {
+            QColor defaultBg = option.palette.mid().color();
+            defaultBg.setAlpha(100);
+            painter->setBrush(defaultBg);
+            painter->setPen(Qt::NoPen);
+            painter->drawRoundedRect(avatarRect, avatarRadius, avatarRadius);
+        }
+        return;
+    }
+
     if (option.state & QStyle::State_MouseOver) {
         QColor hoverColor = option.palette.highlight().color();
         hoverColor.setAlpha(30);
-        painter->fillRect(option.rect.adjusted(HorizontalPadding / 2, 1,
-                                               -HorizontalPadding / 2, -1),
+        painter->fillRect(option.rect.adjusted(horizontalPadding / 2, 1,
+                                               -horizontalPadding / 2, -1),
                           hoverColor);
     }
 
-    int x = option.rect.left() + HorizontalPadding;
-    int centerY = option.rect.top() + (option.rect.height() - AvatarSize) / 2;
+    int x = option.rect.left() + horizontalPadding;
+    int centerY = option.rect.top() + (option.rect.height() - avatarSize) / 2;
 
     QPixmap avatar = index.data(MemberListModel::AvatarRole).value<QPixmap>();
-    QRect avatarRect(x, centerY, AvatarSize, AvatarSize);
+    QRect avatarRect(x, centerY, avatarSize, avatarSize);
 
     if (!avatar.isNull()) {
         QPainterPath clipPath;
-        clipPath.addRoundedRect(avatarRect, AvatarRadius, AvatarRadius);
+        clipPath.addRoundedRect(avatarRect, avatarRadius, avatarRadius);
         painter->save();
         painter->setClipPath(clipPath);
-        // Only scale if the avatar isn't already the target size
-        if (avatar.width() != AvatarSize || avatar.height() != AvatarSize)
-            avatar = avatar.scaled(AvatarSize, AvatarSize,
-                                   Qt::KeepAspectRatioByExpanding,
-                                   Qt::SmoothTransformation);
+        if (avatar.width() != avatarSize || avatar.height() != avatarSize)
+            avatar = avatar.scaled(avatarSize, avatarSize,
+                                   Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
         painter->drawPixmap(avatarRect, avatar);
         painter->restore();
     } else {
@@ -117,27 +166,27 @@ void MemberListDelegate::paintMember(QPainter *painter, const QStyleOptionViewIt
         defaultBg.setAlpha(100);
         painter->setBrush(defaultBg);
         painter->setPen(Qt::NoPen);
-        painter->drawRoundedRect(avatarRect, AvatarRadius, AvatarRadius);
+        painter->drawRoundedRect(avatarRect, avatarRadius, avatarRadius);
     }
 
-    x += AvatarSize + AvatarTextSpacing;
+    x += avatarSize + avatarTextSpacing;
 
-    // Presence icon (device glyph colored by status) + role icon (if the top
-    // role has one) are drawn right-aligned.
-    const int PresenceIconSize = 11;
-    const int RoleIconSize = 14;
-    const int IconSpacing = 5;
+    // Presence icon (device glyph colored by status) + role icon are drawn
+    // right-aligned. Sizes scale with the member scale.
+    const int presenceIconSize = Core::Appearance::AppearanceConfig::scaledInt(kPresenceIconSize, scale);
+    const int roleIconSize = Core::Appearance::AppearanceConfig::scaledInt(kRoleIconSize, scale);
+    const int iconSpacing = Core::Appearance::AppearanceConfig::scaledInt(kIconSpacing, scale);
     const QVariantMap presenceMap = index.data(MemberListModel::PresenceRole).toMap();
     const bool hasPresence = presenceMap.contains("status");
     const QPixmap roleIconPm = index.data(MemberListModel::RoleIconRole).value<QPixmap>();
     const bool hasRoleIcon = !roleIconPm.isNull();
     int rightIconsWidth = 0;
     if (hasPresence)
-        rightIconsWidth += PresenceIconSize + IconSpacing;
+        rightIconsWidth += presenceIconSize + iconSpacing;
     if (hasRoleIcon)
-        rightIconsWidth += RoleIconSize + IconSpacing;
+        rightIconsWidth += roleIconSize + iconSpacing;
 
-    int textWidth = option.rect.right() - x - HorizontalPadding - rightIconsWidth;
+    int textWidth = option.rect.right() - x - horizontalPadding - rightIconsWidth;
     const int nameWidth = qMax(0, textWidth);
     QRect nameRect(x, option.rect.top(), nameWidth, option.rect.height());
 
@@ -145,7 +194,7 @@ void MemberListDelegate::paintMember(QPainter *painter, const QStyleOptionViewIt
     QColor roleColor = index.data(MemberListModel::RoleColorRole).value<QColor>();
 
     QFont font = option.font;
-    font.setPixelSize(12);
+    font.setPixelSize(Core::Appearance::AppearanceConfig::scaledInt(kMemberFontPx, scale));
     font.setWeight(QFont::Medium);
     painter->setFont(font);
 
@@ -162,30 +211,30 @@ void MemberListDelegate::paintMember(QPainter *painter, const QStyleOptionViewIt
     painter->drawText(nameRect, Qt::AlignLeft | Qt::AlignVCenter, elidedName);
 
     const int iconCenterY = option.rect.top() + option.rect.height() / 2;
-    int iconX = option.rect.right() - HorizontalPadding;
+    int iconX = option.rect.right() - horizontalPadding;
 
     if (hasRoleIcon) {
-        iconX -= RoleIconSize;
-        painter->drawPixmap(QRect(iconX, iconCenterY - RoleIconSize / 2, RoleIconSize, RoleIconSize),
+        iconX -= roleIconSize;
+        painter->drawPixmap(QRect(iconX, iconCenterY - roleIconSize / 2, roleIconSize, roleIconSize),
                             roleIconPm);
-        iconX -= IconSpacing;
+        iconX -= iconSpacing;
     }
 
     if (hasPresence) {
-        iconX -= PresenceIconSize;
+        iconX -= presenceIconSize;
         drawPresenceIcon(painter, presenceMap,
-                         QRect(iconX, iconCenterY - PresenceIconSize / 2, PresenceIconSize, PresenceIconSize));
+                         QRect(iconX, iconCenterY - presenceIconSize / 2,
+                               presenceIconSize, presenceIconSize));
     }
 
     // Role badge: small filled dot with the member's highest role color,
-    // overlapping the avatar's bottom-right corner. Skipped when no provider
-    // is set or the color is invalid.
+    // overlapping the avatar's bottom-right corner.
     const QColor roleBadgeColor = index.data(MemberListModel::RoleBadgeColorRole).value<QColor>();
     if (roleBadgeColor.isValid()) {
-        constexpr int RoleBadgeSize = 8;
-        const QRect badgeRect(avatarRect.right() - RoleBadgeSize / 2,
-                              avatarRect.bottom() - RoleBadgeSize / 2,
-                              RoleBadgeSize, RoleBadgeSize);
+        const int roleBadgeSize = Core::Appearance::AppearanceConfig::scaledInt(kRoleBadgeSize, scale);
+        const QRect badgeRect(avatarRect.right() - roleBadgeSize / 2,
+                              avatarRect.bottom() - roleBadgeSize / 2,
+                              roleBadgeSize, roleBadgeSize);
         painter->setPen(Qt::NoPen);
         painter->setBrush(roleBadgeColor);
         painter->drawEllipse(badgeRect);
@@ -227,19 +276,28 @@ void MemberListDelegate::drawPresenceIcon(QPainter *painter, const QVariantMap &
 void MemberListDelegate::paintPlaceholder(QPainter *painter,
                                           const QStyleOptionViewItem &option) const
 {
+    const float scale = memberScale();
+    const int avatarSize = Core::Appearance::AppearanceConfig::scaledInt(kAvatarSize, scale);
+    const int avatarRadius = Core::Appearance::AppearanceConfig::scaledInt(kAvatarRadius, scale);
+    const int horizontalPadding = Core::Appearance::AppearanceConfig::scaledInt(kHorizontalPadding, scale);
+    const int avatarTextSpacing = Core::Appearance::AppearanceConfig::scaledInt(kAvatarTextSpacing, scale);
+
     QColor placeholderColor = option.palette.mid().color();
     placeholderColor.setAlpha(40);
     painter->setPen(Qt::NoPen);
     painter->setBrush(placeholderColor);
 
-    int x = option.rect.left() + HorizontalPadding;
-    int centerY = option.rect.top() + (option.rect.height() - AvatarSize) / 2;
+    int x = option.rect.left() + horizontalPadding;
+    int centerY = option.rect.top() + (option.rect.height() - avatarSize) / 2;
 
-    painter->drawRoundedRect(QRect(x, centerY, AvatarSize, AvatarSize),
-                             AvatarRadius, AvatarRadius);
+    painter->drawRoundedRect(QRect(x, centerY, avatarSize, avatarSize),
+                             avatarRadius, avatarRadius);
 
-    x += AvatarSize + AvatarTextSpacing;
-    int nameWidth = qMin(80, option.rect.right() - x - HorizontalPadding);
+    if (iconsOnly_)
+        return;
+
+    x += avatarSize + avatarTextSpacing;
+    int nameWidth = qMin(80, option.rect.right() - x - horizontalPadding);
     int nameHeight = 10;
     int nameY = option.rect.top() + (option.rect.height() - nameHeight) / 2;
     painter->drawRoundedRect(QRect(x, nameY, nameWidth, nameHeight), 3, 3);

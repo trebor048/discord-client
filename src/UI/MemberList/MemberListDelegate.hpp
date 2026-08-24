@@ -17,6 +17,9 @@ public:
     QSize sizeHint(const QStyleOptionViewItem &option,
                    const QModelIndex &index) const override;
 
+    void setIconsOnly(bool iconsOnly) { iconsOnly_ = iconsOnly; }
+    bool iconsOnly() const { return iconsOnly_; }
+
 private:
     void paintGroup(QPainter *painter, const QStyleOptionViewItem &option,
                     const QModelIndex &index) const;
@@ -25,6 +28,8 @@ private:
     void drawPresenceIcon(QPainter *painter, const QVariantMap &presence,
                           const QRect &rect) const;
     void paintPlaceholder(QPainter *painter, const QStyleOptionViewItem &option) const;
+
+    bool iconsOnly_ = false;
 };
 
 } // namespace UI
