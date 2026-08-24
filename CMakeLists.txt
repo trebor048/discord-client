@@ -204,6 +204,7 @@ set(PROJECT_SOURCES
     src/Core/Logging.cpp
     src/Core/Animation/AnimationConfig.cpp
     src/Core/Animation/HoverAnimator.cpp
+    src/Core/Appearance/AppearanceConfig.cpp
     src/Core/MessageManager.cpp
     src/Core/ForumManager.cpp
     src/Core/ImageManager.cpp
@@ -435,6 +436,15 @@ if(BUILD_TESTS)
     target_include_directories(TestMemberList PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME MemberListTests COMMAND TestMemberList)
 
+    qt_add_executable(TestAppearanceConfig
+        tests/tst_AppearanceConfig.cpp
+        src/Core/Appearance/AppearanceConfig.cpp
+        src/Core/Appearance/AppearanceConfig.hpp
+    )
+    target_link_libraries(TestAppearanceConfig PRIVATE Qt::Core Qt::Test)
+    target_include_directories(TestAppearanceConfig PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME AppearanceConfigTests COMMAND TestAppearanceConfig)
+
     # The CTest smoke test runs the build-tree executable, which on Windows
     # depends on runtime DLLs (Qt, opus, curl-impersonate) that are only
     # assembled beside it by the deploy step; running it here would hang on a
@@ -462,6 +472,7 @@ if(BUILD_TESTS)
             EmojiSegmenterTests
             MemberListTests
             NotificationDeciderTests
+            AppearanceConfigTests
             PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORM_PLUGIN_PATH=${QT_INSTALL_PREFIX}/plugins/platforms"
         )
         if(NOT WIN32)
