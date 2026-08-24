@@ -5,6 +5,8 @@
 #include "Core/Theme/Manager.hpp"
 #include "Core/Theme/Tokens.hpp"
 #include "Core/Animation/AnimationConfig.hpp"
+#include "Core/Appearance/AppearanceConfig.hpp"
+#include "ScaleStepper.hpp"
 
 #include <QColorDialog>
 #include <QCheckBox>
@@ -26,6 +28,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <functional>
 
 namespace Acheron {
 namespace UI {
@@ -169,6 +172,48 @@ AppearancePage::AppearancePage(QWidget *parent)
     motionLayout->addRow(reduceMotionCheck);
 
     outer->addWidget(motionGroup);
+
+    auto *memberListGroup = new QGroupBox(tr("Member list"), this);
+    auto *memberListLayout = new QHBoxLayout(memberListGroup);
+    auto *slideOutToggle = new QCheckBox(tr("Slide-out member list (overlay)"), memberListGroup);
+    slideOutToggle->setChecked(Core::Appearance::AppearanceConfig::instance().memberListMode()
+                               == Core::Appearance::MemberListMode::SlideOut);
+    memberListLayout->addWidget(slideOutToggle);
+    memberListLayout->addStretch(1);
+    outer->addWidget(memberListGroup);
+
+    connect(slideOutToggle, &QCheckBox::toggled, this, [](bool on) {
+        Core::Appearance::AppearanceConfig::instance().setMemberListMode(
+                on ? Core::Appearance::MemberListMode::SlideOut
+                   : Core::Appearance::MemberListMode::ResizeHandle);
+    });
+
+    auto *scalingGroup = new QGroupBox(tr("Scaling"), this);
+    auto *scalingLayout = new QFormLayout(scalingGroup);
+    scalingLayout->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    scalingLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    scalingLayout->setVerticalSpacing(10);
+
+    auto addScaleRow = [this, scalingGroup, scalingLayout](const QString &label, float initial,
+                                                           std::function<void(float)> setter) {
+        auto *stepper = new ScaleStepper(scalingGroup);
+        stepper->setValue(initial);
+        scalingLayout->addRow(label, stepper);
+        connect(stepper, &ScaleStepper::valueChanged, this, [setter](float v) { setter(v); });
+        return stepper;
+    };
+
+    addScaleRow(tr("Member cards:"),
+                Core::Appearance::AppearanceConfig::instance().memberCardScale(),
+                [](float v) { Core::Appearance::AppearanceConfig::instance().setMemberCardScale(v); });
+    addScaleRow(tr("Guild icons:"),
+                Core::Appearance::AppearanceConfig::instance().guildIconScale(),
+                [](float v) { Core::Appearance::AppearanceConfig::instance().setGuildIconScale(v); });
+    addScaleRow(tr("Channel list:"),
+                Core::Appearance::AppearanceConfig::instance().channelScale(),
+                [](float v) { Core::Appearance::AppearanceConfig::instance().setChannelScale(v); });
+
+    outer->addWidget(scalingGroup);
 
     connect(speedSlider, &QSlider::valueChanged, this, [](int index) {
         const float speed = index == 0 ? 0.5f : index == 1 ? 1.0f : index == 2 ? 1.75f : 2.5f;
