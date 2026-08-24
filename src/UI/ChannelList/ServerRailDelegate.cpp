@@ -2,6 +2,7 @@
 
 #include "ServerRailModel.hpp"
 #include "Core/AnimationUtils.hpp"
+#include "Core/Appearance/AppearanceConfig.hpp"
 
 #include <QPainter>
 #include <QPainterPath>
@@ -203,7 +204,8 @@ void ServerRailDelegate::paint(QPainter *painter, const QStyleOptionViewItem &op
                           option.rect.right() - 14, option.rect.top());
     }
 
-    const int iconSize = IconSize;
+    const int iconSize = Core::Appearance::AppearanceConfig::scaledInt(
+            IconSize, Core::Appearance::AppearanceConfig::instance().guildIconScale());
     const int x = option.rect.left() + (option.rect.width() - iconSize) / 2;
     const int y = option.rect.top() + (option.rect.height() - iconSize) / 2;
     const QRect iconRect(x, y, iconSize, iconSize);
@@ -281,9 +283,17 @@ void ServerRailDelegate::paint(QPainter *painter, const QStyleOptionViewItem &op
     painter->restore();
 }
 
+int ServerRailDelegate::railWidth()
+{
+    return Core::Appearance::AppearanceConfig::scaledInt(
+            RailWidth, Core::Appearance::AppearanceConfig::instance().guildIconScale());
+}
+
 QSize ServerRailDelegate::sizeHint(const QStyleOptionViewItem &, const QModelIndex &) const
 {
-    return QSize(RailWidth, ItemHeight);
+    const float s = Core::Appearance::AppearanceConfig::instance().guildIconScale();
+    return QSize(Core::Appearance::AppearanceConfig::scaledInt(RailWidth, s),
+                 Core::Appearance::AppearanceConfig::scaledInt(ItemHeight, s));
 }
 
 } // namespace UI

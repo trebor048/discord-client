@@ -12,6 +12,8 @@ public:
     static constexpr int RailWidth = 58;
     static constexpr int ItemHeight = 46;
 
+    static int railWidth();
+
     explicit ServerRailDelegate(QObject *parent = nullptr);
 
     void paint(QPainter *painter, const QStyleOptionViewItem &option, const QModelIndex &index) const override;

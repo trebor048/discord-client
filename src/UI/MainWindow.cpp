@@ -811,7 +811,7 @@ void MainWindow::setupUi()
     serverRail = new ServerRailView(this);
     serverRail->setModel(serverRailModel);
     serverRail->setItemDelegate(new ServerRailDelegate(serverRail));
-    serverRail->setFixedWidth(ServerRailDelegate::RailWidth);
+    serverRail->setFixedWidth(ServerRailDelegate::railWidth());
     serverRail->hide();
     connect(serverRail, &ServerRailView::accountHomeClicked, this, &MainWindow::onRailAccountHomeClicked);
     connect(serverRail, &ServerRailView::guildClicked, this, &MainWindow::onRailGuildClicked);
@@ -1672,7 +1672,8 @@ void MainWindow::setChannelListMode(ChannelListMode mode)
     mainSplitter->setCollapsible(0, false);
     mainSplitter->setStretchFactor(0, 0);
     if (splitterSizes.size() == mainSplitter->count()) {
-        const int delta = (mode == ChannelListMode::Classic) ? ServerRailDelegate::RailWidth : -ServerRailDelegate::RailWidth;
+        const int railW = ServerRailDelegate::railWidth();
+        const int delta = (mode == ChannelListMode::Classic) ? railW : -railW;
         splitterSizes[0] = qMax(0, splitterSizes[0] + delta);
         if (splitterSizes.size() > 1)
             splitterSizes[1] = qMax(0, splitterSizes[1] - delta);
