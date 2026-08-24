@@ -5,6 +5,7 @@
 #include "ChannelFilterProxyModel.hpp"
 
 #include "Core/AnimationUtils.hpp"
+#include "Core/Appearance/AppearanceConfig.hpp"
 
 namespace Acheron {
 namespace UI {
@@ -361,8 +362,11 @@ void ChannelDelegate::paint(QPainter *painter, const QStyleOptionViewItem &optio
         painter->fillRect(option.rect, hoverBg);
     }
 
-    constexpr int iconSize = 24;
-    constexpr int pillMargin = 6;
+    const float s = Core::Appearance::AppearanceConfig::instance().channelScale();
+    constexpr int iconSizeBase = 24;
+    constexpr int pillMarginBase = 6;
+    const int iconSize = Core::Appearance::AppearanceConfig::scaledInt(iconSizeBase, s);
+    const int pillMargin = Core::Appearance::AppearanceConfig::scaledInt(pillMarginBase, s);
 
     // content rect is shifted right to leave room for the unread pill
     QStyleOptionViewItem contentOpt = option;
@@ -378,8 +382,8 @@ void ChannelDelegate::paint(QPainter *painter, const QStyleOptionViewItem &optio
     }
 
     if (node->type == ChannelNode::Type::VoiceParticipant) {
-        constexpr int avatarSize = 16;
-        constexpr int participantIndent = 24;
+        const int avatarSize = Core::Appearance::AppearanceConfig::scaledInt(16, s);
+        const int participantIndent = Core::Appearance::AppearanceConfig::scaledInt(24, s);
         int avatarX = contentOpt.rect.left() + participantIndent;
         int avatarY = contentOpt.rect.top() + (contentOpt.rect.height() - avatarSize) / 2;
         QRect avatarRect(avatarX, avatarY, avatarSize, avatarSize);
@@ -405,7 +409,7 @@ void ChannelDelegate::paint(QPainter *painter, const QStyleOptionViewItem &optio
 
         bool muted = index.data(ChannelTreeModel::IsVoiceMutedRole).toBool();
         bool deafened = index.data(ChannelTreeModel::IsVoiceDeafenedRole).toBool();
-        constexpr int statusIconSize = 14;
+        const int statusIconSize = Core::Appearance::AppearanceConfig::scaledInt(14, s);
         int iconCount = (muted ? 1 : 0) + (deafened ? 1 : 0);
         int rightReserve = iconCount > 0 ? (iconCount * (statusIconSize + 4) + 4) : 4;
 
@@ -578,10 +582,12 @@ void ChannelDelegate::paint(QPainter *painter, const QStyleOptionViewItem &optio
 QSize ChannelDelegate::sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const
 {
     QSize sz = QStyledItemDelegate::sizeHint(option, index);
-    // Scale the row height with the font so channels stay readable and not
-    // vertically smushed at large UI font sizes, while keeping a minimum.
+    // Scale the row height with the font (as before) and with the user's
+    // channel-scale setting so rows stay readable and proportionally spaced.
     QFontMetrics fm(option.font);
-    int h = qMax(30, fm.height() + 12);
+    const float s = Core::Appearance::AppearanceConfig::instance().channelScale();
+    const int h = qMax(Core::Appearance::AppearanceConfig::scaledInt(30, s),
+                       Core::Appearance::AppearanceConfig::scaledInt(fm.height() + 12, s));
     return QSize(sz.width(), h);
 }
 } // namespace UI
