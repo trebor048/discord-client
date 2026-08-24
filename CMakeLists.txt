@@ -242,6 +242,7 @@ set(PROJECT_SOURCES
     src/UI/Settings/SettingsWindow.cpp
     src/UI/Settings/GeneralPage.cpp
     src/UI/Settings/AppearancePage.cpp
+    src/UI/Settings/ScaleStepper.cpp
     src/UI/Settings/VoicePage.cpp
     src/UI/Settings/NotificationsPage.cpp
     src/UI/Settings/SoundOverrideWidget.cpp
@@ -445,6 +446,15 @@ if(BUILD_TESTS)
     target_include_directories(TestAppearanceConfig PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME AppearanceConfigTests COMMAND TestAppearanceConfig)
 
+    qt_add_executable(TestScaleStepper
+        tests/tst_ScaleStepper.cpp
+        src/UI/Settings/ScaleStepper.cpp
+        src/UI/Settings/ScaleStepper.hpp
+    )
+    target_link_libraries(TestScaleStepper PRIVATE Qt::Core Qt::Widgets Qt::Test)
+    target_include_directories(TestScaleStepper PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME ScaleStepperTests COMMAND TestScaleStepper)
+
     # The CTest smoke test runs the build-tree executable, which on Windows
     # depends on runtime DLLs (Qt, opus, curl-impersonate) that are only
     # assembled beside it by the deploy step; running it here would hang on a
@@ -473,6 +483,7 @@ if(BUILD_TESTS)
             MemberListTests
             NotificationDeciderTests
             AppearanceConfigTests
+            ScaleStepperTests
             PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORM_PLUGIN_PATH=${QT_INSTALL_PREFIX}/plugins/platforms"
         )
         if(NOT WIN32)
