@@ -89,6 +89,7 @@ protected:
     void closeEvent(QCloseEvent *event) override;
     bool eventFilter(QObject *obj, QEvent *event) override;
     void changeEvent(QEvent *event) override;
+    void showEvent(QShowEvent *event) override;
 #if defined(Q_OS_WIN)
     bool nativeEvent(const QByteArray &eventType, void *message, qintptr *result) override;
 #endif
@@ -163,6 +164,12 @@ private:
     /// Applies or removes the frameless custom-chrome window treatment and
     /// syncs the titlebar visibility with the appearance setting.
     void applyCustomChrome();
+#if defined(Q_OS_WIN)
+    // Frameless windows drop WS_THICKFRAME, without which Windows refuses to
+    // run the native resize loop even when WM_NCHITTEST reports HT* codes.
+    // Re-adding the style restores edge resizing (and the DWM drop shadow).
+    void ensureNativeResizeBorder();
+#endif
 #if defined(Q_OS_WIN)
     /// Requests rounded window corners from DWM (Windows 11), square when
     /// maximized.

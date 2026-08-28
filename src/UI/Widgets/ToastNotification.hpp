@@ -155,6 +155,17 @@ private:
     QColor m_bodyColor;
     QColor m_mutedColor;
     QColor m_highlightColor;
+
+    // Close-button hover/pressed fills (theme-derived, with alpha).
+    QColor m_closeHoverBg;
+    QColor m_closePressedBg;
+
+    // DM styling: when the toast is a direct/group message and colored
+    // accents are enabled, the card is washed in the author color so DMs are
+    // unmistakably distinct from plain server notifications. Invalid when
+    // neutral styling applies.
+    QColor m_dmTint;
+    bool m_isDm = false;
 };
 
 } // namespace UI

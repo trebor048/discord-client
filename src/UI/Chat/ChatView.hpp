@@ -56,6 +56,11 @@ public:
     /// message; 1.0 for everything else. Consulted by ChatDelegate::paint.
     qreal rowAppearOpacity(int row) const;
 
+    /// Which quick-reaction button the cursor is over on the hovered row:
+    /// -1 = none, -2 = the "more" (+) button, >= 0 = emoji slot index.
+    /// Consulted by ChatDelegate to highlight the hovered button.
+    int hoveredQuickReaction() const { return m_hoveredQuickReaction; }
+
     static constexpr int InlineEditMinHeight = 60;
 
     bool hasTextSelection() const;
@@ -179,6 +184,7 @@ private:
 
     int hoveredRow;
     int hoveredChar;
+    int m_hoveredQuickReaction = -1;
 
     ChatCursor selectionAnchor;
     ChatCursor selectionHead;

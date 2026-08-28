@@ -79,8 +79,19 @@ static void drawUploadProgress(QPainter *painter, const QRect &barRect, qint64 s
     painter->restore();
 }
 
+static void drawReactionButtonHover(QPainter *painter, const QRect &rect, const QPalette &palette)
+{
+    QColor fill = palette.highlight().color();
+    fill.setAlpha(45);
+    painter->save();
+    painter->setPen(Qt::NoPen);
+    painter->setBrush(fill);
+    painter->drawRoundedRect(rect.adjusted(1, 1, -1, -1), 6, 6);
+    painter->restore();
+}
+
 static void drawQuickReactionBar(QPainter *painter, const QStyleOptionViewItem &option,
-                                 const ChatLayout::QuickReactionLayout &bar)
+                                 const ChatLayout::QuickReactionLayout &bar, int hoveredButton)
 {
     if (bar.barRect.isNull())
         return;
@@ -99,16 +110,22 @@ static void drawQuickReactionBar(QPainter *painter, const QStyleOptionViewItem &
     painter->setPen(option.palette.text().color());
 
     const QStringList &emojis = ChatLayout::quickReactionEmojis();
-    for (int i = 0; i < bar.buttonRects.size() && i < emojis.size(); ++i)
+    for (int i = 0; i < bar.buttonRects.size() && i < emojis.size(); ++i) {
+        if (i == hoveredButton)
+            drawReactionButtonHover(painter, bar.buttonRects[i], option.palette);
         painter->drawText(bar.buttonRects[i], Qt::AlignCenter, emojis[i]);
+    }
 
     // "More" button: a bold plus glyph inviting the full emoji picker.
     if (!bar.moreButtonRect.isNull()) {
+        if (hoveredButton == -2)
+            drawReactionButtonHover(painter, bar.moreButtonRect, option.palette);
         QFont moreFont = option.font;
         moreFont.setPixelSize(ChatLayout::quickReactionButtonSize() - 10);
         moreFont.setBold(true);
         painter->setFont(moreFont);
-        painter->setPen(option.palette.placeholderText().color());
+        painter->setPen(hoveredButton == -2 ? option.palette.highlight().color()
+                                            : option.palette.placeholderText().color());
         painter->drawText(bar.moreButtonRect, Qt::AlignCenter, QStringLiteral("+"));
     }
 
@@ -1302,8 +1319,12 @@ void ChatDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
         drawPollBlock(painter, option, index, layout, ctx, chatModel);
 
     // Quick-reaction hover bar — a floating overlay shown only on the hovered row.
-    if (isHoveredRow && !layout.hasSeparator && !ctx.isSystemMessage)
-        drawQuickReactionBar(painter, option, layout.quickReaction);
+    if (isHoveredRow && !layout.hasSeparator && !ctx.isSystemMessage) {
+        int hoveredButton = -1;
+        if (auto *chatView = qobject_cast<const ChatView *>(option.widget))
+            hoveredButton = chatView->hoveredQuickReaction();
+        drawQuickReactionBar(painter, option, layout.quickReaction, hoveredButton);
+    }
 
     painter->restore();
 }

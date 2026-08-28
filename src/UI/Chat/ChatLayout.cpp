@@ -12,6 +12,7 @@
 #include <QGraphicsBlurEffect>
 #include <QGraphicsScene>
 #include <QGraphicsPixmapItem>
+#include <QSettings>
 #include <QTextBlock>
 #include <QUrl>
 
@@ -1056,13 +1057,38 @@ QString formatFileSize(qint64 bytes)
     return QString::number(bytes) + " B";
 }
 
-const QStringList &quickReactionEmojis()
+const QStringList &defaultQuickReactionEmojis()
 {
     static const QStringList emojis = {
         QStringLiteral("👍"), QStringLiteral("👎"), QStringLiteral("😂"),
         QStringLiteral("❤️"), QStringLiteral("😮"), QStringLiteral("😢"),
     };
     return emojis;
+}
+
+const QStringList &quickReactionEmojis()
+{
+    // User-customizable via Settings > General > Quick reactions. Re-read
+    // QSettings on every call (cheap in-process cache lookup) so edits apply
+    // without a restart; the serialized comparison keeps the static cache in
+    // sync. Empty/invalid configs fall back to the defaults.
+    static const int MaxCustom = 10;
+    static QStringList cached;
+    static QString cachedSerialized;
+
+    const QString serialized =
+            QSettings().value(QStringLiteral("chat/quick_reactions")).toStringList().join(u'\n');
+    if (serialized != cachedSerialized) {
+        cachedSerialized = serialized;
+        if (serialized.isEmpty()) {
+            cached = defaultQuickReactionEmojis();
+        } else {
+            cached = serialized.split(u'\n', Qt::SkipEmptyParts);
+            if (cached.size() > MaxCustom)
+                cached = cached.mid(0, MaxCustom);
+        }
+    }
+    return cached;
 }
 
 void drawCroppedPixmap(QPainter *painter, const QRect &targetRect, const QPixmap &pixmap)

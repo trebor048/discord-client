@@ -400,8 +400,14 @@ QStringList extractUrls(const QString &text);
 
 QString formatFileSize(qint64 bytes);
 
-// Default quick-reaction emoji, shown on the hover bar. Hardcoded for now but
-// kept in one place so it can be made user-configurable later.
+// Built-in quick-reaction emoji used whenever the user hasn't customized the
+// list (Settings > General > Quick reactions). The active list (custom or
+// default) is returned by quickReactionEmojis().
+const QStringList &defaultQuickReactionEmojis();
+
+// The quick-reaction emoji shown on the message hover bar. Reads the
+// user-customizable "chat/quick_reactions" setting, falling back to the
+// defaults; changes apply without a restart.
 const QStringList &quickReactionEmojis();
 
 void drawCroppedPixmap(QPainter *painter, const QRect &targetRect, const QPixmap &pixmap);

@@ -9,6 +9,7 @@
 #include <QImage>
 #include <QBuffer>
 #include <QKeyEvent>
+#include <QAbstractTextDocumentLayout>
 
 #include <optional>
 
@@ -81,6 +82,19 @@ void ToastNotification::applyTheme()
     m_bodyColor = theme.color(Core::Theme::Token::WindowText);
     m_mutedColor = theme.color(Core::Theme::Token::PlaceholderText);
     m_highlightColor = theme.color(Core::Theme::Token::Highlight);
+
+    // Direct/group messages get a distinct colored treatment whenever colored
+    // accents are enabled; server notifications stay neutral.
+    m_isDm = m_data.type == Core::Notification::NotificationType::DirectMessage
+             || m_data.type == Core::Notification::NotificationType::GroupMessage;
+    m_dmTint = (m_isDm && m_data.coloredAccents && m_data.badgeColor.isValid())
+                       ? m_data.badgeColor
+                       : QColor();
+
+    m_closeHoverBg = m_highlightColor;
+    m_closeHoverBg.setAlpha(30);
+    m_closePressedBg = m_highlightColor;
+    m_closePressedBg.setAlpha(55);
 
     if (m_data.coloredAccents) {
         m_avatarColor = m_data.badgeColor.isValid() ? m_data.badgeColor : m_highlightColor;
@@ -169,6 +183,7 @@ void ToastNotification::setupUi()
         m_bodyLabel->setTextFormat(Qt::RichText);
         m_bodyLabel->setTextInteractionFlags(Qt::TextBrowserInteraction);
         m_bodyLabel->setOpenExternalLinks(true);
+        m_bodyLabel->setCursor(Qt::PointingHandCursor);
         m_contentLayout->addWidget(m_bodyLabel);
     }
 
@@ -222,24 +237,29 @@ void ToastNotification::setupUi()
 
     mainLayout->addLayout(m_contentLayout, 1);
 
-    // Dismiss button
+    // Dismiss button: a round, softly-filled × with a generous hit area.
     m_dismissButton = new QPushButton(QStringLiteral("×"), this);
-    m_dismissButton->setFixedSize(20, 20);
+    m_dismissButton->setFixedSize(22, 22);
     m_dismissButton->setCursor(Qt::PointingHandCursor);
     m_dismissButton->setStyleSheet(QStringLiteral(
             "QPushButton {"
             "   border: none;"
-            "   border-radius: 10px;"
+            "   border-radius: 11px;"
             "   background-color: transparent;"
             "   color: %1;"
-            "   font-size: 16px;"
-            "   font-weight: bold;"
+            "   font-size: 15px;"
+            "   font-weight: 600;"
+            "   padding: 0px;"
             "}"
             "QPushButton:hover {"
             "   background-color: %2;"
             "   color: %3;"
+            "}"
+            "QPushButton:pressed {"
+            "   background-color: %4;"
             "}")
-            .arg(m_mutedColor.name(), m_borderColor.name(), m_titleColor.name()));
+            .arg(m_mutedColor.name(), m_closeHoverBg.name(QColor::HexArgb),
+                 m_titleColor.name(), m_closePressedBg.name(QColor::HexArgb)));
     m_dismissButton->hide();
     connect(m_dismissButton, &QPushButton::clicked, this, &ToastNotification::dismiss);
 
@@ -257,6 +277,10 @@ void ToastNotification::setupUi()
         connect(m_bodyLabel, &QLabel::linkActivated, this, [this](const QString &) {
             emit clicked(m_data);
         });
+        // QLabel with TextBrowserInteraction swallows clicks on plain body
+        // text (it only activates on actual links), so route non-link clicks
+        // on the body through the same clicked path as the card background.
+        m_bodyLabel->installEventFilter(this);
     }
 
     // Seed the group history with the first message so an expanded group
@@ -780,22 +804,49 @@ void ToastNotification::paintEvent(QPaintEvent *event)
 
     QPainterPath background;
     background.addRoundedRect(card, r, r);
-    p.fillPath(background, bg);
+
+    // Subtle vertical gradient instead of a flat fill: a touch lighter at the
+    // top, slightly deeper at the bottom.
+    QLinearGradient gradient(card.topLeft(), card.bottomLeft());
+    gradient.setColorAt(0.0, bg.lighter(105));
+    gradient.setColorAt(1.0, bg.darker(103));
+    p.fillPath(background, gradient);
+
+    // DM wash: a soft color tint layered over the whole card so direct/group
+    // messages are unmistakably distinct from server notifications.
+    if (m_dmTint.isValid()) {
+        QLinearGradient tint(card.topLeft(), card.bottomLeft());
+        QColor tintTop = m_dmTint;
+        tintTop.setAlphaF(0.16);
+        QColor tintBottom = m_dmTint;
+        tintBottom.setAlphaF(0.05);
+        tint.setColorAt(0.0, tintTop);
+        tint.setColorAt(1.0, tintBottom);
+        p.fillPath(background, tint);
+    }
+
     p.setPen(QPen(border, 1));
     p.drawPath(background);
 
-    // Accent bar in the per-author avatar color along the left edge
+    // Accent bar along the left edge. DMs carry the full-strength author
+    // color; server messages get a muted channel-colored bar so the two
+    // notification classes read very differently at a glance.
+    QColor accent = m_avatarColor;
+    if (!m_isDm) {
+        accent = m_channelColor;
+        accent.setAlpha(110);
+    }
     QRectF accentRect = card.adjusted(0, 0, 0, 0);
     accentRect.setWidth(4);
-    QPainterPath accent;
-    accent.addRoundedRect(accentRect.adjusted(0, 6, 0, -6), 2.0, 2.0);
-    p.fillPath(accent, m_avatarColor);
+    QPainterPath accentPath;
+    accentPath.addRoundedRect(accentRect.adjusted(0, 6, 0, -6), 2.0, 2.0);
+    p.fillPath(accentPath, accent);
 
     // Countdown progress bar along the card's bottom edge
     if (m_data.showProgressBar && m_data.timeout > 0 && !m_dismissing && m_progress < 1.0) {
         const qreal width = card.width() * qBound(0.0, m_progress, 1.0);
         QRectF bar(card.left() + 2, card.bottom() - 2.5, qMax(0.0, width - 4), 2.5);
-        QColor barColor = m_avatarColor;
+        QColor barColor = accent;
         barColor.setAlpha(180);
         QPainterPath barPath;
         barPath.addRoundedRect(bar, 1.25, 1.25);
@@ -817,6 +868,16 @@ bool ToastNotification::eventFilter(QObject *watched, QEvent *event)
         auto *mouseEvent = static_cast<QMouseEvent *>(event);
         if (mouseEvent->button() == Qt::LeftButton) {
             emit iconClicked(m_data);
+            return true;
+        }
+    }
+    if (watched == m_bodyLabel && event->type() == QEvent::MouseButtonRelease) {
+        auto *mouseEvent = static_cast<QMouseEvent *>(event);
+        if (mouseEvent->button() == Qt::LeftButton) {
+            // The body is escaped plain text (no anchors), but
+            // TextBrowserInteraction still swallows clicks, so route every
+            // click on the body through the same path as the card background.
+            emit clicked(m_data);
             return true;
         }
     }

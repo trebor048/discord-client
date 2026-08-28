@@ -5,6 +5,7 @@
 #include <QPropertyAnimation>
 #include <QSettings>
 #include <QGraphicsOpacityEffect>
+#include <QShowEvent>
 #include <QStatusBar>
 #include <QTimer>
 
@@ -232,6 +233,13 @@ void MainWindow::applyCustomChrome()
     if (titleBar)
         titleBar->setVisible(on);
 
+    // A native menu bar above the custom title bar would push the traffic
+    // lights down the window and look foreign; the title bar's hamburger
+    // button exposes the same View/Window menus while the custom chrome is
+    // active.
+    if (menuBar())
+        menuBar()->setVisible(!on);
+
     const Qt::WindowFlags flags = windowFlags();
     const Qt::WindowFlags target =
             on ? (flags | Qt::FramelessWindowHint) : (flags & ~Qt::FramelessWindowHint);
@@ -246,13 +254,26 @@ void MainWindow::applyCustomChrome()
 
 #if defined(Q_OS_WIN)
     applyWindowCorners();
+    ensureNativeResizeBorder();
+#endif
+}
+
+void MainWindow::showEvent(QShowEvent *event)
+{
+    QMainWindow::showEvent(event);
+#if defined(Q_OS_WIN)
+    // The native window only exists from the first show onward; apply the
+    // frameless extras (rounded corners, native resize border) as late as
+    // possible so every show path -- including the config-toggle re-show --
+    // lands with working chrome.
+    applyWindowCorners();
+    ensureNativeResizeBorder();
 #endif
 }
 
 #if defined(Q_OS_WIN)
 void MainWindow::applyWindowCorners() const
-{
-    // Win11 DWM rounded corners (DWMWA_WINDOW_CORNER_PREFERENCE). Resolved
+{    // Win11 DWM rounded corners (DWMWA_WINDOW_CORNER_PREFERENCE). Resolved
     // dynamically so the build does not need a hard dwmapi link.
     if (!isVisible() || !windowHandle())
         return;
@@ -270,6 +291,26 @@ void MainWindow::applyWindowCorners() const
        33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &preference, sizeof(preference));
 }
 
+void MainWindow::ensureNativeResizeBorder()
+{
+    // Qt's FramelessWindowHint removes WS_THICKFRAME, and without it Windows
+    // ignores the HT* results of WM_NCHITTEST and never starts the modal
+    // resize loop -- the window cannot be resized at all. Re-adding the style
+    // restores native edge/corner resizing; the border itself is invisible on
+    // Windows 10/11 (the DWM resize border + drop shadow), so the frameless
+    // look is preserved. Idempotent: only touches the style once.
+    QWindow *window = windowHandle();
+    if (!window)
+        return;
+    const HWND hwnd = reinterpret_cast<HWND>(window->winId());
+    const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    if (style & WS_THICKFRAME)
+        return;
+    SetWindowLongPtrW(hwnd, GWL_STYLE, style | WS_THICKFRAME);
+    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
+
 bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr *result)
 {
     Q_UNUSED(eventType);
@@ -279,23 +320,30 @@ bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr
     MSG *msg = static_cast<MSG *>(message);
     switch (msg->message) {
     case WM_NCHITTEST: {
+        // Make sure the native resize border is present (see
+        // ensureNativeResizeBorder); harmless once set.
+        ensureNativeResizeBorder();
         // lParam carries the screen-space cursor position.
         const int sx = GET_X_LPARAM(msg->lParam);
         const int sy = GET_Y_LPARAM(msg->lParam);
 
         // Edge resize handles (Windows convention: the very edge wins over the
-        // caption, so the top strip of the titlebar still resizes).
+        // caption, so the top strip of the titlebar still resizes). Uses the
+        // true window rect (the frameless window keeps WS_THICKFRAME for the
+        // native resize loop, so the client rect is inset by the invisible
+        // DWM border and geometry() would be off by it).
         if (!isMaximized() && !isFullScreen()) {
-            const QRect w = geometry();
+            RECT wr = {};
+            GetWindowRect(reinterpret_cast<HWND>(windowHandle()->winId()), &wr);
             constexpr int border = 8;
             int edge = 0;
-            if (sx >= w.left() && sx < w.left() + border)
+            if (sx >= wr.left && sx < wr.left + border)
                 edge |= 1; // left
-            if (sx <= w.right() && sx > w.right() - border)
+            if (sx <= wr.right - 1 && sx > wr.right - 1 - border)
                 edge |= 2; // right
-            if (sy >= w.top() && sy < w.top() + border)
+            if (sy >= wr.top && sy < wr.top + border)
                 edge |= 4; // top
-            if (sy <= w.bottom() && sy > w.bottom() - border)
+            if (sy <= wr.bottom - 1 && sy > wr.bottom - 1 - border)
                 edge |= 8; // bottom
             if (edge) {
                 switch (edge) {
@@ -2437,6 +2485,23 @@ void MainWindow::setupMenu()
             currentInstance->discord()->debugForceReconnect();
     });
 #endif
+
+    // The custom title bar's hamburger button exposes the same View/Window
+    // menus while the native menu bar is hidden by the frameless chrome.
+    titleBar->setMenuButtonVisible(true);
+    connect(titleBar, &CustomTitleBar::menuRequested, this, [this](const QPoint &pos) {
+        populateWindowMenu();
+        QMenu menu(this);
+        for (QAction *action : this->menuBar()->actions()) {
+            if (QMenu *submenu = action->menu()) {
+                for (QAction *subAction : submenu->actions())
+                    menu.addAction(subAction);
+            } else {
+                menu.addAction(action);
+            }
+        }
+        menu.exec(pos);
+    });
 }
 
 void MainWindow::populateWindowMenu()

@@ -5,16 +5,40 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QLabel>
 #include <QPushButton>
 #include <QSettings>
 #include <QVBoxLayout>
 
 #include "UI/Widgets/CustomStatusEdit.hpp"
+#include "UI/Dialogs/EmojiPickerDialog.hpp"
+#include "UI/Chat/ChatLayout.hpp"
 #include "Core/ImageManager.hpp"
 #include "Core/Settings.hpp"
 
 namespace Acheron {
 namespace UI {
+
+namespace {
+
+// Keep the hover bar narrow enough for typical message rows.
+constexpr int MaxQuickReactions = 10;
+
+QStringList currentQuickReactions()
+{
+    const QStringList stored =
+            QSettings().value(QStringLiteral("chat/quick_reactions")).toStringList();
+    if (stored.isEmpty())
+        return ChatLayout::defaultQuickReactionEmojis();
+    return stored.mid(0, MaxQuickReactions);
+}
+
+void saveQuickReactions(const QStringList &emojis)
+{
+    QSettings().setValue(QStringLiteral("chat/quick_reactions"), emojis);
+}
+
+} // namespace
 
 GeneralPage::GeneralPage(QWidget *parent)
     : QWidget(parent)
@@ -90,6 +114,52 @@ GeneralPage::GeneralPage(QWidget *parent)
 
     layout->addWidget(mediaGroup);
 
+    // Quick reactions: the emoji row shown on the message hover bar.
+    auto *chatGroup = new QGroupBox(tr("Chat"), this);
+    auto *chatGroupLayout = new QVBoxLayout(chatGroup);
+    chatGroupLayout->setSpacing(10);
+
+    auto *quickReactionHint = new QLabel(tr("Emoji shown on the quick-reaction bar when you hover a "
+                                            "message. Click an emoji to change it, right-click to "
+                                            "remove it."), chatGroup);
+    quickReactionHint->setWordWrap(true);
+    quickReactionHint->setStyleSheet(QStringLiteral("color: %1; font-size: 12px;")
+                                             .arg(palette().placeholderText().color().name()));
+    chatGroupLayout->addWidget(quickReactionHint);
+
+    quickReactionRowLayout = new QHBoxLayout();
+    quickReactionRowLayout->setSpacing(6);
+
+    auto *addButton = new QPushButton(QStringLiteral("+"), chatGroup);
+    addButton->setFixedSize(32, 32);
+    addButton->setToolTip(tr("Add a quick reaction"));
+    addButton->setCursor(Qt::PointingHandCursor);
+    QColor addHover = palette().highlight().color();
+    addHover.setAlpha(45);
+    addButton->setStyleSheet(QStringLiteral(
+            "QPushButton { border: 1px dashed %1; border-radius: 8px;"
+            "  background: transparent; color: %2; font-size: 16px; font-weight: 600; }"
+            "QPushButton:hover { background-color: %3; }")
+            .arg(palette().mid().color().name(), palette().text().color().name(),
+                 addHover.name(QColor::HexArgb)));
+    connect(addButton, &QPushButton::clicked, this, &GeneralPage::addQuickReaction);
+    quickReactionRowLayout->addWidget(addButton);
+
+    auto *resetButton = new QPushButton(tr("Reset"), chatGroup);
+    resetButton->setCursor(Qt::PointingHandCursor);
+    resetButton->setToolTip(tr("Restore the default quick reactions"));
+    connect(resetButton, &QPushButton::clicked, this, [this]() {
+        QSettings().remove(QStringLiteral("chat/quick_reactions"));
+        rebuildQuickReactionRow();
+    });
+    quickReactionRowLayout->addWidget(resetButton);
+    quickReactionRowLayout->addStretch(1);
+
+    chatGroupLayout->addLayout(quickReactionRowLayout);
+    layout->addWidget(chatGroup);
+
+    rebuildQuickReactionRow();
+
     layout->addStretch();
 
     connect(inMemoryCacheCheckbox, &QCheckBox::toggled, this, [](bool checked) {
@@ -123,6 +193,77 @@ GeneralPage::GeneralPage(QWidget *parent)
     connect(customStatusWidget, &CustomStatusEdit::statusCleared, this, [this]() {
         emit customStatusChanged(QString());
     });
+}
+
+void GeneralPage::rebuildQuickReactionRow()
+{
+    for (QPushButton *button : std::as_const(quickEmojiButtons)) {
+        quickReactionRowLayout->removeWidget(button);
+        button->deleteLater();
+    }
+    quickEmojiButtons.clear();
+
+    const QStringList emojis = currentQuickReactions();
+    for (int i = 0; i < emojis.size(); ++i) {
+        auto *button = new QPushButton(emojis[i], this);
+        button->setFixedSize(32, 32);
+        button->setCursor(Qt::PointingHandCursor);
+        button->setToolTip(tr("Click to change · Right-click to remove"));
+        QColor hoverFill = palette().highlight().color();
+        hoverFill.setAlpha(45);
+        button->setStyleSheet(QStringLiteral(
+                "QPushButton { border: 1px solid %1; border-radius: 8px;"
+                "  background: transparent; font-size: 17px; }"
+                "QPushButton:hover { background-color: %2; }")
+                .arg(palette().mid().color().name(), hoverFill.name(QColor::HexArgb)));
+        connect(button, &QPushButton::clicked, this, [this, i]() { changeQuickReaction(i); });
+        button->setContextMenuPolicy(Qt::CustomContextMenu);
+        connect(button, &QPushButton::customContextMenuRequested, this,
+                [this, i]() { removeQuickReaction(i); });
+        // Emoji slots go before the "+" / Reset controls at the end of the row.
+        quickReactionRowLayout->insertWidget(quickEmojiButtons.size(), button);
+        quickEmojiButtons.append(button);
+    }
+}
+
+void GeneralPage::changeQuickReaction(int index)
+{
+    QStringList emojis = currentQuickReactions();
+    if (index < 0 || index >= emojis.size())
+        return;
+    const QString chosen = pickEmoji(this, tr("Change Quick Reaction"), tr("Search emoji"));
+    if (chosen.isEmpty())
+        return;
+    emojis[index] = chosen;
+    saveQuickReactions(emojis);
+    rebuildQuickReactionRow();
+}
+
+void GeneralPage::removeQuickReaction(int index)
+{
+    QStringList emojis = currentQuickReactions();
+    if (index < 0 || index >= emojis.size())
+        return;
+    emojis.removeAt(index);
+    if (emojis.isEmpty()) {
+        QSettings().remove(QStringLiteral("chat/quick_reactions"));
+    } else {
+        saveQuickReactions(emojis);
+    }
+    rebuildQuickReactionRow();
+}
+
+void GeneralPage::addQuickReaction()
+{
+    QStringList emojis = currentQuickReactions();
+    if (emojis.size() >= MaxQuickReactions)
+        return;
+    const QString chosen = pickEmoji(this, tr("Add Quick Reaction"), tr("Search emoji"));
+    if (chosen.isEmpty())
+        return;
+    emojis.append(chosen);
+    saveQuickReactions(emojis);
+    rebuildQuickReactionRow();
 }
 
 void GeneralPage::setClient(Discord::Client *c)

@@ -47,17 +47,28 @@ void NotificationController::setupForInstance(Core::ClientInstance *instance)
     // Clear active channel when switching instances
     notificationManager->setActiveChannel(Core::Snowflake::Invalid);
 
+    // A toast click should surface the client window before navigating so the
+    // jump is actually visible, even when the window is minimized or buried.
+    const auto bringToForeground = [this]() {
+        if (m_window->isMinimized())
+            m_window->showNormal();
+        m_window->raise();
+        m_window->activateWindow();
+    };
+
     // Connect notification navigation signals
     connect(notificationManager, &Core::NotificationManager::openChannelRequested,
-            m_window, [this](Core::Snowflake channelId) {
+            m_window, [this, bringToForeground](Core::Snowflake channelId) {
         if (m_window->currentInstance) {
+            bringToForeground();
             // Find and switch to the channel
             m_window->selectChannelInTree(channelId);
         }
     });
     connect(notificationManager, &Core::NotificationManager::jumpToMessageRequested,
-            m_window, [this](Core::Snowflake channelId, Core::Snowflake messageId) {
+            m_window, [this, bringToForeground](Core::Snowflake channelId, Core::Snowflake messageId) {
         if (m_window->currentInstance) {
+            bringToForeground();
             m_window->jumpToMessage(channelId, messageId);
         }
     });
@@ -69,8 +80,9 @@ void NotificationController::setupForInstance(Core::ClientInstance *instance)
         }
     });
     connect(notificationManager, &Core::NotificationManager::openDmWithUserRequested,
-            m_window, [this](Core::Snowflake userId) {
+            m_window, [this, bringToForeground](Core::Snowflake userId) {
         if (m_window->currentInstance) {
+            bringToForeground();
             std::optional<Core::Snowflake> dmChannelId = m_window->currentInstance->findDmChannelWithUser(userId);
             if (dmChannelId.has_value()) {
                 m_window->selectChannelInTree(*dmChannelId);
@@ -78,7 +90,8 @@ void NotificationController::setupForInstance(Core::ClientInstance *instance)
         }
     });
     connect(notificationManager, &Core::NotificationManager::openFriendsTabRequested,
-            m_window, [this]() {
+            m_window, [this, bringToForeground]() {
+        bringToForeground();
         m_window->openFriendsWindow();
     });
 }

@@ -51,23 +51,6 @@ namespace {
 bool hasAllRequiredOptions(const Discord::ApplicationCommand &command,
                            const QList<Discord::InteractionOptionValue> &parsed);
 
-QString pickEmoji(QWidget *parent, const QString &title, const QString &prompt,
-                  const QStringList &orderedGuildIds = {},
-                  const Core::Snowflake &currentGuildId = {})
-{
-    EmojiPickerDialog dialog(parent);
-    dialog.setWindowTitle(title);
-    dialog.setSearchPlaceholder(prompt);
-    if (!orderedGuildIds.isEmpty())
-        dialog.setOrderedGuildIds(orderedGuildIds);
-    if (currentGuildId.isValid())
-        dialog.setCurrentGuildId(currentGuildId.toString());
-
-    if (dialog.exec() != QDialog::Accepted)
-        return {};
-    return dialog.selectedEmoji();
-}
-
 QString markdownPreviewHtml(const QString &body)
 {
     return QStringLiteral(

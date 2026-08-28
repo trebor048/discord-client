@@ -473,6 +473,9 @@ void ChatView::mouseMoveEvent(QMouseEvent *event)
         hoverLayoutCache = ChatLayout::resolveLayout(this, idx);
         hoverLayoutRow = hoverRow;
         hoverLayoutScroll = hoverScrollValue;
+        // The floating reaction bar moved with the row; the cursor is no longer
+        // over any of its buttons until recomputed below.
+        m_hoveredQuickReaction = -1;
     }
     const ChatLayout::ResolvedLayout &resolved = hoverLayoutCache;
 
@@ -521,6 +524,26 @@ void ChatView::mouseMoveEvent(QMouseEvent *event)
         shape = Qt::PointingHandCursor;
     if (viewport()->cursor().shape() != shape)
         viewport()->setCursor(shape);
+
+    // Track which quick-reaction button is under the cursor so the delegate can
+    // highlight it. Only meaningful while hovering the floating bar.
+    int newHoverReaction = -1;
+    if (idx.isValid() && !resolved.layout.quickReaction.barRect.isNull()) {
+        const auto &bar = resolved.layout.quickReaction;
+        for (int i = 0; i < bar.buttonRects.size(); ++i) {
+            if (bar.buttonRects[i].contains(pos)) {
+                newHoverReaction = i;
+                break;
+            }
+        }
+        if (newHoverReaction < 0 && bar.moreButtonRect.contains(pos))
+            newHoverReaction = -2;
+    }
+    if (newHoverReaction != m_hoveredQuickReaction) {
+        m_hoveredQuickReaction = newHoverReaction;
+        if (idx.isValid())
+            update(visualRect(idx));
+    }
 
     if (hoveredRow != idx.row() || hoveredChar != charPos) {
         if (hoveredRow != -1)
@@ -744,10 +767,11 @@ void ChatView::clearSelection()
 
 void ChatView::leaveEvent(QEvent *event)
 {
-    bool needsUpdate = (hoveredRow != -1);
+    bool needsUpdate = (hoveredRow != -1) || (m_hoveredQuickReaction != -1);
     hoveredRow = -1;
     hoveredChar = -1;
     hoverLayoutRow = -1;
+    m_hoveredQuickReaction = -1;
 
     if (needsUpdate) {
         viewport()->update();
@@ -996,6 +1020,13 @@ void ChatView::onScrollBarValueChanged(int value)
 {
     QScrollBar *vbar = verticalScrollBar();
     bool atBottomNow = (vbar->maximum() - value <= 200);
+
+    // Rows shift under a stationary cursor during wheel scrolling; drop any
+    // stale quick-reaction highlight so the bar repaints cleanly.
+    if (m_hoveredQuickReaction != -1) {
+        m_hoveredQuickReaction = -1;
+        viewport()->update();
+    }
 
     if (jumpToBottomButton && jumpToBottomAnimation) {
         const bool shouldShow = !atBottomNow;

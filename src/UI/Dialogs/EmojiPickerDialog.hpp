@@ -13,6 +13,7 @@
 #include <QTimer>
 
 #include "Core/EmojiCatalog.hpp"
+#include "Core/Snowflake.hpp"
 
 class QDialogButtonBox;
 class QEvent;
@@ -136,6 +137,24 @@ private:
     QString currentGuildId;
     void fadeInWidget(QWidget *w, int durationMs = 150);
 };
+
+// Modal helper: run the emoji picker and return the chosen emoji, or an empty
+// string when the user cancels. Shared by the message input and settings pages.
+inline QString pickEmoji(QWidget *parent, const QString &title, const QString &prompt,
+                         const QStringList &orderedGuildIds = {},
+                         const Core::Snowflake &currentGuildId = {})
+{
+    EmojiPickerDialog dialog(parent);
+    dialog.setWindowTitle(title);
+    dialog.setSearchPlaceholder(prompt);
+    if (!orderedGuildIds.isEmpty())
+        dialog.setOrderedGuildIds(orderedGuildIds);
+    if (currentGuildId.isValid())
+        dialog.setCurrentGuildId(currentGuildId.toString());
+    if (dialog.exec() != QDialog::Accepted)
+        return {};
+    return dialog.selectedEmoji();
+}
 
 } // namespace UI
 } // namespace Acheron
