@@ -137,6 +137,10 @@ private slots:
     void onAppearTick(qreal progress);
 
 private:
+    /// Smoothly glides the view to the bottom (new messages, channel switches,
+    /// jump-to-bottom button). Falls back to an instant jump when reduce-motion
+    /// is on (the animation duration collapses to zero).
+    void animateScrollToBottom();
     void copySelectedText();
     void copyMessageContent(const QModelIndex &index);
     void cancelPendingJump();

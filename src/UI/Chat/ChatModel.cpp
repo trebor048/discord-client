@@ -135,6 +135,7 @@ ChatModel::ChatModel(Core::ImageManager *imageManager, QObject *parent)
                         if (row < 0)
                             continue;
                         reactionCache.remove(id);
+                        pollCache.remove(id);
                         sizeCache.remove(id);
                         QModelIndex idx = index(row, 0);
                         emit dataChanged(idx, idx, { ReactionsRole, CachedSizeRole });
@@ -191,6 +192,7 @@ void ChatModel::notifyImageSettled(const QUrl &url)
         if (row < 0)
             continue;
         reactionCache.remove(id);
+        pollCache.remove(id);
         sizeCache.remove(id);
         QModelIndex idx = index(row, 0);
         emit dataChanged(idx, idx, { ReactionsRole, CachedSizeRole });
@@ -685,7 +687,12 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
     case PollRole: {
         if (!msg.poll.hasValue())
             return QVariant();
-        return QVariant::fromValue(buildPollData(msg));
+        auto it = pollCache.constFind(msg.id);
+        if (it != pollCache.constEnd())
+            return QVariant::fromValue(*it);
+        PollData data = buildPollData(msg);
+        pollCache.insert(msg.id, data);
+        return QVariant::fromValue(data);
     }
     case StickersRole: {
         if (!msg.stickerItems.hasValue() || msg.stickerItems->isEmpty())
@@ -1059,6 +1066,7 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
         attachmentCache.clear();
         embedCache.clear();
         reactionCache.clear();
+        pollCache.clear();
         docCache.clear();
         pendingNonces.clear();
         erroredNonces.clear();
@@ -1216,6 +1224,7 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
             attachmentCache.remove(incomingMsg.id);
             embedCache.remove(incomingMsg.id);
             reactionCache.remove(incomingMsg.id);
+            pollCache.remove(incomingMsg.id);
             invalidateDocCacheForMessage(incomingMsg.id);
 
             QModelIndex idx = index(row, 0);
@@ -1247,6 +1256,7 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
             attachmentCache.remove(incomingMsg.id);
             embedCache.remove(incomingMsg.id);
             reactionCache.remove(incomingMsg.id);
+            pollCache.remove(incomingMsg.id);
             invalidateDocCacheForMessage(incomingMsg.id);
 
             QModelIndex idx = index(row, 0);
@@ -1289,8 +1299,10 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
             attachmentCache.remove(oldId);
             embedCache.remove(oldId);
             reactionCache.remove(oldId);
+            pollCache.remove(oldId);
             invalidateDocCacheForMessage(oldId);
             reactionCache.remove(incomingMsg.id);
+            pollCache.remove(incomingMsg.id);
             attachmentCache.remove(incomingMsg.id);
             messageRowIndexDirty = true; // message ID changed
             QModelIndex idx = index(row, 0);
@@ -1325,15 +1337,20 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
                 newMessageIds.insert(msg.id.get());
 
             // Schedule delayed clear of the new-message highlight so the delegate
-            // can paint a brief background flash
+            // can paint a brief background flash. Emit per-row changes instead of
+            // a role-less full-range dataChanged, which would make the view
+            // re-query every role and repaint the whole list.
             QTimer::singleShot(2500, this, [this, ids = newMessages]() {
-                bool changed = false;
+                if (messages.isEmpty())
+                    return;
+                ensureMessageRowIndex();
                 for (const auto &msg : ids) {
-                    if (newMessageIds.remove(msg.id.get()))
-                        changed = true;
+                    if (!newMessageIds.remove(msg.id.get()))
+                        continue;
+                    const int row = messageRowById.value(msg.id.get(), -1);
+                    if (row >= 0)
+                        emit dataChanged(index(row, 0), index(row, 0));
                 }
-                if (changed && !messages.isEmpty())
-                    emit dataChanged(index(0, 0), index(messages.size() - 1, 0));
             });
         }
         break;
@@ -1360,6 +1377,7 @@ void ChatModel::handleMessageDeleted(Snowflake channelId, Snowflake messageId)
             attachmentCache.remove(messageId);
             embedCache.remove(messageId);
             reactionCache.remove(messageId);
+            pollCache.remove(messageId);
             invalidateDocCacheForMessage(messageId);
             unindexMessageEmojiUrls(messageId);
             messages.remove(i);
@@ -1673,6 +1691,7 @@ void ChatModel::trimOldestMessagesIfNeeded()
         attachmentCache.remove(msg.id);
         embedCache.remove(msg.id);
         reactionCache.remove(msg.id);
+        pollCache.remove(msg.id);
         invalidateDocCacheForMessage(msg.id);
         unindexMessageEmojiUrls(msg.id);
         newMessageIds.remove(msg.id.get());
@@ -1718,6 +1737,7 @@ void ChatModel::setActiveChannel(Snowflake channelId, Snowflake guildId)
     attachmentCache.clear();
     embedCache.clear();
     reactionCache.clear();
+    pollCache.clear();
     docCache.clear();
     pendingNonces.clear();
     erroredNonces.clear();

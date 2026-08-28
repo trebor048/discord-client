@@ -12,6 +12,7 @@
 #include "Core/ClientInstance.hpp"
 #include "Core/ImageManager.hpp"
 #include "Core/Theme/Icons.hpp"
+#include "Core/Theme/RoundedAvatar.hpp"
 #include "Discord/CdnUrls.hpp"
 #include "Discord/Client.hpp"
 
@@ -29,48 +30,57 @@ QColor statusColor(const QString &status)
         return QColor(0xF2, 0x3F, 0x43);
     return QColor(0x80, 0x84, 0x8E); // invisible / offline / unknown
 }
+
+constexpr int kAvatarSize = 40;
+constexpr int kStatusDotSize = 12;
+constexpr int kSettingsIconSize = 20;
 } // namespace
 
 MePanel::MePanel(QWidget *parent)
     : QWidget(parent)
 {
     setObjectName(QStringLiteral("mePanel"));
+    // Fill the full channel-list width so the panel tracks the column as the
+    // splitter resizes; height stays content-sized (Discord-style).
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     setStyleSheet(QStringLiteral(
             "#mePanel { background: palette(window); border-top: 1px solid palette(mid); }"));
 
     auto *layout = new QHBoxLayout(this);
-    layout->setContentsMargins(8, 6, 8, 6);
-    layout->setSpacing(8);
+    layout->setContentsMargins(12, 10, 12, 10);
+    layout->setSpacing(10);
 
     avatarLabel = new QLabel(this);
-    avatarLabel->setFixedSize(28, 28);
+    avatarLabel->setFixedSize(kAvatarSize, kAvatarSize);
     layout->addWidget(avatarLabel);
 
     auto *textCol = new QVBoxLayout;
     textCol->setContentsMargins(0, 0, 0, 0);
-    textCol->setSpacing(0);
+    textCol->setSpacing(2);
 
     nameLabel = new QLabel(tr("Not signed in"), this);
-    nameLabel->setStyleSheet(QStringLiteral("font-weight: 600; font-size: 12px;"));
+    nameLabel->setStyleSheet(QStringLiteral("font-weight: 600; font-size: 13px;"));
     textCol->addWidget(nameLabel);
 
     auto *presenceRow = new QHBoxLayout;
     presenceRow->setContentsMargins(0, 0, 0, 0);
-    presenceRow->setSpacing(4);
+    presenceRow->setSpacing(6);
     statusDot = new QLabel(this);
-    statusDot->setFixedSize(8, 8);
+    statusDot->setFixedSize(kStatusDotSize, kStatusDotSize);
     presenceRow->addWidget(statusDot, 0, Qt::AlignVCenter);
     statusButton = new QToolButton(this);
     statusButton->setText(tr("Set Status"));
     statusButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
     statusButton->setAutoRaise(true);
     statusButton->setCursor(Qt::PointingHandCursor);
+    statusButton->setStyleSheet(QStringLiteral("QToolButton { font-size: 12px; }"));
     presenceRow->addWidget(statusButton, 0, Qt::AlignVCenter);
 
     settingsButton = new QToolButton(this);
     settingsButton->setIcon(Core::Theme::Icons::icon(Core::Theme::Icons::Name::Settings,
                                                      Core::Theme::Token::PrimaryText));
-    settingsButton->setIconSize(QSize(16, 16));
+    settingsButton->setIconSize(QSize(kSettingsIconSize, kSettingsIconSize));
+    settingsButton->setFixedSize(kSettingsIconSize + 8, kSettingsIconSize + 8);
     settingsButton->setToolTip(tr("Settings"));
     settingsButton->setAutoRaise(true);
     settingsButton->setCursor(Qt::PointingHandCursor);
@@ -88,6 +98,26 @@ void MePanel::setInstance(Core::ClientInstance *instance, Core::ImageManager *im
 {
     m_instance = instance;
     m_images = images;
+    if (m_images && !avatarFetchWired_) {
+        avatarFetchWired_ = true;
+        // Round the avatar once the async image fetch lands; refresh() sets the
+        // rounded placeholder immediately and this keeps the final image rounded.
+        connect(m_images, &Core::ImageManager::imageFetched, this,
+                [this](const QUrl &url, const QSize &, const QPixmap &) {
+                    if (!m_instance || !m_images)
+                        return;
+                    auto user = m_instance->users()->getUser(m_instance->accountId());
+                    if (!user)
+                        return;
+                    const QString hash = user->avatar.getOr(QString());
+                    if (hash.isEmpty())
+                        return;
+                    const QUrl current =
+                            Discord::Cdn::userAvatar(m_instance->accountId(), hash, 64);
+                    if (current == url)
+                        refresh();
+                });
+    }
     refresh();
 }
 
@@ -95,9 +125,15 @@ void MePanel::refresh()
 {
     if (!m_instance) {
         nameLabel->setText(tr("Not signed in"));
-        statusDot->setStyleSheet(QStringLiteral("background: %1; border-radius: 4px;")
-                                         .arg(statusColor(QString()).name()));
-        avatarLabel->setPixmap(m_images ? m_images->placeholder(QSize(28, 28)) : QPixmap());
+        statusDot->setStyleSheet(QStringLiteral("background: %1; border-radius: %2px;")
+                                         .arg(statusColor(QString()).name())
+                                         .arg(kStatusDotSize / 2));
+        if (m_images) {
+            avatarLabel->setPixmap(Core::Theme::roundedAvatarPixmap(
+                    m_images->placeholder(QSize(kAvatarSize, kAvatarSize)), kAvatarSize));
+        } else {
+            avatarLabel->setPixmap(QPixmap());
+        }
         return;
     }
 
@@ -107,18 +143,23 @@ void MePanel::refresh()
 
     const QString presence = m_instance->presenceStatus();
     const QColor color = statusColor(presence);
-    statusDot->setStyleSheet(QStringLiteral("background: %1; border-radius: 4px;").arg(color.name()));
+    statusDot->setStyleSheet(QStringLiteral("background: %1; border-radius: %2px;")
+                                     .arg(color.name())
+                                     .arg(kStatusDotSize / 2));
 
     if (m_images) {
         if (auto user = m_instance->users()->getUser(m_instance->accountId())) {
             const QString hash = user->avatar.getOr(QString());
             if (!hash.isEmpty()) {
                 const QUrl url = Discord::Cdn::userAvatar(m_instance->accountId(), hash, 64);
-                m_images->assign(avatarLabel, url, QSize(28, 28));
+                const QPixmap pm = m_images->get(url, QSize(kAvatarSize, kAvatarSize),
+                                                 Core::PinGroup::ChannelList);
+                avatarLabel->setPixmap(Core::Theme::roundedAvatarPixmap(pm, kAvatarSize));
                 return;
             }
         }
-        avatarLabel->setPixmap(m_images->placeholder(QSize(28, 28)));
+        avatarLabel->setPixmap(Core::Theme::roundedAvatarPixmap(
+                m_images->placeholder(QSize(kAvatarSize, kAvatarSize)), kAvatarSize));
     } else {
         avatarLabel->setPixmap(QPixmap());
     }

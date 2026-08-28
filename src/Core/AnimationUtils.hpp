@@ -219,7 +219,12 @@ inline void slideIn(QWidget *w, Qt::Edge from, int distance = 24, int baseMs = 2
     group->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
-/// Standard popup entry: fade + scale pop + slight upward rise.
+/// Standard popup entry: fade in.
+///
+/// Opacity-only by design: `w` is typically a layout-managed child (e.g. the
+/// fadeHost of BasePopup), so animating geometry/pos fights the layout and
+/// starts from a stale rect captured before layout settles — which made the
+/// popup jump. A pure opacity fade is layout-independent and always correct.
 inline void popupEnter(QWidget *w, int baseMs = 300)
 {
     if (!w) return;
@@ -234,37 +239,21 @@ inline void popupEnter(QWidget *w, int baseMs = 300)
     w->setGraphicsEffect(fx);
     fx->setOpacity(0.0);
 
-    const QRect finalGeom = w->geometry();
-    const int dw = static_cast<int>(finalGeom.width() * 0.12);
-    const int dh = static_cast<int>(finalGeom.height() * 0.12);
-    QRect startGeom(finalGeom.x() + dw / 2, finalGeom.y() + dh / 2 + 10,
-                    finalGeom.width() - dw, finalGeom.height() - dh);
-
-    auto *group = new QParallelAnimationGroup(w);
-    auto *fade = new QPropertyAnimation(fx, "opacity", group);
+    auto *fade = new QPropertyAnimation(fx, "opacity", w);
     fade->setDuration(duration(baseMs));
     fade->setStartValue(0.0);
     fade->setEndValue(1.0);
     fade->setEasingCurve(QEasingCurve::OutCubic);
-    group->addAnimation(fade);
-
-    auto *scale = new QPropertyAnimation(w, "geometry", group);
-    scale->setDuration(duration(baseMs));
-    scale->setStartValue(startGeom);
-    scale->setEndValue(finalGeom);
-    scale->setEasingCurve(QEasingCurve::OutBack);
-    group->addAnimation(scale);
-
-    QObject::connect(group, &QParallelAnimationGroup::finished, w,
+    QObject::connect(fade, &QPropertyAnimation::finished, w,
                      [wp = QPointer(w), effect = QPointer(fx)]() {
         if (wp && wp->graphicsEffect() == effect)
             wp->setGraphicsEffect(nullptr);
     });
     w->show();
-    group->start(QAbstractAnimation::DeleteWhenStopped);
+    fade->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
-/// Standard popup exit: fade + slight downward drop, then hide.
+/// Standard popup exit: fade out, then hide.
 /// @param w           Target widget.
 /// @param onFinished  Called after the widget is hidden (e.g. accept()/reject()).
 /// @param baseMs      Authored duration (default 180).
@@ -283,22 +272,12 @@ inline void popupExit(QWidget *w, std::function<void()> onFinished = {}, int bas
     w->setGraphicsEffect(fx);
     fx->setOpacity(1.0);
 
-    auto *group = new QParallelAnimationGroup(w);
-    auto *fade = new QPropertyAnimation(fx, "opacity", group);
+    auto *fade = new QPropertyAnimation(fx, "opacity", w);
     fade->setDuration(duration(baseMs));
     fade->setStartValue(1.0);
     fade->setEndValue(0.0);
     fade->setEasingCurve(QEasingCurve::InCubic);
-    group->addAnimation(fade);
-
-    auto *drop = new QPropertyAnimation(w, "pos", group);
-    drop->setDuration(duration(baseMs));
-    drop->setStartValue(w->pos());
-    drop->setEndValue(w->pos() + QPoint(0, 14));
-    drop->setEasingCurve(QEasingCurve::InCubic);
-    group->addAnimation(drop);
-
-    QObject::connect(group, &QParallelAnimationGroup::finished, w,
+    QObject::connect(fade, &QPropertyAnimation::finished, w,
                      [wp = QPointer(w), effect = QPointer(fx), onFinished]() {
         if (wp) {
             if (wp->graphicsEffect() == effect)
@@ -308,7 +287,7 @@ inline void popupExit(QWidget *w, std::function<void()> onFinished = {}, int bas
                 onFinished();
         }
     });
-    group->start(QAbstractAnimation::DeleteWhenStopped);
+    fade->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
 } // namespace AnimationUtils

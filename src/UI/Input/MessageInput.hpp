@@ -20,6 +20,7 @@
 
 class QGraphicsOpacityEffect;
 class QNetworkAccessManager;
+class QParallelAnimationGroup;
 class QPropertyAnimation;
 class QSplitter;
 class QTextBrowser;
@@ -85,6 +86,17 @@ public:
                              const QString &guildIconHash,
                              std::function<QUrl(Core::Snowflake, const QString &)> iconProvider);
 
+    /// Mounts a slim status strip (typing indicator / slowmode countdown) at
+    /// the very top of the input block, collapsed. Call setStatusStripActive()
+    /// to slide it out; its height is folded into the input's height so no
+    /// separate row is needed between the chat and the input bar.
+    void setStatusStrip(QWidget *strip);
+
+    /// Slides the status strip open (active) or closed (inactive). The input
+    /// block's height animates in sync, so the whole bottom region glides
+    /// instead of snapping.
+    void setStatusStripActive(bool active);
+
 signals:
     void stickerPicked(Core::Snowflake stickerId);
 
@@ -125,6 +137,10 @@ private:
     QString m_pendingSlashQuery;
     QGraphicsOpacityEffect *replyBarOpacity = nullptr;
     QPropertyAnimation *replyBarFadeAnimation = nullptr;
+    QWidget *statusStrip_ = nullptr;
+    QParallelAnimationGroup *stripAnimGroup_ = nullptr;
+
+    int collapsedContentHeight() const;
 
     Core::Snowflake replyMessageId;
     QHash<Core::Snowflake, QList<Discord::Sticker>> availableStickers;

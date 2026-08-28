@@ -1,6 +1,8 @@
 #include <QtTest>
 #include <QSettings>
 
+#include <limits>
+
 #include "Core/Appearance/AppearanceConfig.hpp"
 
 using namespace Acheron;
@@ -30,7 +32,8 @@ private slots:
         QCOMPARE(config.memberListMode(), MemberListMode::ResizeHandle);
         QCOMPARE(config.memberCardScale(), 1.0f);
         QCOMPARE(config.guildIconScale(), 1.0f);
-        QCOMPARE(config.channelScale(), 1.0f);
+        QCOMPARE(config.channelScale(), 0.85f);
+        QCOMPARE(config.numberedUnread(), true);
     }
 
     void clamping()
@@ -40,8 +43,10 @@ private slots:
         QCOMPARE(config.memberCardScale(), 1.5f);
         config.setGuildIconScale(0.5f);
         QCOMPARE(config.guildIconScale(), 0.8f);
+        config.setChannelScale(2.0f);
+        QCOMPARE(config.channelScale(), 2.0f);
         config.setChannelScale(0.0f);
-        QCOMPARE(config.channelScale(), 0.8f);
+        QCOMPARE(config.channelScale(), 0.5f);
     }
 
     void stepMath()
@@ -57,6 +62,32 @@ private slots:
         QCOMPARE(AppearanceConfig::scaledInt(28, 1.5f), 42);
         QCOMPARE(AppearanceConfig::scaledInt(28, 0.8f), 22);
         QCOMPARE(AppearanceConfig::scaledInt(38, 1.0f), 38);
+
+        // The channel list honors its wider range (beyond the member cap).
+        QCOMPARE(AppearanceConfig::channelScaledInt(24, 2.0f), 48);
+        QCOMPARE(AppearanceConfig::channelScaledInt(24, 0.5f), 12);
+        QCOMPARE(AppearanceConfig::channelScaledInt(24, 0.85f), 20);
+    }
+
+    void nonFiniteClampedToDefault()
+    {
+        // std::clamp passes NaN through and std::lround(NaN) is UB; a NaN or
+        // infinite scale must fall back to the default instead of propagating.
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        const float inf = std::numeric_limits<float>::infinity();
+
+        QCOMPARE(AppearanceConfig::clampScale(nan), 1.0f);
+        QCOMPARE(AppearanceConfig::clampScale(inf), 1.0f);
+        QCOMPARE(AppearanceConfig::clampScale(-inf), 1.0f);
+        QCOMPARE(AppearanceConfig::scaledInt(28, nan), 28);
+
+        AppearanceConfig config;
+        config.setMemberCardScale(nan);
+        QCOMPARE(config.memberCardScale(), 1.0f);
+        config.setGuildIconScale(inf);
+        QCOMPARE(config.guildIconScale(), 1.0f);
+        config.setChannelScale(-inf);
+        QCOMPARE(config.channelScale(), 0.85f);
     }
 
     void persistenceRoundTrip()
@@ -67,12 +98,14 @@ private slots:
             config.setMemberCardScale(1.25f);
             config.setGuildIconScale(1.10f);
             config.setChannelScale(0.90f);
+            config.setNumberedUnread(false);
         }
         AppearanceConfig reloaded;
         QCOMPARE(reloaded.memberListMode(), MemberListMode::SlideOut);
         QCOMPARE(reloaded.memberCardScale(), 1.25f);
         QCOMPARE(reloaded.guildIconScale(), 1.10f);
         QCOMPARE(reloaded.channelScale(), 0.90f);
+        QCOMPARE(reloaded.numberedUnread(), false);
     }
 
     void signalsEmitted()

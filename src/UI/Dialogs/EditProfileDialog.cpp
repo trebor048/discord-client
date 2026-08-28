@@ -128,8 +128,6 @@ void EditProfileDialog::buildUi()
 
     connect(cancelBtn, &QPushButton::clicked, this, &QDialog::reject);
     connect(saveBtn, &QPushButton::clicked, this, &EditProfileDialog::onSaveClicked);
-
-    Acheron::Core::AnimationUtils::fadeIn(this, 180);
 }
 
 void EditProfileDialog::loadProfile()

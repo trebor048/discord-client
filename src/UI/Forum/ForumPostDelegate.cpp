@@ -96,11 +96,8 @@ void ForumPostDelegate::paint(QPainter *p, const QStyleOptionViewItem &option,
         QColor sel = option.palette.color(QPalette::Highlight);
         sel.setAlpha(60);
         p->fillRect(r, sel);
-    } else if (option.state & QStyle::State_MouseOver) {
-        QColor hover = textColor;
-        hover.setAlpha(14);
-        p->fillRect(r, hover);
     }
+    // Hover highlight is drawn by HoverAnimator's animated wash overlay.
 
     const int x = r.left() + kPadX;
 

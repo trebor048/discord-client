@@ -6,6 +6,8 @@
 #include "Core/PermissionManager.hpp"
 #include "Discord/Enums.hpp"
 
+#include <QTimer>
+
 namespace Acheron {
 namespace UI {
 
@@ -18,6 +20,64 @@ void ChannelFilterProxyModel::setSourceModel(QAbstractItemModel *sourceModel)
 {
     channelModel = qobject_cast<ChannelTreeModel *>(sourceModel);
     QSortFilterProxyModel::setSourceModel(sourceModel);
+
+    // QSortFilterProxyModel only re-sorts on dataChanged when the changed roles
+    // include its sortRole (default Qt::DisplayRole). lessThan() keys off
+    // PositionRole and LastMessageIdRole instead, so a DM bumping to the top or
+    // a channel reorder would leave the visible order stale after the first
+    // manual sort. Re-sort explicitly when those roles change.
+    if (sourceModel) {
+        connect(sourceModel, &QAbstractItemModel::dataChanged, this,
+                [this](const QModelIndex &topLeft, const QModelIndex &, const QVector<int> &roles) {
+                    // Per the QAbstractItemModel contract, topLeft may be invalid
+                    // ("everything changed"); nothing to gate on then.
+                    if (!topLeft.isValid())
+                        return;
+
+                    // Re-sorting the whole proxy is an O(n) filter pass + an
+                    // O(n log n) sort + a full view relayout. Only rows whose
+                    // ordering keys actually changed can move, so gate the
+                    // re-sort on the changed row's node type instead of firing
+                    // on every incoming message (which was causing a full
+                    // sidebar re-layout per guild/thread message).
+                    bool needsSort = false;
+                    const auto nodeType = static_cast<ChannelNode::Type>(
+                            topLeft.data(ChannelTreeModel::TypeRole).toInt());
+                    for (int role : roles) {
+                        if (role == ChannelTreeModel::PositionRole) {
+                            if (nodeType == ChannelNode::Type::Channel ||
+                                nodeType == ChannelNode::Type::Forum ||
+                                nodeType == ChannelNode::Type::VoiceChannel ||
+                                nodeType == ChannelNode::Type::Category) {
+                                needsSort = true;
+                                break;
+                            }
+                        }
+                        if (role == ChannelTreeModel::LastMessageIdRole) {
+                            if (nodeType == ChannelNode::Type::DMChannel) {
+                                needsSort = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!needsSort)
+                        return;
+
+                    // Defer out of the source model's signal emission: calling
+                    // sort() synchronously here triggers layoutAboutToBeChanged/
+                    // layoutChanged while the source model is still mid-emission
+                    // (re-entrant mutation), and it would double-sort after a
+                    // drag-reorder that also sorts explicitly. Coalescing also
+                    // collapses a burst of DM updates into one sort.
+                    if (resortPending_)
+                        return;
+                    resortPending_ = true;
+                    QTimer::singleShot(0, this, [this]() {
+                        resortPending_ = false;
+                        sort(0);
+                    });
+                });
+    }
 }
 
 QVariant ChannelFilterProxyModel::data(const QModelIndex &index, int role) const
@@ -143,12 +203,23 @@ bool ChannelFilterProxyModel::filterAcceptsRow(int sourceRow, const QModelIndex 
         }
     }
 
-    // hide voice channels under collapsed categories
+    // hide voice channels under collapsed categories, but keep the selected
+    // voice channel (and unread, unmuted ones) visible — consistent with the
+    // text-channel/forum branch above, so the active voice connection does not
+    // silently vanish when its category collapses.
     if (nodeType == ChannelNode::Type::VoiceChannel) {
         ChannelNode *parentNode = static_cast<ChannelNode *>(sourceParent.internalPointer());
         if (parentNode && parentNode->type == ChannelNode::Type::Category &&
-            sourceModel()->data(sourceParent, ChannelTreeModel::CollapsedRole).toBool())
-            return false;
+            sourceModel()->data(sourceParent, ChannelTreeModel::CollapsedRole).toBool()) {
+            Core::Snowflake channelId =
+                    Core::Snowflake(index.data(ChannelTreeModel::IdRole).toULongLong());
+            if (channelId == selectedChannelId && userId == selectedAccountId)
+                return true;
+            bool unread = index.data(ChannelTreeModel::IsUnreadRole).toBool();
+            bool muted = index.data(ChannelTreeModel::IsMutedRole).toBool();
+            if (!unread || muted)
+                return false;
+        }
     }
 
     if (nodeType == ChannelNode::Type::Channel || nodeType == ChannelNode::Type::VoiceChannel || nodeType == ChannelNode::Type::Forum) {

@@ -4,6 +4,8 @@
 #include <QLabel>
 #include <QToolButton>
 
+#include <cmath>
+
 namespace Acheron {
 namespace UI {
 
@@ -43,6 +45,10 @@ ScaleStepper::ScaleStepper(QWidget *parent)
 
 void ScaleStepper::setValue(float value)
 {
+    // qBound maps NaN to max_ (all comparisons false), which would jump the
+    // stepper to its upper bound; reject non-finite input instead.
+    if (std::isnan(value))
+        return;
     const float clamped = qBound(min_, value, max_);
     if (qFuzzyCompare(clamped, value_))
         return;
@@ -55,7 +61,14 @@ void ScaleStepper::setRange(float min, float max)
 {
     min_ = qMin(min, max);
     max_ = qMax(min, max);
-    setValue(value_);
+    const float clamped = qBound(min_, value_, max_);
+    if (!qFuzzyCompare(clamped, value_)) {
+        value_ = clamped;
+        emit valueChanged(value_);
+    }
+    // Always refresh: the +/- enabled state depends on min_/max_/step_ even
+    // when value_ happens to stay within the new range.
+    refresh();
 }
 
 void ScaleStepper::refresh()

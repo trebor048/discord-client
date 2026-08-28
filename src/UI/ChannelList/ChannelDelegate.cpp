@@ -5,7 +5,9 @@
 #include "ChannelFilterProxyModel.hpp"
 
 #include "Core/AnimationUtils.hpp"
+#include "Core/Animation/AnimationConfig.hpp"
 #include "Core/Appearance/AppearanceConfig.hpp"
+#include "Core/Theme/RoundedAvatar.hpp"
 
 namespace Acheron {
 namespace UI {
@@ -337,6 +339,37 @@ static void drawMentionBadge(QPainter *painter, const QStyleOptionViewItem &opti
     painter->drawText(badgeRect, Qt::AlignCenter, text);
 }
 
+/// Numbered unread badge: accent-colored by default, red when the channel has
+/// mentions, capped at 99+ so busy channels never overflow the row.
+static void drawUnreadBadge(QPainter *painter, const QStyleOptionViewItem &option, int count,
+                            bool hasMentions)
+{
+    const int badgeHeight = option.fontMetrics.height();
+    QString text = count > 99 ? QStringLiteral("99+") : QString::number(count);
+
+    QFont font = painter->font();
+    font.setWeight(QFont::Bold);
+    painter->setFont(font);
+
+    QFontMetrics fm(font);
+    const int padding = fm.height() / 2;
+    const int textWidth = fm.horizontalAdvance(text);
+    const int badgeWidth = qMax(badgeHeight, textWidth + padding);
+
+    QRect badgeRect(option.rect.right() - badgeWidth - 4,
+                    option.rect.top() + (option.rect.height() - badgeHeight) / 2,
+                    badgeWidth, badgeHeight);
+
+    const QColor bg = hasMentions ? QColor(0xED, 0x42, 0x45)  // danger red
+                                  : option.palette.highlight().color();
+    painter->setBrush(bg);
+    painter->setPen(Qt::NoPen);
+    painter->drawRoundedRect(badgeRect, badgeHeight / 2.0, badgeHeight / 2.0);
+
+    painter->setPen(Qt::white);
+    painter->drawText(badgeRect, Qt::AlignCenter, text);
+}
+
 void ChannelDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
                             const QModelIndex &index) const
 {
@@ -355,8 +388,12 @@ void ChannelDelegate::paint(QPainter *painter, const QStyleOptionViewItem &optio
 
     painter->fillRect(option.rect, option.palette.base());
 
-    // hover highlight
-    if (option.state & QStyle::State_MouseOver) {
+    // Hover highlight is drawn by HoverAnimator's animated wash overlay, so we
+    // deliberately do not paint a static MouseOver fill here (it would snap in
+    // instead of fading and double up with the wash).
+    // Exception: with reduce-motion on, HoverAnimator skips washes entirely, so
+    // restore the static fill to keep hover feedback for those users.
+    if ((option.state & QStyle::State_MouseOver) && Core::AnimationConfig::instance().reduceMotion()) {
         QColor hoverBg = option.palette.highlight().color();
         hoverBg.setAlpha(16);
         painter->fillRect(option.rect, hoverBg);
@@ -365,8 +402,8 @@ void ChannelDelegate::paint(QPainter *painter, const QStyleOptionViewItem &optio
     const float s = Core::Appearance::AppearanceConfig::instance().channelScale();
     constexpr int iconSizeBase = 24;
     constexpr int pillMarginBase = 6;
-    const int iconSize = Core::Appearance::AppearanceConfig::scaledInt(iconSizeBase, s);
-    const int pillMargin = Core::Appearance::AppearanceConfig::scaledInt(pillMarginBase, s);
+    const int iconSize = Core::Appearance::AppearanceConfig::channelScaledInt(iconSizeBase, s);
+    const int pillMargin = Core::Appearance::AppearanceConfig::channelScaledInt(pillMarginBase, s);
 
     // content rect is shifted right to leave room for the unread pill
     QStyleOptionViewItem contentOpt = option;
@@ -382,13 +419,13 @@ void ChannelDelegate::paint(QPainter *painter, const QStyleOptionViewItem &optio
     }
 
     if (node->type == ChannelNode::Type::VoiceParticipant) {
-        const int avatarSize = Core::Appearance::AppearanceConfig::scaledInt(16, s);
-        const int participantIndent = Core::Appearance::AppearanceConfig::scaledInt(24, s);
+        const int avatarSize = Core::Appearance::AppearanceConfig::channelScaledInt(16, s);
+        const int participantIndent = Core::Appearance::AppearanceConfig::channelScaledInt(24, s);
         int avatarX = contentOpt.rect.left() + participantIndent;
         int avatarY = contentOpt.rect.top() + (contentOpt.rect.height() - avatarSize) / 2;
         QRect avatarRect(avatarX, avatarY, avatarSize, avatarSize);
 
-        constexpr qreal avatarRadius = 3.0;
+        const qreal avatarRadius = Core::Theme::avatarRadius(avatarSize);
         QPixmap avatar = qvariant_cast<QPixmap>(index.data(Qt::DecorationRole));
         if (!avatar.isNull()) {
             painter->save();
@@ -409,7 +446,7 @@ void ChannelDelegate::paint(QPainter *painter, const QStyleOptionViewItem &optio
 
         bool muted = index.data(ChannelTreeModel::IsVoiceMutedRole).toBool();
         bool deafened = index.data(ChannelTreeModel::IsVoiceDeafenedRole).toBool();
-        const int statusIconSize = Core::Appearance::AppearanceConfig::scaledInt(14, s);
+        const int statusIconSize = Core::Appearance::AppearanceConfig::channelScaledInt(14, s);
         int iconCount = (muted ? 1 : 0) + (deafened ? 1 : 0);
         int rightReserve = iconCount > 0 ? (iconCount * (statusIconSize + 4) + 4) : 4;
 
@@ -515,14 +552,27 @@ void ChannelDelegate::paint(QPainter *painter, const QStyleOptionViewItem &optio
                     ? ChannelDelegate::tr("%1 New").arg(node->forumBadgeCount)
                     : QString::number(node->forumBadgeCount);
 
+    // Numbered unread/mention badge (accent; red when mentions exist). The
+    // mention count wins the slot, matching the "red when mention" rule.
+    const bool numberedUnread =
+            Core::Appearance::AppearanceConfig::instance().numberedUnread();
+    const int badgeCount = node->mentionCount > 0 ? node->mentionCount : node->unreadCount;
+    const bool showUnreadBadge = numberedUnread && !node->isMuted &&
+                                 (node->mentionCount > 0 ||
+                                  (node->unreadCount > 0 && node->opensChat()));
+
     // reserve right-side space for voice limit badge
     int rightReserve = iconSize;
     if (node->type == ChannelNode::Type::VoiceChannel && node->userLimit > 0) {
         QString countText = QStringLiteral("%1/%2").arg(node->voiceParticipantCount).arg(node->userLimit);
         QFontMetrics fm(painter->font());
         rightReserve = fm.horizontalAdvance(countText) + fm.height() / 2 + 8;
-    } else if (showForumBadge) {
+    } else if (showForumBadge && !showUnreadBadge) {
         rightReserve = painter->fontMetrics().horizontalAdvance(forumBadgeText) + 12;
+    } else if (showUnreadBadge) {
+        QFontMetrics fm(painter->font());
+        const QString text = badgeCount > 99 ? QStringLiteral("99+") : QString::number(badgeCount);
+        rightReserve = qMax(fm.height(), fm.horizontalAdvance(text) + fm.height() / 2) + 4;
     }
 
     QRect textRect = contentOpt.rect.adjusted(iconSize, 0, -rightReserve, 0);
@@ -535,8 +585,10 @@ void ChannelDelegate::paint(QPainter *painter, const QStyleOptionViewItem &optio
     if (node->type == ChannelNode::Type::Category)
         drawBranchIndicator(painter, contentOpt, !node->collapsed);
 
-    // unread pill for channels and servers (draws in the left margin)
-    if ((node->opensChat() || node->type == ChannelNode::Type::Server) && node->isUnread &&
+    // unread pill for channels and servers (draws in the left margin); the
+    // numbered badge replaces it for channels in numbered mode.
+    if (!(numberedUnread && showUnreadBadge) &&
+        (node->opensChat() || node->type == ChannelNode::Type::Server) && node->isUnread &&
         !node->isMuted)
         drawUnreadPill(painter, option);
 
@@ -562,7 +614,7 @@ void ChannelDelegate::paint(QPainter *painter, const QStyleOptionViewItem &optio
         painter->drawText(badgeRect, Qt::AlignCenter, countText);
     }
 
-    if (showForumBadge && node->mentionCount == 0) {
+    if (showForumBadge && node->mentionCount == 0 && !showUnreadBadge) {
         QFontMetrics fm(painter->font());
         QRect badgeRect(contentOpt.rect.right() - fm.horizontalAdvance(forumBadgeText) - 4,
                         contentOpt.rect.top(),
@@ -572,9 +624,14 @@ void ChannelDelegate::paint(QPainter *painter, const QStyleOptionViewItem &optio
         painter->drawText(badgeRect, Qt::AlignRight | Qt::AlignVCenter, forumBadgeText);
     }
 
-    // mention badge for channels, servers
-    if (node->type != ChannelNode::Type::Category && node->type != ChannelNode::Type::DMHeader && node->mentionCount > 0)
+    // numbered unread badge (accent; red when mentions exist), or the plain
+    // mention badge when numbered mode is off.
+    if (showUnreadBadge) {
+        drawUnreadBadge(painter, contentOpt, badgeCount, node->mentionCount > 0);
+    } else if (node->type != ChannelNode::Type::Category &&
+               node->type != ChannelNode::Type::DMHeader && node->mentionCount > 0) {
         drawMentionBadge(painter, contentOpt, node->mentionCount);
+    }
 
     painter->restore();
 }
@@ -586,8 +643,8 @@ QSize ChannelDelegate::sizeHint(const QStyleOptionViewItem &option, const QModel
     // channel-scale setting so rows stay readable and proportionally spaced.
     QFontMetrics fm(option.font);
     const float s = Core::Appearance::AppearanceConfig::instance().channelScale();
-    const int h = qMax(Core::Appearance::AppearanceConfig::scaledInt(30, s),
-                       Core::Appearance::AppearanceConfig::scaledInt(fm.height() + 12, s));
+    const int h = qMax(Core::Appearance::AppearanceConfig::channelScaledInt(30, s),
+                       Core::Appearance::AppearanceConfig::channelScaledInt(fm.height() + 12, s));
     return QSize(sz.width(), h);
 }
 } // namespace UI

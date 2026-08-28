@@ -47,8 +47,11 @@ void ConnectionBanner::paintEvent(QPaintEvent *event)
 
 void ConnectionBanner::showReconnecting(int attempt, int maxAttempts)
 {
+    Q_UNUSED(maxAttempts);
+    // The gateway retries indefinitely with capped backoff (Discord's
+    // documented behavior), so there is no hard max to display.
     if (attempt > 0)
-        baseText = QString("Reconnecting (attempt %1/%2)").arg(attempt).arg(maxAttempts);
+        baseText = QString("Reconnecting (attempt %1)").arg(attempt);
     else
         baseText = "Reconnecting";
 

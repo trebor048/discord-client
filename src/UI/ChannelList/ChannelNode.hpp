@@ -33,6 +33,7 @@ struct ChannelNode
     int position = 0;
     bool isUnread = false;
     int mentionCount = 0; // what this row shows
+    int unreadCount = 0; // messages missed since last viewed (what this row shows)
     int subtreeMentionCount = 0; // what gets handed above
     bool selfUnread = false;
     int selfMentionCount = 0;

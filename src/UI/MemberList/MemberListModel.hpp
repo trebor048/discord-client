@@ -53,6 +53,7 @@ public:
 private:
     void onListAboutToReset();
     void onListReset();
+    void onListRowsChanged(const QList<int> &rows);
     void onImageFetched(const QUrl &url, const QSize &size, const QPixmap &pixmap);
 
     void connectManager();

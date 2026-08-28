@@ -41,6 +41,7 @@ private:
 
     QPointer<Core::ClientInstance> m_instance;
     Core::ImageManager *m_images = nullptr;
+    bool avatarFetchWired_ = false;
 
     QLabel *avatarLabel = nullptr;
     QLabel *nameLabel = nullptr;

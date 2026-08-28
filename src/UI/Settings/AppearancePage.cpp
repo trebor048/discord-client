@@ -124,6 +124,9 @@ AppearancePage::AppearancePage(QWidget *parent)
     auto *compactInputToggle = new QCheckBox(tr("Compact input bar"), messageGroup);
     compactInputToggle->setChecked(QSettings().value("ui/compactInput", false).toBool());
     messageLayout->addWidget(compactInputToggle);
+    auto *numberedUnreadToggle = new QCheckBox(tr("Numbered unread badges"), messageGroup);
+    numberedUnreadToggle->setChecked(Core::Appearance::AppearanceConfig::instance().numberedUnread());
+    messageLayout->addWidget(numberedUnreadToggle);
     messageLayout->addStretch(1);
     outer->addWidget(messageGroup);
 
@@ -209,9 +212,12 @@ AppearancePage::AppearancePage(QWidget *parent)
     addScaleRow(tr("Guild icons:"),
                 Core::Appearance::AppearanceConfig::instance().guildIconScale(),
                 [](float v) { Core::Appearance::AppearanceConfig::instance().setGuildIconScale(v); });
-    addScaleRow(tr("Channel list:"),
-                Core::Appearance::AppearanceConfig::instance().channelScale(),
-                [](float v) { Core::Appearance::AppearanceConfig::instance().setChannelScale(v); });
+    auto *channelStepper = addScaleRow(tr("Channel list:"),
+                                       Core::Appearance::AppearanceConfig::instance().channelScale(),
+                                       [](float v) { Core::Appearance::AppearanceConfig::instance().setChannelScale(v); });
+    // The channel list scales over a much wider range than member/guild icons.
+    channelStepper->setRange(Core::Appearance::AppearanceConfig::kChannelMinScale,
+                             Core::Appearance::AppearanceConfig::kChannelMaxScale);
 
     outer->addWidget(scalingGroup);
 
@@ -234,6 +240,9 @@ AppearancePage::AppearancePage(QWidget *parent)
     connect(compactInputToggle, &QCheckBox::toggled, this, [this](bool compact) {
         QSettings().setValue("ui/compactInput", compact);
         emit compactInputChanged(compact);
+    });
+    connect(numberedUnreadToggle, &QCheckBox::toggled, this, [](bool on) {
+        Core::Appearance::AppearanceConfig::instance().setNumberedUnread(on);
     });
 
     connect(seedSwatch, &QPushButton::clicked, this, [this]() {

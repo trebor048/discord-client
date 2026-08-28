@@ -30,6 +30,7 @@
 #include <QNetworkRequest>
 #include <QPixmap>
 #include <QPropertyAnimation>
+#include <QParallelAnimationGroup>
 #include <QScreen>
 #include <QSplitter>
 #include <QTextBlock>
@@ -155,6 +156,7 @@ ChatTextEdit::ChatTextEdit(QWidget *parent) : QTextEdit(parent)
     // Set up font with Noto Color Emoji / Twemoji COLR fallback for
     // unicode emoji rendering on systems that lack a native color emoji font.
     QFont baseFont = font();
+    baseFont.setPointSize(qMax(1, baseFont.pointSize() + 1));
     QStringList families = baseFont.families();
     families << QStringLiteral("Twemoji COLR")
              << QStringLiteral("Noto Color Emoji")
@@ -226,7 +228,9 @@ void ChatTextEdit::insertFromMimeData(const QMimeData *source)
 MessageInput::MessageInput(QWidget *parent) : QWidget(parent)
 {
     auto *outerLayout = new QVBoxLayout(this);
-    outerLayout->setContentsMargins(4, 0, 4, 0);
+    // Flush, edge-to-edge bottom block: the input bar owns the full bottom
+    // width and the internal #MessageInput box carries the visual padding.
+    outerLayout->setContentsMargins(0, 0, 0, 0);
     outerLayout->setSpacing(0);
 
     // Reply bar
@@ -1715,12 +1719,25 @@ void MessageInput::renderMarkdownPreview()
     markdownPreview->setHtml(markdownPreviewHtml(sanitizeHtml(rawHtml)));
 }
 
+int MessageInput::collapsedContentHeight() const
+{
+    const int splitterHeight = previewSplitter->height();
+    int h = splitterHeight + markdownPreviewToggle->parentWidget()->sizeHint().height() + 8;
+    if (replyBar->isVisible())
+        h += replyBar->sizeHint().height();
+    if (attachmentPanel->isVisible())
+        h += attachmentPanel->sizeHint().height();
+    return h;
+}
+
 void MessageInput::adjustHeight()
 {
     int contentHeight = textEdit->document()->size().height();
 
-    const int vPadding = compactMode ? 10 : 20;
-    const int minHeight = compactMode ? 30 : 44;
+    // Compact keeps its slim profile; the default bar is taller and uses
+    // tighter padding so the field grows while the total block stays compact.
+    const int vPadding = compactMode ? 10 : 14;
+    const int minHeight = compactMode ? 30 : 52;
     int newHeight = contentHeight + vPadding;
 
     if (newHeight < minHeight)
@@ -1739,13 +1756,64 @@ void MessageInput::adjustHeight()
     if (markdownPreviewVisible)
         previewSplitter->setSizes({markdownPreviewHeight, newHeight});
 
-    int totalHeight = splitterHeight + markdownPreviewToggle->parentWidget()->sizeHint().height() + 12;
-    if (replyBar->isVisible())
-        totalHeight += replyBar->sizeHint().height();
-    if (attachmentPanel->isVisible())
-        totalHeight += attachmentPanel->sizeHint().height();
+    // The block's height is a minimum (collapsed) plus a maximum that grows
+    // with the status strip, so the strip can slide open without snapping
+    // the rest of the input around.
+    const int collapsed = collapsedContentHeight();
+    setMinimumHeight(collapsed);
+    if (!stripAnimGroup_)
+        setMaximumHeight(collapsed + (statusStrip_ ? statusStrip_->maximumHeight() : 0));
+}
 
-    setFixedHeight(totalHeight);
+void MessageInput::setStatusStrip(QWidget *strip)
+{
+    if (!strip || strip == statusStrip_)
+        return;
+    statusStrip_ = strip;
+    strip->setParent(this);
+    // Start collapsed: the strip slides out only while typing/slowmode is
+    // active, so an idle input bar consumes no extra height.
+    strip->setMaximumHeight(0);
+    static_cast<QVBoxLayout *>(layout())->insertWidget(0, strip);
+    adjustHeight();
+}
+
+void MessageInput::setStatusStripActive(bool active)
+{
+    if (!statusStrip_)
+        return;
+    const int natural = statusStrip_->sizeHint().height();
+    const int stripTarget = active ? natural : 0;
+    const int blockTarget = collapsedContentHeight() + stripTarget;
+
+    if (stripAnimGroup_) {
+        stripAnimGroup_->stop();
+        stripAnimGroup_->deleteLater();
+        stripAnimGroup_ = nullptr;
+    }
+
+    auto *group = new QParallelAnimationGroup(this);
+    auto *stripAnim = new QPropertyAnimation(statusStrip_, "maximumHeight", group);
+    stripAnim->setDuration(Core::AnimationUtils::duration(160));
+    stripAnim->setStartValue(statusStrip_->maximumHeight());
+    stripAnim->setEndValue(stripTarget);
+    stripAnim->setEasingCurve(QEasingCurve::OutCubic);
+    group->addAnimation(stripAnim);
+
+    auto *blockAnim = new QPropertyAnimation(this, "maximumHeight", group);
+    blockAnim->setDuration(Core::AnimationUtils::duration(160));
+    blockAnim->setStartValue(maximumHeight());
+    blockAnim->setEndValue(blockTarget);
+    blockAnim->setEasingCurve(QEasingCurve::OutCubic);
+    group->addAnimation(blockAnim);
+
+    stripAnimGroup_ = group;
+    connect(group, &QParallelAnimationGroup::finished, this, [this, group]() {
+        if (stripAnimGroup_ == group)
+            stripAnimGroup_ = nullptr;
+        group->deleteLater();
+    });
+    group->start();
 }
 
 void MessageInput::insertEmojiInline(const Core::EmojiCatalogItem &item)

@@ -7,6 +7,8 @@
 #include <QScrollBar>
 #include <QToolButton>
 
+#include <new>
+
 namespace Acheron {
 namespace UI {
 
@@ -16,12 +18,19 @@ constexpr int kHeaderGap = 6;
 constexpr int kSectionGap = 10;
 constexpr int kRecycleBufferPx = 200;
 // Viewport height the initial recycled-button pool covers. Taller windows
-// grow the pool on demand via ensureButtonPoolSize().
-constexpr int kMaxViewportHeight = 1200;
+// grow the pool on demand via ensureButtonPoolSize(). The picker dialog's
+// minimum height is 520px, so a 640px budget already covers the whole dialog
+// with recycle buffer; sizing the pool for a 1200px viewport upfront would
+// allocate ~408 QToolButtons per grid at construction, and two grids (the
+// picker owns both a category grid and a server grid) make that ~816 widgets
+// — by far the largest single allocation burst in the app. Under low-memory
+// conditions that burst is what trips the crash, so the pool starts small and
+// grows on demand instead.
+constexpr int kMaxViewportHeight = 640;
 constexpr int kButtonPoolSize =
         ((kMaxViewportHeight + 2 * kRecycleBufferPx)
          / (EmojiGridMetrics::kCellSize + kCellSpacing) + 1)
-        * EmojiGridMetrics::kColumns; // 34 rows x 12 columns
+        * EmojiGridMetrics::kColumns; // 22 rows x 12 columns
 constexpr int kHeaderPoolSize = 32;
 } // namespace
 
@@ -85,9 +94,17 @@ void VirtualEmojiGrid::ensureButtonPoolSize(int viewportHeight)
     // windows need more buttons or visible cells render as blank holes.
     const int cellPitch = EmojiGridMetrics::kCellSize + kCellSpacing;
     const int needed =
-            ((viewportHeight + 2 * kRecycleBufferPx) / cellPitch + 1) * EmojiGridMetrics::kColumns;
-    while (m_buttons.size() < needed)
-        m_buttons.append(createPoolButton());
+            ((viewportHeight + 2 * kRecycleBufferPx) / cellPitch + 1) * m_columns;
+    while (m_buttons.size() < needed) {
+        try {
+            m_buttons.append(createPoolButton());
+        } catch (const std::bad_alloc &) {
+            // Out of memory: stop growing the pool. Visible cells beyond the
+            // pool simply don't render (blank) instead of terminating the
+            // whole app; the user can resize/scroll to repopulate.
+            break;
+        }
+    }
 }
 
 void VirtualEmojiGrid::attachScrollArea(QScrollArea *area)
@@ -149,7 +166,7 @@ void VirtualEmojiGrid::clearSelection()
 void VirtualEmojiGrid::scrollToSection(const QString &key)
 {
     const int index = m_sectionIndexByKey.value(key, -1);
-    if (index < 0 || !m_scrollArea)
+    if (index < 0 || index >= m_sectionTopY.size() || !m_scrollArea)
         return;
     m_scrollArea->verticalScrollBar()->setValue(qMax(0, m_sectionTopY[index]));
 }
@@ -157,7 +174,8 @@ void VirtualEmojiGrid::scrollToSection(const QString &key)
 QString VirtualEmojiGrid::sectionKeyAtTop(int scrollY) const
 {
     QString key;
-    for (int i = 0; i < m_sections.size(); ++i) {
+    const int n = qMin(m_sections.size(), m_sectionTopY.size());
+    for (int i = 0; i < n; ++i) {
         if (m_sectionTopY[i] <= scrollY)
             key = m_sections[i].key;
         else
@@ -194,10 +212,17 @@ void VirtualEmojiGrid::rebuildLayoutModel()
     m_sectionTopY.clear();
     m_sectionIndexByKey.clear();
 
-    const int count = m_sections.size();
+    int count = m_sections.size();
     m_sectionTopY.resize(count);
 
-    const int columns = EmojiGridMetrics::kColumns;
+    // If the resize failed to allocate (out of memory), Qt leaves the vector
+    // empty; indexing it below would write through a null pointer. Degrade to
+    // an empty layout instead of crashing — the grid simply shows nothing
+    // until the next relayout.
+    if (m_sectionTopY.size() != count)
+        count = 0;
+
+    const int columns = m_columns;
     const int cellPitch = EmojiGridMetrics::kCellSize + kCellSpacing;
 
     int cursor = 0;
@@ -221,6 +246,18 @@ void VirtualEmojiGrid::relayout()
 
     const int viewportWidth = qMax(1, m_scrollArea->viewport()->width());
     const int viewportHeight = m_scrollArea->viewport()->height();
+
+    // Responsive columns: fit as many cells as the viewport width allows so
+    // the grid fills the window horizontally. Changing the column count
+    // changes how many rows each section takes, so the layout model (section
+    // offsets, total height) must be rebuilt to stay in sync.
+    const int cellPitch = EmojiGridMetrics::kCellSize + kCellSpacing;
+    const int newColumns = qMax(1, viewportWidth / cellPitch);
+    if (newColumns != m_columns) {
+        m_columns = newColumns;
+        rebuildLayoutModel();
+    }
+
     ensureButtonPoolSize(viewportHeight);
     const QSize target(viewportWidth, qMax(m_totalHeight, viewportHeight));
     if (size() != target)
@@ -234,14 +271,18 @@ void VirtualEmojiGrid::relayout()
     m_buttonValue.clear();
     m_buttonItem.clear();
 
-    const int columns = EmojiGridMetrics::kColumns;
-    const int cellPitch = EmojiGridMetrics::kCellSize + kCellSpacing;
+    const int columns = m_columns;
 
     int buttonIndex = 0;
     int headerIndex = 0;
 
     for (int sectionIndex = 0; sectionIndex < m_sections.size(); ++sectionIndex) {
         const EmojiGridSection &section = m_sections.at(sectionIndex);
+        // If the layout model failed to allocate (OOM degraded it to empty),
+        // m_sectionTopY is out of sync with m_sections — skip sections instead
+        // of indexing out of bounds.
+        if (sectionIndex >= m_sectionTopY.size())
+            continue;
         const int headerY = m_sectionTopY[sectionIndex];
         const int rows = (section.items.size() + columns - 1) / columns;
         const int sectionBottom = headerY + m_headerHeight + kHeaderGap + rows * cellPitch;
@@ -295,11 +336,13 @@ void VirtualEmojiGrid::relayout()
 
 int VirtualEmojiGrid::cellTopY(const QString &value) const
 {
-    const int columns = EmojiGridMetrics::kColumns;
+    const int columns = m_columns;
     const int cellPitch = EmojiGridMetrics::kCellSize + kCellSpacing;
 
     for (int sectionIndex = 0; sectionIndex < m_sections.size(); ++sectionIndex) {
         const EmojiGridSection &section = m_sections.at(sectionIndex);
+        if (sectionIndex >= m_sectionTopY.size())
+            continue;
         for (int i = 0; i < section.items.size(); ++i) {
             if (section.items.at(i).selectionValue() == value) {
                 const int row = i / columns;

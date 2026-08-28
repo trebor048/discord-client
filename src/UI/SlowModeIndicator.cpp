@@ -53,6 +53,12 @@ bool SlowModeIndicator::isOnCooldown(Core::Snowflake channelId) const
 
 void SlowModeIndicator::updateDisplay()
 {
+    const bool relevant = activeRateLimit > 0;
+    if (relevant != activityActive_) {
+        activityActive_ = relevant;
+        emit activityChanged(relevant);
+    }
+
     if (activeRateLimit <= 0) {
         if (label->isVisible())
             Core::AnimationUtils::fadeOut(label, 120);
@@ -83,8 +89,6 @@ void SlowModeIndicator::updateDisplay()
                 label->setVisible(true);
                 Core::AnimationUtils::fadeIn(label, 150);
             }
-            // Pop-in animation on the label when the countdown ticks
-            Core::AnimationUtils::popIn(label, 120);
             if (!countdownTimer->isActive())
                 countdownTimer->start();
             return;

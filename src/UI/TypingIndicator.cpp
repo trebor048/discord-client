@@ -114,6 +114,10 @@ void TypingIndicator::paintEvent(QPaintEvent *)
 void TypingIndicator::setTypers(const QList<Core::TyperInfo> &typers)
 {
     if (typers.isEmpty()) {
+        if (activityActive_) {
+            activityActive_ = false;
+            emit activityChanged(false);
+        }
         if (!label->isVisible() && opacityEffect->opacity() <= 0.0) {
             dotTimer->stop();
             dotBounceTimer->stop();
@@ -133,6 +137,11 @@ void TypingIndicator::setTypers(const QList<Core::TyperInfo> &typers)
         dotBounceTimer->stop();
         update();
         return;
+    }
+
+    if (!activityActive_) {
+        activityActive_ = true;
+        emit activityChanged(true);
     }
 
     if (!isAnimatingVisible || opacityEffect->opacity() < 1.0) {

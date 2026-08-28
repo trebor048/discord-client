@@ -63,7 +63,8 @@ public:
     QList<TabEntry> tabEntries() const;
     void restoreTabs(const QList<TabEntry> &entries, int activeIndex);
 
-    void updateChannelReadState(Core::Snowflake channelId, bool unread, int mentionCount);
+    void updateChannelReadState(Core::Snowflake channelId, bool unread, int mentionCount,
+                                int unreadCount);
 
     void setTabPinned(int index, bool pinned);
     bool isTabPinned(int index) const;
@@ -121,6 +122,7 @@ private:
     {
         bool unread = false;
         int mentionCount = 0;
+        int unreadCount = 0;
     };
 
     Core::ImageManager *imageManager;
@@ -160,6 +162,11 @@ private:
     constexpr static int BadgeMinWidth = 16;
     constexpr static int BadgePadding = 5;
     constexpr static int ClosedTabHistoryLimit = 20;
+
+    /// Badge text with the 99+ cap shared by the tab badge paths.
+    static QString capBadgeText(int count);
+    /// Width of a badge given its text (min width honored).
+    static int badgeWidth(const QFontMetrics &fm, const QString &text);
 };
 
 } // namespace UI

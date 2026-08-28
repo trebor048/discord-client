@@ -196,6 +196,17 @@ void MemberListModel::onListReset()
     endResetModel();
 }
 
+void MemberListModel::onListRowsChanged(const QList<int> &rows)
+{
+    if (!manager)
+        return;
+    const int total = manager->totalItemCount();
+    for (int row : rows) {
+        if (row >= 0 && row < total)
+            emit dataChanged(index(row, 0), index(row, 0));
+    }
+}
+
 void MemberListModel::onImageFetched(const QUrl &url, const QSize &size, const QPixmap &pixmap)
 {
     Q_UNUSED(size);
@@ -220,6 +231,8 @@ void MemberListModel::connectManager()
             this, &MemberListModel::onListAboutToReset);
     connect(manager, &Core::MemberListManager::listReset,
             this, &MemberListModel::onListReset);
+    connect(manager, &Core::MemberListManager::listRowsChanged,
+            this, &MemberListModel::onListRowsChanged);
 }
 
 void MemberListModel::disconnectManager()

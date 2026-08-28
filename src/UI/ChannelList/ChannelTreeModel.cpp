@@ -203,6 +203,8 @@ QVariant ChannelTreeModel::data(const QModelIndex &index, int role) const
         return node->countsForGuildUnread;
     if (role == MentionCountRole)
         return node->mentionCount;
+    if (role == UnreadCountRole)
+        return node->unreadCount;
     if (role == IsMutedRole)
         return node->isMuted;
     if (role == CollapsedRole)
@@ -214,10 +216,6 @@ QVariant ChannelTreeModel::data(const QModelIndex &index, int role) const
     if (role == IconHashRole)
         return node->iconHash;
     if (role == FolderColorRole) {
-        QVariant saved = QSettings().value(
-            QStringLiteral("folderColors/%1").arg(static_cast<qulonglong>(node->id)));
-        if (saved.isValid())
-            return saved.value<quint64>();
         if (node->folderColor.has_value())
             return static_cast<quint64>(node->folderColor.value());
         return {};
@@ -894,9 +892,15 @@ std::unique_ptr<ChannelNode> ChannelTreeModel::createFolderNode(const Proto::Gui
     folderNode->type = ChannelNode::Type::Folder;
     folderNode->name = folder.name.value_or("Unnamed Folder");
     folderNode->folderName = folder.name;
+    folderNode->id = Core::Snowflake(folder.id.value());
     if (folder.color != Discord::BLURPLE)
         folderNode->folderColor = folder.color;
-    folderNode->id = Core::Snowflake(folder.id.value());
+    // Restore a user-persisted color override (set via setFolderColor) once at
+    // node creation instead of re-reading QSettings on every data() paint.
+    const QVariant saved = QSettings().value(
+            QStringLiteral("folderColors/%1").arg(static_cast<qulonglong>(folderNode->id)));
+    if (saved.isValid())
+        folderNode->folderColor = saved.value<quint64>();
     return folderNode;
 }
 
@@ -1565,6 +1569,7 @@ static Core::ChannelReadState forumPostReadState(Core::ReadStateManager *readSta
     Core::ChannelReadState state;
     state.isUnread = readState->isForumPostUnread(node->id, node->lastMessageId, false);
     state.mentionCount = readState->getMentionCount(node->id);
+    state.unreadCount = readState->unreadMessageCount(node->id);
     state.isMuted = readState->isChannelMuted(node->id);
     bool guildMuted = guildId.isValid() && readState->isGuildMuted(guildId);
     state.countsForGuildUnread = state.mentionCount > 0 || (state.isUnread && !state.isMuted && !guildMuted);
@@ -1591,7 +1596,8 @@ bool ChannelTreeModel::refreshForumNode(ChannelNode *forumNode, Core::ClientInst
 
 ChannelTreeModel::ReadStateSnapshot ChannelTreeModel::readStateSnapshot(const ChannelNode *node)
 {
-    return { node->isUnread, node->isMuted, node->countsForGuildUnread, node->mentionCount, node->subtreeMentionCount };
+    return { node->isUnread, node->isMuted, node->countsForGuildUnread, node->mentionCount,
+             node->subtreeMentionCount, node->unreadCount };
 }
 
 bool ChannelTreeModel::notifyIfReadStateChanged(ChannelNode *node, const ReadStateSnapshot &before)
@@ -1599,22 +1605,28 @@ bool ChannelTreeModel::notifyIfReadStateChanged(ChannelNode *node, const ReadSta
     if (before.isUnread == node->isUnread && before.isMuted == node->isMuted &&
         before.countsForGuildUnread == node->countsForGuildUnread &&
         before.mentionCount == node->mentionCount &&
-        before.subtreeMentionCount == node->subtreeMentionCount)
+        before.subtreeMentionCount == node->subtreeMentionCount &&
+        before.unreadCount == node->unreadCount)
         return false;
 
     QModelIndex idx = indexForNode(node);
     if (idx.isValid())
-        emit dataChanged(idx, idx, { IsUnreadRole, MentionCountRole, IsMutedRole });
+        emit dataChanged(idx, idx, { IsUnreadRole, MentionCountRole, UnreadCountRole, IsMutedRole });
     return true;
 }
 
-void ChannelTreeModel::updateReadState(Snowflake channelId, Snowflake accountId)
+void ChannelTreeModel::updateReadState(Snowflake channelId, Snowflake accountId,
+                                       ChannelNode *resolvedNode)
 {
     ChannelNode *accNode = accountNodes.value(accountId, nullptr);
     if (!accNode)
         return;
 
-    ChannelNode *channelNode = findChannelTreeNode(channelId, accNode);
+    // Callers that already located the node (e.g. updateChannelLastMessageId,
+    // the per-message hot path) pass it in to skip a second O(n) search.
+    ChannelNode *channelNode = resolvedNode;
+    if (!channelNode)
+        channelNode = findChannelTreeNode(channelId, accNode);
     if (!channelNode)
         return;
 
@@ -1792,6 +1804,7 @@ void ChannelTreeModel::applyChannelReadState(ChannelNode *node, const Core::Chan
 
     node->isUnread = state.isUnread;
     node->mentionCount = state.mentionCount;
+    node->unreadCount = state.unreadCount;
     node->subtreeMentionCount = state.mentionCount;
     node->countsForGuildUnread = state.countsForGuildUnread;
 }
@@ -1811,6 +1824,7 @@ Core::ChannelReadState ChannelTreeModel::computeNodeReadState(ChannelNode *node,
             if (parentMuted) {
                 state.isMuted = true;
                 state.countsForGuildUnread = false;
+                state.unreadCount = 0;
             }
         }
         return state;
@@ -1994,7 +2008,13 @@ void ChannelTreeModel::updateChannelLastMessageId(Snowflake channelId, Snowflake
         return;
 
     channelNode->lastMessageId = messageId;
-    updateReadState(channelId, accountId);
+
+    QModelIndex idx = indexForNode(channelNode);
+    if (idx.isValid())
+        emit dataChanged(idx, idx, { LastMessageIdRole });
+
+    // Reuse the already-located node: updateReadState's own search is skipped.
+    updateReadState(channelId, accountId, channelNode);
 }
 
 void ChannelTreeModel::updateVoiceCount(Snowflake channelId, int count, Snowflake accountId)

@@ -256,7 +256,7 @@ ChatView::ChatView(QWidget *parent) : QListView(parent), hoveredRow(-1), hovered
     setSelectionMode(QAbstractItemView::NoSelection);
     setUniformItemSizes(false);
     setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
-    verticalScrollBar()->setSingleStep(10);
+    verticalScrollBar()->setSingleStep(40);
     setAutoScroll(false);
     setFocusPolicy(Qt::StrongFocus);
     setAcceptDrops(true);
@@ -325,7 +325,7 @@ ChatView::ChatView(QWidget *parent) : QListView(parent), hoveredRow(-1), hovered
     jumpToBottomAnimation->setEasingCurve(QEasingCurve::InOutQuad);
 
     scrollAnimation = new QPropertyAnimation(verticalScrollBar(), "value", this);
-    scrollAnimation->setDuration(Core::AnimationConfig::instance().scaled(180));
+    scrollAnimation->setDuration(Core::AnimationConfig::instance().scaled(140));
     scrollAnimation->setEasingCurve(QEasingCurve::OutCubic);
 
     // Empty/loading placeholder, centered over the viewport. Shown while a
@@ -338,16 +338,22 @@ ChatView::ChatView(QWidget *parent) : QListView(parent), hoveredRow(-1), hovered
 
     jumpToBottomButton->hide();
     connect(jumpToBottomButton, &QPushButton::clicked, this, [this]() {
-        if (scrollAnimation && verticalScrollBar()) {
-            scrollAnimation->stop();
-            scrollAnimation->setStartValue(verticalScrollBar()->value());
-            scrollAnimation->setEndValue(verticalScrollBar()->maximum());
-            scrollAnimation->start();
-        } else {
-            scrollToBottom();
-        }
+        animateScrollToBottom();
         jumpToBottomButton->hide();
     });
+}
+
+void ChatView::animateScrollToBottom()
+{
+    QScrollBar *vbar = verticalScrollBar();
+    if (scrollAnimation && vbar) {
+        scrollAnimation->stop();
+        scrollAnimation->setStartValue(vbar->value());
+        scrollAnimation->setEndValue(vbar->maximum());
+        scrollAnimation->start();
+    } else if (vbar) {
+        vbar->setValue(vbar->maximum());
+    }
 }
 
 bool ChatView::hasTextSelection() const
@@ -383,7 +389,11 @@ void ChatView::setModel(QAbstractItemModel *model)
         appearRows.clear();
         if (appearAnimation)
             appearAnimation->stop();
-        QTimer::singleShot(0, this, &ChatView::scrollToBottom);
+        // A channel switch resets the model; start from a clean not-at-bottom
+        // state so history top-insertion never re-glides, then settle to the
+        // bottom smoothly.
+        atBottom = false;
+        QTimer::singleShot(0, this, &ChatView::animateScrollToBottom);
         // A reset with no rows means a channel switch with a fetch in flight
         // (requestLoadChannel runs right after); say so instead of showing a
         // blank view that looks like an empty channel.
@@ -943,7 +953,7 @@ void ChatView::onRowsInserted(const QModelIndex &parent, int start, int end)
     }
 
     if (atBottom) {
-        scrollToBottom();
+        animateScrollToBottom();
     } else if (start == 0 && anchorIndex.isValid()) {
         if (!pendingScroll_) {
             pendingScroll_ = true;

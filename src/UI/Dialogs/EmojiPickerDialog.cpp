@@ -526,7 +526,8 @@ void EmojiPickerDialog::rebuildCategoryGrid(const QList<Core::EmojiCatalogItem> 
         sections.append(guildSection);
     }
 
-    categoryGrid->setSections(sections);
+    if (categoryGrid)
+        categoryGrid->setSections(sections);
 
     // Fade in the category grid after layout
     fadeInWidget(categoryGrid, 200);
@@ -976,7 +977,8 @@ void EmojiPickerDialog::setSelectedEmojiValue(const QString &emojiValue)
         categoryGrid->selectValue(emojiValue);
     }
 
-    useButton->setEnabled(!selectedServerEmoji.isEmpty());
+    if (useButton)
+        useButton->setEnabled(!selectedServerEmoji.isEmpty());
     updateFavoriteState();
 }
 
@@ -1059,7 +1061,8 @@ void EmojiPickerDialog::rebuildServerGrid(const QList<Core::EmojiCatalogItem> &i
         section.items = guildItems;
         sections.append(section);
     }
-    serverGrid->setSections(sections);
+    if (serverGrid)
+        serverGrid->setSections(sections);
 
     // Select the first emoji so "Use" is immediately available, matching the
     // previous eager-build behavior.
@@ -1087,9 +1090,12 @@ void EmojiPickerDialog::rebuildResults()
     pendingEmojiFetches.clear();
 
     if (section == Section::Server) {
-        resultsList->hide();
-        categoryScrollArea->hide();
-        serverScrollArea->show();
+        if (resultsList)
+            resultsList->hide();
+        if (categoryScrollArea)
+            categoryScrollArea->hide();
+        if (serverScrollArea)
+            serverScrollArea->show();
         rebuildServerGrid(items);
         updateFavoriteState();
         return;
@@ -1099,23 +1105,31 @@ void EmojiPickerDialog::rebuildResults()
     if (categoryStickyHeader)
         categoryStickyHeader->setVisible(false);
 
-    serverScrollArea->hide();
+    if (serverScrollArea)
+        serverScrollArea->hide();
     selectedServerEmoji.clear();
     clearServerGrid();
 
     // If we are in "All" section with no search query, show the category grid
     // with recently-used at top and scroll-jump sections.
     if (section == Section::All && query.trimmed().isEmpty()) {
-        resultsList->hide();
-        categoryScrollArea->show();
+        if (resultsList)
+            resultsList->hide();
+        if (categoryScrollArea)
+            categoryScrollArea->show();
         rebuildCategoryGrid(items);
         updateFavoriteState();
         return;
     }
 
-    categoryScrollArea->hide();
+    if (categoryScrollArea)
+        categoryScrollArea->hide();
     clearCategoryGrid();
-    resultsList->show();
+    if (resultsList)
+        resultsList->show();
+
+    if (!resultsList)
+        return;
 
     resultsList->clear();
     const int totalMatches = items.size();
@@ -1154,7 +1168,7 @@ void EmojiPickerDialog::selectFirstItem()
     if (isServerSectionActive())
         return;
 
-    if (resultsList->count() > 0) {
+    if (resultsList && resultsList->count() > 0) {
         resultsList->setCurrentRow(0);
         resultsList->scrollToItem(resultsList->currentItem());
     }
@@ -1184,8 +1198,10 @@ void EmojiPickerDialog::updateFavoriteState()
 {
     const QString emoji = currentSelectedEmojiValue();
     const bool favorite = !emoji.isEmpty() && EmojiPreferences::isFavorite(emoji);
-    favoriteButton->setEnabled(!emoji.isEmpty());
-    favoriteButton->setChecked(favorite);
+    if (favoriteButton)
+        favoriteButton->setEnabled(!emoji.isEmpty());
+    if (favoriteButton)
+        favoriteButton->setChecked(favorite);
 }
 
 void EmojiPickerDialog::toggleFavorite()

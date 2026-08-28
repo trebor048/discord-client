@@ -6,12 +6,43 @@
 #include "Core/ImageManager.hpp"
 #include "Core/Theme/Icons.hpp"
 #include "Core/Theme/Manager.hpp"
+#include "Core/Theme/RoundedAvatar.hpp"
 #include "Core/AnimationUtils.hpp"
 
 #include <algorithm>
 
 namespace Acheron {
 namespace UI {
+
+QPixmap ChatDelegate::scaledCached(const QPixmap &source, const QSize &target) const
+{
+    if (source.isNull() || target.isEmpty())
+        return QPixmap(); // empty target: draw nothing, never stretch full-res
+
+    const ScaledPixmapKey key{ source.cacheKey(), target.width(), target.height() };
+    if (const QPixmap *cached = scaledCache.object(key))
+        return *cached;
+
+    QPixmap scaled = source.scaled(target, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    scaledCache.insert(key, new QPixmap(scaled), scaled.width() * scaled.height());
+    return scaled;
+}
+
+QPixmap ChatDelegate::blurredCached(const QPixmap &source, int radius) const
+{
+    if (source.isNull())
+        return QPixmap();
+
+    // Radius is part of the key: a second blur radius must never return a
+    // blur produced for another radius.
+    const BlurKey key{ source.cacheKey(), radius };
+    if (const QPixmap *cached = blurredCache.object(key))
+        return *cached;
+
+    QPixmap blurred = ChatLayout::createBlurredPixmap(source, radius);
+    blurredCache.insert(key, new QPixmap(blurred), blurred.width() * blurred.height());
+    return blurred;
+}
 
 static const QRegularExpression &emojiImgRegex()
 {
@@ -434,8 +465,19 @@ void ChatDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
     }
 
     if (layout.showHeader) {
-        if (!avatar.isNull())
-            painter->drawPixmap(layout.avatarRect, avatar);
+        if (!avatar.isNull()) {
+            // Rounded-square avatar: clip the pixmap to the squircle radius so
+            // message avatars match the rest of the app.
+            const QRect &r = layout.avatarRect;
+            painter->save();
+            painter->setRenderHint(QPainter::Antialiasing, true);
+            QPainterPath clip;
+            const int radius = Core::Theme::avatarRadius(r.width());
+            clip.addRoundedRect(r, radius, radius);
+            painter->setClipPath(clip);
+            painter->drawPixmap(r, avatar);
+            painter->restore();
+        }
 
         QFont headerFont = option.font;
         headerFont.setBold(true);
@@ -650,7 +692,7 @@ void ChatDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
             QPixmap displayPixmap = att.pixmap;
 
             if (showBlurred)
-                displayPixmap = ChatLayout::createBlurredPixmap(att.pixmap, 60);
+                displayPixmap = blurredCached(att.pixmap, 60);
 
             if (isSingleImage)
                 painter->drawPixmap(imgLayout.rect, displayPixmap);
@@ -930,9 +972,9 @@ void ChatDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
             } else if (!imgRect.isNull() && !embed.thumbnail.isNull()) {
                 // Static first frame while the animation loads (or as fallback
                 // when the animation itself failed but the still image worked).
-                QPixmap scaledThumb = embed.thumbnail.scaled(
-                        embed.thumbnailSize * embed.thumbnail.devicePixelRatio(),
-                        Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                QPixmap scaledThumb = scaledCached(
+                        embed.thumbnail,
+                        embed.thumbnailSize * embed.thumbnail.devicePixelRatio());
                 painter->drawPixmap(imgRect.topLeft(), scaledThumb);
             }
 
@@ -956,9 +998,9 @@ void ChatDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
                 continue;
             }
             if (!embedLayout.imagesRect.isNull() && !embed.thumbnail.isNull()) {
-                QPixmap scaledThumb = embed.thumbnail.scaled(
-                        embed.thumbnailSize * embed.thumbnail.devicePixelRatio(),
-                        Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                QPixmap scaledThumb = scaledCached(
+                        embed.thumbnail,
+                        embed.thumbnailSize * embed.thumbnail.devicePixelRatio());
                 painter->drawPixmap(embedLayout.imagesRect.topLeft(), scaledThumb);
             }
             continue;
@@ -973,8 +1015,7 @@ void ChatDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
         if (embedLayout.hasThumbnail && !embedLayout.thumbnailRect.isNull()) {
             QPixmap thumb = !embed.thumbnail.isNull() ? embed.thumbnail : embed.videoThumbnail;
             if (!thumb.isNull()) {
-                QPixmap scaledThumb = thumb.scaled(embedLayout.thumbnailRect.size(),
-                                                   Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                QPixmap scaledThumb = scaledCached(thumb, embedLayout.thumbnailRect.size());
                 painter->drawPixmap(embedLayout.thumbnailRect.topLeft(), scaledThumb);
             }
         }
@@ -1132,9 +1173,9 @@ void ChatDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
 
                 if (!img.pixmap.isNull()) {
                     if (isSingleImage) {
-                        QPixmap scaledImage =
-                                img.pixmap.scaled(img.displaySize * img.pixmap.devicePixelRatio(),
-                                                  Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                        QPixmap scaledImage = scaledCached(
+                                img.pixmap,
+                                img.displaySize * img.pixmap.devicePixelRatio());
                         painter->drawPixmap(imgLayout.rect.topLeft(), scaledImage);
                     } else {
                         ChatLayout::drawCroppedPixmap(painter, imgLayout.rect, img.pixmap);
@@ -1147,8 +1188,7 @@ void ChatDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
             }
         } else if (!embed.videoThumbnail.isNull() && embed.thumbnail.isNull() &&
                    !embedLayout.imagesRect.isNull()) {
-            QPixmap scaledVideo = embed.videoThumbnail.scaled(
-                    embedLayout.imagesRect.size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            QPixmap scaledVideo = scaledCached(embed.videoThumbnail, embedLayout.imagesRect.size());
             painter->drawPixmap(embedLayout.imagesRect.topLeft(), scaledVideo);
 
             int playSize = std::min(
@@ -1209,8 +1249,7 @@ void ChatDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
                 : sticker.pixmap;
 
         if (!stickerPixmap.isNull()) {
-            QPixmap scaled = stickerPixmap.scaled(sr.size(), Qt::KeepAspectRatio,
-                                                    Qt::SmoothTransformation);
+            QPixmap scaled = scaledCached(stickerPixmap, sr.size());
             int x = sr.x() + (sr.width() - scaled.width()) / 2;
             int y = sr.y() + (sr.height() - scaled.height()) / 2;
             painter->drawPixmap(x, y, scaled);

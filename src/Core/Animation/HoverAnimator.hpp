@@ -53,7 +53,6 @@ private:
     void onHoverMove(QWidget *w, const QPoint &pos);
     void onHoverLeave(QWidget *w);
     void onPress(QWidget *w, bool pressed);
-    void setWashAlpha(QWidget *overlay, qreal alpha);
     void removeState(QWidget *w);
 
     QHash<QWidget *, WashState> states_;

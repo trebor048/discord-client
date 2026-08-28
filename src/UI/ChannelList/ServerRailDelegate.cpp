@@ -2,6 +2,7 @@
 
 #include "ServerRailModel.hpp"
 #include "Core/AnimationUtils.hpp"
+#include "Core/Animation/AnimationConfig.hpp"
 #include "Core/Appearance/AppearanceConfig.hpp"
 
 #include <QPainter>
@@ -179,8 +180,12 @@ void ServerRailDelegate::paint(QPainter *painter, const QStyleOptionViewItem &op
 
     painter->fillRect(option.rect, option.palette.base());
 
-    // subtle hover highlight
-    if (option.state & QStyle::State_MouseOver) {
+    // Hover highlight is drawn by HoverAnimator's animated wash overlay, so we
+    // deliberately do not paint a static MouseOver fill here (it would snap in
+    // instead of fading and double up with the wash).
+    // Exception: with reduce-motion on, HoverAnimator skips washes entirely, so
+    // restore the static fill to keep hover feedback for those users.
+    if ((option.state & QStyle::State_MouseOver) && Core::AnimationConfig::instance().reduceMotion()) {
         QColor hoverAccent = option.palette.highlight().color();
         hoverAccent.setAlpha(18);
         painter->fillRect(option.rect, hoverAccent);

@@ -1,7 +1,9 @@
 #include "TabBar.hpp"
 #include "Core/AnimationUtils.hpp"
+#include "Core/Appearance/AppearanceConfig.hpp"
 #include "Core/ImageManager.hpp"
 #include "Core/Theme/Icons.hpp"
+#include "Core/Theme/RoundedAvatar.hpp"
 
 #include <QPainter>
 #include <QPainterPath>
@@ -30,6 +32,16 @@ QColor blendColors(const QColor &base, const QColor &toward, qreal ratio)
     return out;
 }
 } // namespace
+
+QString TabBar::capBadgeText(int count)
+{
+    return count > 99 ? QStringLiteral("99+") : QString::number(count);
+}
+
+int TabBar::badgeWidth(const QFontMetrics &fm, const QString &text)
+{
+    return qMax(BadgeMinWidth, fm.horizontalAdvance(text) + BadgePadding * 2);
+}
 
 TabBar::TabBar(Core::ImageManager *imageManager, QWidget *parent)
     : QWidget(parent), imageManager(imageManager)
@@ -251,16 +263,18 @@ bool TabBar::canNavigateForward() const
     return tabs[currentTabIndex].canGoForward();
 }
 
-void TabBar::updateChannelReadState(Core::Snowflake channelId, bool unread, int mentionCount)
+void TabBar::updateChannelReadState(Core::Snowflake channelId, bool unread, int mentionCount,
+                                    int unreadCount)
 {
     if (!channelId.isValid())
         return;
 
     auto it = channelReadStates.find(channelId);
-    if (it != channelReadStates.end() && it->unread == unread && it->mentionCount == mentionCount)
+    if (it != channelReadStates.end() && it->unread == unread && it->mentionCount == mentionCount &&
+        it->unreadCount == unreadCount)
         return;
 
-    channelReadStates[channelId] = { unread, mentionCount };
+    channelReadStates[channelId] = { unread, mentionCount, unreadCount };
     if (isVisible())
         update();
 }
@@ -298,10 +312,17 @@ TabBar::LayoutResult TabBar::computeTabLayout() const
 
         if (!pinned) {
             auto readIt = channelReadStates.constFind(entry.channelId);
-            if (readIt != channelReadStates.constEnd() && readIt->mentionCount > 0) {
-                QString badgeText = QString::number(readIt->mentionCount);
-                int badgeTextW = fm.horizontalAdvance(badgeText);
-                badgeW = qMax(BadgeMinWidth, badgeTextW + BadgePadding * 2);
+            if (readIt != channelReadStates.constEnd()) {
+                const bool numbered =
+                        Core::Appearance::AppearanceConfig::instance().numberedUnread();
+                QString badgeText;
+                if (readIt->mentionCount > 0) {
+                    badgeText = capBadgeText(readIt->mentionCount);
+                } else if (numbered && readIt->unread && readIt->unreadCount > 0) {
+                    badgeText = capBadgeText(readIt->unreadCount);
+                }
+                if (!badgeText.isEmpty())
+                    badgeW = badgeWidth(fm, badgeText);
             }
         }
 
@@ -525,9 +546,13 @@ void TabBar::showOverflowMenu()
         auto readIt = channelReadStates.constFind(entry.channelId);
         bool isUnread = readIt != channelReadStates.constEnd() && readIt->unread;
         int mentions = (readIt != channelReadStates.constEnd()) ? readIt->mentionCount : 0;
+        const bool numbered = Core::Appearance::AppearanceConfig::instance().numberedUnread();
 
         if (mentions > 0)
             label = QStringLiteral("%1 (%2)").arg(label).arg(mentions);
+        else if (numbered && isUnread && readIt != channelReadStates.constEnd() &&
+                 readIt->unreadCount > 0)
+            label = QStringLiteral("%1 (%2)").arg(label).arg(capBadgeText(readIt->unreadCount));
         else if (isUnread)
             label = QStringLiteral("• %1").arg(label);
 
@@ -609,7 +634,7 @@ void TabBar::showTabContextMenu(int index, const QPoint &globalPos)
         markReadAction->setIcon(QIcon::fromTheme(QStringLiteral("mail-mark-read")));
         connect(markReadAction, &QAction::triggered, this, [this, index]() {
             const TabEntry &e = tabs[index].current();
-            updateChannelReadState(e.channelId, false, 0);
+            updateChannelReadState(e.channelId, false, 0, 0);
             emit readStateCleared(e.channelId);
         });
         menu.addAction(markReadAction);
@@ -774,7 +799,8 @@ void TabBar::paintEvent(QPaintEvent *)
             if (!icon.isNull()) {
                 p.save();
                 QPainterPath clipPath;
-                clipPath.addRoundedRect(iconRect, 3, 3);
+                const int radius = Core::Theme::avatarRadius(IconSize);
+                clipPath.addRoundedRect(iconRect, radius, radius);
                 p.setClipPath(clipPath);
                 p.drawPixmap(iconRect, icon);
                 p.restore();
@@ -791,12 +817,22 @@ void TabBar::paintEvent(QPaintEvent *)
             auto readIt = channelReadStates.constFind(entry.channelId);
             bool isUnread = readIt != channelReadStates.constEnd() && readIt->unread;
             int mentions = (readIt != channelReadStates.constEnd()) ? readIt->mentionCount : 0;
+            const bool numbered =
+                    Core::Appearance::AppearanceConfig::instance().numberedUnread();
+            QString badgeText;
+            bool redBadge = false;
             if (mentions > 0) {
-                QString mentionText = QString::number(mentions);
-                int badgeW = qMax(BadgeMinWidth, fm.horizontalAdvance(mentionText) + BadgePadding * 2);
+                badgeText = capBadgeText(mentions);
+                redBadge = true;
+            } else if (numbered && isUnread && readIt != channelReadStates.constEnd() &&
+                       readIt->unreadCount > 0) {
+                badgeText = capBadgeText(readIt->unreadCount);
+            }
+            if (!badgeText.isEmpty()) {
+                int badgeW = badgeWidth(fm, badgeText);
                 QRect badgeRect(tr.tab.right() - badgeW - 2, tr.tab.top() + 2, badgeW, BadgeHeight);
                 p.setPen(Qt::NoPen);
-                p.setBrush(QColor(0xED, 0x42, 0x45));
+                p.setBrush(redBadge ? QColor(0xED, 0x42, 0x45) : highlight);
                 p.drawRoundedRect(badgeRect, BadgeHeight / 2, BadgeHeight / 2);
                 p.save();
                 QFont badgeFont = font();
@@ -804,7 +840,7 @@ void TabBar::paintEvent(QPaintEvent *)
                 badgeFont.setBold(true);
                 p.setFont(badgeFont);
                 p.setPen(Qt::white);
-                p.drawText(badgeRect, Qt::AlignCenter, mentionText);
+                p.drawText(badgeRect, Qt::AlignCenter, badgeText);
                 p.restore();
             } else if (isUnread) {
                 int dotSize = 6;
@@ -821,14 +857,21 @@ void TabBar::paintEvent(QPaintEvent *)
             auto readIt = channelReadStates.constFind(entry.channelId);
             bool isUnread = !isActive && readIt != channelReadStates.constEnd() && readIt->unread;
             int mentions = (readIt != channelReadStates.constEnd()) ? readIt->mentionCount : 0;
+            const bool numbered =
+                    Core::Appearance::AppearanceConfig::instance().numberedUnread();
 
             int badgeW = 0;
             QString badgeText;
+            bool redBadge = false;
             if (mentions > 0) {
-                badgeText = QString::number(mentions);
-                int badgeTextW = fm.horizontalAdvance(badgeText);
-                badgeW = qMax(BadgeMinWidth, badgeTextW + BadgePadding * 2);
+                badgeText = capBadgeText(mentions);
+                redBadge = true;
+            } else if (numbered && isUnread && readIt != channelReadStates.constEnd() &&
+                       readIt->unreadCount > 0) {
+                badgeText = capBadgeText(readIt->unreadCount);
             }
+            if (!badgeText.isEmpty())
+                badgeW = badgeWidth(fm, badgeText);
 
             QString label = entry.name;
             if (label.isEmpty())
@@ -868,7 +911,7 @@ void TabBar::paintEvent(QPaintEvent *)
                 QRect badgeRect(badgeX, badgeY, badgeW, BadgeHeight);
 
                 p.setPen(Qt::NoPen);
-                p.setBrush(QColor(0xED, 0x42, 0x45)); // Discord red
+                p.setBrush(redBadge ? QColor(0xED, 0x42, 0x45) : highlight);
                 p.drawRoundedRect(badgeRect, BadgeHeight / 2, BadgeHeight / 2);
 
                 p.save();
@@ -881,7 +924,7 @@ void TabBar::paintEvent(QPaintEvent *)
                 p.restore();
             }
 
-            if (isUnread && mentions == 0) {
+            if (isUnread && badgeText.isEmpty()) {
                 int dotSize = 4;
                 int dotX = tr.tab.left() + 3;
                 int dotY = tr.tab.top() + (tr.tab.height() - dotSize) / 2;

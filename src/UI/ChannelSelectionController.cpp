@@ -812,7 +812,8 @@ void ChannelSelectionController::refreshTabReadStates()
             state.isUnread = state.isUnread || posts.unread;
             state.mentionCount += posts.mentions;
         }
-        m_window->tabBar->updateChannelReadState(entry.channelId, state.isUnread, state.mentionCount);
+        m_window->tabBar->updateChannelReadState(entry.channelId, state.isUnread, state.mentionCount,
+                                                 state.unreadCount);
     }
 }
 

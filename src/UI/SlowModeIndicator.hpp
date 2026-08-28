@@ -21,8 +21,15 @@ public:
     void startCooldown(Core::Snowflake channelId, int seconds);
     [[nodiscard]] bool isOnCooldown(Core::Snowflake channelId) const;
 
+    /// True while a slowmode rate limit is relevant to the active channel
+    /// (drives the parent strip's slide-out).
+    [[nodiscard]] bool isActive() const { return activityActive_; }
+
 signals:
     void cooldownChanged(bool onCooldown);
+    /// Emitted on transitions: true when slowmode becomes relevant, false when
+    /// it goes away.
+    void activityChanged(bool active);
 
 private:
     void updateDisplay();
@@ -33,6 +40,7 @@ private:
     Core::Snowflake activeChannelId;
     int activeRateLimit = 0;
     bool activeCanBypass = false;
+    bool activityActive_ = false;
 
     QHash<Core::Snowflake, QDateTime> cooldownEndTimes;
 };

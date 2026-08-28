@@ -29,7 +29,9 @@ void AppearanceConfig::load()
                               : MemberListMode::ResizeHandle;
     memberCardScale_ = clampScale(settings.value(kMemberCardScaleKey, kDefaultScale).toFloat());
     guildIconScale_ = clampScale(settings.value(kGuildIconScaleKey, kDefaultScale).toFloat());
-    channelScale_ = clampScale(settings.value(kChannelScaleKey, kDefaultScale).toFloat());
+    channelScale_ = clampChannelScale(
+            settings.value(kChannelScaleKey, kChannelDefaultScale).toFloat());
+    numberedUnread_ = settings.value(kNumberedUnreadKey, true).toBool();
 }
 
 void AppearanceConfig::save() const
@@ -41,12 +43,26 @@ void AppearanceConfig::save() const
     settings.setValue(kMemberCardScaleKey, memberCardScale_);
     settings.setValue(kGuildIconScaleKey, guildIconScale_);
     settings.setValue(kChannelScaleKey, channelScale_);
+    settings.setValue(kNumberedUnreadKey, numberedUnread_);
     settings.sync();
 }
 
 float AppearanceConfig::clampScale(float value)
 {
+    // std::clamp passes NaN through (both comparisons are false) and lround of
+    // NaN is UB, so reject non-finite inputs explicitly. Finite values clamp
+    // to the configured bounds (2.0 -> max, 0.5 -> min).
+    if (!std::isfinite(value))
+        return kDefaultScale;
     return std::clamp(value, kMinScale, kMaxScale);
+}
+
+float AppearanceConfig::clampChannelScale(float value)
+{
+    // Same NaN guard as clampScale, against the channel list's wider range.
+    if (!std::isfinite(value))
+        return kChannelDefaultScale;
+    return std::clamp(value, kChannelMinScale, kChannelMaxScale);
 }
 
 float AppearanceConfig::stepScale(float value, int steps)
@@ -56,8 +72,12 @@ float AppearanceConfig::stepScale(float value, int steps)
 
 int AppearanceConfig::scaledInt(int base, float scale)
 {
-    return static_cast<int>(
-            std::lround(static_cast<float>(base) * std::clamp(scale, kMinScale, kMaxScale)));
+    return static_cast<int>(std::lround(static_cast<float>(base) * clampScale(scale)));
+}
+
+int AppearanceConfig::channelScaledInt(int base, float scale)
+{
+    return static_cast<int>(std::lround(static_cast<float>(base) * clampChannelScale(scale)));
 }
 
 void AppearanceConfig::setMemberListMode(MemberListMode mode)
@@ -92,10 +112,19 @@ void AppearanceConfig::setGuildIconScale(float scale)
 
 void AppearanceConfig::setChannelScale(float scale)
 {
-    scale = clampScale(scale);
+    scale = clampChannelScale(scale);
     if (qFuzzyCompare(scale, channelScale_))
         return;
     channelScale_ = scale;
+    save();
+    emit configChanged();
+}
+
+void AppearanceConfig::setNumberedUnread(bool on)
+{
+    if (on == numberedUnread_)
+        return;
+    numberedUnread_ = on;
     save();
     emit configChanged();
 }

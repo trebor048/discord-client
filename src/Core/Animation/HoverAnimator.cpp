@@ -32,6 +32,18 @@ HoverAnimator &HoverAnimator::instance()
 HoverAnimator::HoverAnimator(QObject *parent)
     : QObject(parent)
 {
+    // If reduce-motion is toggled ON while a wash is visible, hover/leave
+    // events stop being processed (eventFilterForWidget bails out early), so
+    // nothing would ever hide the lingering overlay. Flush all washes the
+    // moment the flag flips.
+    connect(&AnimationConfig::instance(), &AnimationConfig::reduceMotionChanged, this,
+            [this](bool on) {
+                if (!on)
+                    return;
+                const auto widgets = states_.keys();
+                for (QWidget *w : widgets)
+                    removeState(w);
+            });
 }
 
 void HoverAnimator::install()
@@ -111,12 +123,14 @@ bool HoverAnimator::eventFilter(QObject *watched, QEvent *event)
             onHoverMove(w, states_.value(w).lastHoverPos);
         break;
     case QEvent::MouseButtonPress:
-        // Press feedback: flash the wash to a deeper tone quickly.
-        if (isWashEligible(w))
+        // Press feedback: flash the wash to a deeper tone quickly. Respect
+        // reduce-motion: onPress would otherwise create a wash even though the
+        // hover path is disabled.
+        if (isWashEligible(w) && !AnimationConfig::instance().reduceMotion())
             onPress(w, true);
         break;
     case QEvent::MouseButtonRelease:
-        if (isWashEligible(w))
+        if (isWashEligible(w) && !AnimationConfig::instance().reduceMotion())
             onPress(w, false);
         break;
     case QEvent::Destroy:
@@ -138,7 +152,6 @@ bool HoverAnimator::eventFilterForWidget(QWidget *w, QEvent *event)
 
     switch (event->type()) {
     case QEvent::HoverEnter:
-    case QEvent::Enter:
         onHoverEnter(w);
         break;
     case QEvent::HoverMove: {
@@ -147,8 +160,18 @@ bool HoverAnimator::eventFilterForWidget(QWidget *w, QEvent *event)
         break;
     }
     case QEvent::HoverLeave:
-    case QEvent::Leave:
         onHoverLeave(w);
+        break;
+    // Enter/Leave fire for widgets without WA_Hover; when WA_Hover is set,
+    // HoverEnter/HoverLeave are also delivered and would double-trigger the
+    // wash (restarting the fade). Use Enter/Leave only as the no-WA_Hover path.
+    case QEvent::Enter:
+        if (!w->testAttribute(Qt::WA_Hover))
+            onHoverEnter(w);
+        break;
+    case QEvent::Leave:
+        if (!w->testAttribute(Qt::WA_Hover))
+            onHoverLeave(w);
         break;
     default:
         break;
@@ -177,6 +200,9 @@ void HoverAnimator::onHoverEnter(QWidget *w)
 
         auto *overlay = new QWidget(host);
         overlay->setAttribute(Qt::WA_TransparentForMouseEvents);
+        // A plain QWidget does not paint a stylesheet background unless
+        // WA_StyledBackground is set; without it the wash never renders.
+        overlay->setAttribute(Qt::WA_StyledBackground, true);
         overlay->setStyleSheet(QStringLiteral(
                 "QWidget { background-color: %1; border-radius: %2px; }")
                                        .arg(washColor().name(QColor::HexArgb))
@@ -216,6 +242,11 @@ void HoverAnimator::onHoverEnter(QWidget *w)
         st.overlay->raise();
     }
 
+    // onHoverLeave's fade-out hides the overlay; the reuse path (state already
+    // exists) must re-show it or the wash fades in invisibly and stays dead
+    // for every hover after the first leave.
+    st.overlay->show();
+
     auto *fadeIn = new QPropertyAnimation(st.overlay->graphicsEffect(), "opacity", st.overlay);
     fadeIn->setDuration(AnimationConfig::instance().scaled(180));
     fadeIn->setStartValue(st.overlay->graphicsEffect()->property("opacity").toReal());
@@ -240,8 +271,13 @@ void HoverAnimator::onHoverMove(QWidget *w, const QPoint &pos)
         rect = view->visualRect(idx);
 
     WashState &st = it.value();
-    st.itemRect = rect;
     st.lastHoverPos = pos;
+    // The wash only needs re-geometry when the hovered row actually changes;
+    // mouse-move events within the same row must not churn the overlay (each
+    // setGeometry invalidates old+new areas and forces delegate repaints).
+    if (rect == st.itemRect)
+        return;
+    st.itemRect = rect;
     if (st.overlay) {
         st.overlay->setGeometry(rect);
         st.overlay->raise();

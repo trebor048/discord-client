@@ -4,14 +4,15 @@
 #include <QPainterPath>
 
 #include "MemberListModel.hpp"
+#include "Core/Animation/AnimationConfig.hpp"
 #include "Core/Appearance/AppearanceConfig.hpp"
 #include "Core/MemberListManager.hpp"
 #include "Core/Theme/Icons.hpp"
+#include "Core/Theme/RoundedAvatar.hpp"
 
 constexpr static int kGroupHeight = 22;
 constexpr static int kMemberHeight = 28;
 constexpr static int kAvatarSize = 20;
-constexpr static int kAvatarRadius = 4;
 constexpr static int kHorizontalPadding = 8;
 constexpr static int kAvatarTextSpacing = 8;
 
@@ -33,6 +34,20 @@ float memberScale()
 MemberListDelegate::MemberListDelegate(QObject *parent)
     : QStyledItemDelegate(parent)
 {
+    // Roughly covers every visible row at once plus scroll-through history.
+    m_scaledAvatars.setMaxCost(512);
+}
+
+QPixmap MemberListDelegate::scaledAvatar(const QPixmap &source, int size) const
+{
+    const QPair<qint64, QSize> key{ source.cacheKey(), QSize(size, size) };
+    if (const QPixmap *cached = m_scaledAvatars.object(key))
+        return *cached;
+
+    QPixmap scaled = source.scaled(size, size, Qt::KeepAspectRatioByExpanding,
+                                   Qt::SmoothTransformation);
+    m_scaledAvatars.insert(key, new QPixmap(scaled));
+    return scaled;
 }
 
 void MemberListDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
@@ -86,6 +101,9 @@ void MemberListDelegate::paintGroup(QPainter *painter, const QStyleOptionViewIte
     if (iconsOnly_)
         return;
 
+    painter->save();
+    painter->setOpacity(contentOpacity_);
+
     QString text = groupName.toUpper() + QString::fromUtf8(" \u2014 ") + QString::number(groupCount);
 
     QFont font = option.font;
@@ -100,6 +118,8 @@ void MemberListDelegate::paintGroup(QPainter *painter, const QStyleOptionViewIte
                                           -Core::Appearance::AppearanceConfig::scaledInt(kHorizontalPadding, scale), 0);
     textRect.setTop(textRect.top() + 6);
     painter->drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, text);
+
+    painter->restore();
 }
 
 void MemberListDelegate::paintMember(QPainter *painter, const QStyleOptionViewItem &option,
@@ -107,7 +127,7 @@ void MemberListDelegate::paintMember(QPainter *painter, const QStyleOptionViewIt
 {
     const float scale = memberScale();
     const int avatarSize = Core::Appearance::AppearanceConfig::scaledInt(kAvatarSize, scale);
-    const int avatarRadius = Core::Appearance::AppearanceConfig::scaledInt(kAvatarRadius, scale);
+    const int avatarRadius = Core::Theme::avatarRadius(avatarSize);
     const int horizontalPadding = Core::Appearance::AppearanceConfig::scaledInt(kHorizontalPadding, scale);
     const int avatarTextSpacing = Core::Appearance::AppearanceConfig::scaledInt(kAvatarTextSpacing, scale);
 
@@ -123,8 +143,7 @@ void MemberListDelegate::paintMember(QPainter *painter, const QStyleOptionViewIt
             clipPath.addRoundedRect(avatarRect, avatarRadius, avatarRadius);
             painter->save();
             painter->setClipPath(clipPath);
-            avatar = avatar.scaled(stripAvatar, stripAvatar,
-                                   Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+            avatar = scaledAvatar(avatar, stripAvatar);
             painter->drawPixmap(avatarRect, avatar);
             painter->restore();
         } else {
@@ -137,11 +156,16 @@ void MemberListDelegate::paintMember(QPainter *painter, const QStyleOptionViewIt
         return;
     }
 
-    if (option.state & QStyle::State_MouseOver) {
+    // Hover highlight is drawn by HoverAnimator's animated wash overlay, so we
+    // deliberately do not paint a static MouseOver fill here (it would snap in
+    // instead of fading and double up with the wash).
+    // Exception: with reduce-motion on, HoverAnimator skips washes entirely, so
+    // restore the static fill to keep hover feedback for those users.
+    if ((option.state & QStyle::State_MouseOver) && Core::AnimationConfig::instance().reduceMotion()) {
         QColor hoverColor = option.palette.highlight().color();
         hoverColor.setAlpha(30);
-        painter->fillRect(option.rect.adjusted(horizontalPadding / 2, 1,
-                                               -horizontalPadding / 2, -1),
+        painter->fillRect(option.rect.adjusted(Core::Appearance::AppearanceConfig::scaledInt(kHorizontalPadding, scale) / 2, 1,
+                                               -Core::Appearance::AppearanceConfig::scaledInt(kHorizontalPadding, scale) / 2, -1),
                           hoverColor);
     }
 
@@ -157,8 +181,7 @@ void MemberListDelegate::paintMember(QPainter *painter, const QStyleOptionViewIt
         painter->save();
         painter->setClipPath(clipPath);
         if (avatar.width() != avatarSize || avatar.height() != avatarSize)
-            avatar = avatar.scaled(avatarSize, avatarSize,
-                                   Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+            avatar = scaledAvatar(avatar, avatarSize);
         painter->drawPixmap(avatarRect, avatar);
         painter->restore();
     } else {
@@ -170,6 +193,9 @@ void MemberListDelegate::paintMember(QPainter *painter, const QStyleOptionViewIt
     }
 
     x += avatarSize + avatarTextSpacing;
+
+    painter->save();
+    painter->setOpacity(contentOpacity_);
 
     // Presence icon (device glyph colored by status) + role icon are drawn
     // right-aligned. Sizes scale with the member scale.
@@ -239,6 +265,8 @@ void MemberListDelegate::paintMember(QPainter *painter, const QStyleOptionViewIt
         painter->setBrush(roleBadgeColor);
         painter->drawEllipse(badgeRect);
     }
+
+    painter->restore();
 }
 
 void MemberListDelegate::drawPresenceIcon(QPainter *painter, const QVariantMap &presence,
@@ -278,7 +306,7 @@ void MemberListDelegate::paintPlaceholder(QPainter *painter,
 {
     const float scale = memberScale();
     const int avatarSize = Core::Appearance::AppearanceConfig::scaledInt(kAvatarSize, scale);
-    const int avatarRadius = Core::Appearance::AppearanceConfig::scaledInt(kAvatarRadius, scale);
+    const int avatarRadius = Core::Theme::avatarRadius(avatarSize);
     const int horizontalPadding = Core::Appearance::AppearanceConfig::scaledInt(kHorizontalPadding, scale);
     const int avatarTextSpacing = Core::Appearance::AppearanceConfig::scaledInt(kAvatarTextSpacing, scale);
 
@@ -296,11 +324,16 @@ void MemberListDelegate::paintPlaceholder(QPainter *painter,
     if (iconsOnly_)
         return;
 
+    painter->save();
+    painter->setOpacity(contentOpacity_);
+
     x += avatarSize + avatarTextSpacing;
     int nameWidth = qMin(80, option.rect.right() - x - horizontalPadding);
     int nameHeight = 10;
     int nameY = option.rect.top() + (option.rect.height() - nameHeight) / 2;
     painter->drawRoundedRect(QRect(x, nameY, nameWidth, nameHeight), 3, 3);
+
+    painter->restore();
 }
 
 } // namespace UI

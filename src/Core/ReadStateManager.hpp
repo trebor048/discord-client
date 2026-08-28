@@ -23,6 +23,9 @@ struct ChannelReadState
     int mentionCount = 0;
     bool isMuted = false;
     bool countsForGuildUnread = false;
+    /// Messages received this session for this channel while it was not the
+    /// active channel (zeroed for muted channels; reset on read).
+    int unreadCount = 0;
 };
 
 class ReadStateManager : public QObject
@@ -41,12 +44,16 @@ public:
 
     [[nodiscard]] ChannelReadState computeChannelReadState(Snowflake channelId, Snowflake guildId,
                                                            Snowflake parentId,
-                                                           bool isDM = false) const;
+                                                           bool isDM = false,
+                                                           std::optional<bool> canViewOverride = std::nullopt) const;
     [[nodiscard]] ChannelReadState computeThreadReadState(Snowflake threadId, Snowflake guildId,
                                                           Snowflake parentId, bool joined) const;
 
     bool isChannelUnread(Snowflake channelId, Snowflake channelLastMessageId, Snowflake guildId) const;
     int getMentionCount(Snowflake channelId) const;
+    /// Session-local count of messages missed while this channel was not the
+    /// active channel. Muted channels report 0 (see computeChannelReadState).
+    int unreadMessageCount(Snowflake channelId) const;
     bool isChannelMuted(Snowflake channelId) const;
     bool isGuildMuted(Snowflake guildId) const;
 
@@ -65,7 +72,13 @@ public:
     void setActiveChannel(Snowflake channelId);
     void markChannelAsRead(Snowflake channelId, Snowflake lastMessageId);
     void markChannelsAsRead(const QList<QPair<Snowflake, Snowflake>> &channelMessagePairs);
-    void handleMessageCreated(Snowflake channelId, Snowflake messageId, bool isMention);
+    void handleMessageCreated(Snowflake channelId, Snowflake messageId, bool isMention,
+                              bool ownMessage = false);
+
+    /// Seeds session-local unread counts (e.g. from the local message cache at
+    /// startup). Re-seeding overwrites without double-counting.
+    void seedUnreadCounts(const QHash<Snowflake, int> &counts);
+    void seedUnreadCount(Snowflake channelId, int count);
 
     void updateChannelLastMessageId(Snowflake channelId, Snowflake messageId);
     [[nodiscard]] Snowflake getChannelLastMessageId(Snowflake channelId) const;
@@ -102,6 +115,7 @@ private:
     QHash<Snowflake, Discord::ReadStateEntry> channelReadStates;
     QHash<Snowflake, Snowflake> channelLastMessageIds;
     QHash<Snowflake, Snowflake> ackIdAtSelect;
+    QHash<Snowflake, int> unreadMessageCounts;
     QHash<Snowflake, Discord::UserGuildSettings> guildSettingsMap; // Snowflake(0) for DMs
 
     QHash<Snowflake, Discord::ChannelOverride> channelOverrideCache;

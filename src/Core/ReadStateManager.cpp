@@ -55,12 +55,14 @@ void ReadStateManager::loadFromReady(const QList<Discord::ReadStateEntry> &readS
 }
 
 ChannelReadState ReadStateManager::computeChannelReadState(Snowflake channelId, Snowflake guildId,
-                                                           Snowflake parentId, bool isDM) const
+                                                           Snowflake parentId, bool isDM,
+                                                           std::optional<bool> canViewOverride) const
 {
     ChannelReadState result;
 
-    bool canView = isDM || permissionManager->hasChannelPermission(
-                                   accountId, channelId, Discord::Permission::VIEW_CHANNEL);
+    bool canView = canViewOverride.value_or(
+            isDM || permissionManager->hasChannelPermission(
+                            accountId, channelId, Discord::Permission::VIEW_CHANNEL));
 
     auto lmIt = channelLastMessageIds.constFind(channelId);
     Snowflake lastMessageId = lmIt != channelLastMessageIds.constEnd() ? lmIt.value()
@@ -68,6 +70,7 @@ ChannelReadState ReadStateManager::computeChannelReadState(Snowflake channelId, 
 
     result.isMuted = isChannelMuted(channelId);
     result.mentionCount = canView ? getMentionCount(channelId) : 0;
+    result.unreadCount = canView ? unreadMessageCount(channelId) : 0;
 
     bool fullyMuted = result.isMuted ||
                       (parentId.isValid() && isChannelMuted(parentId)) ||
@@ -78,6 +81,7 @@ ChannelReadState ReadStateManager::computeChannelReadState(Snowflake channelId, 
     if (fullyMuted) {
         result.isMuted = true;
         result.mentionCount = 0;
+        result.unreadCount = 0;
     }
 
     result.isUnread = canView && isChannelUnread(channelId, lastMessageId, guildId);
@@ -93,13 +97,19 @@ ChannelReadState ReadStateManager::computeChannelReadState(Snowflake channelId, 
 ChannelReadState ReadStateManager::computeThreadReadState(Snowflake threadId, Snowflake guildId,
                                                           Snowflake parentId, bool joined) const
 {
+    // Threads inherit VIEW_CHANNEL from their parent channel; the thread id is
+    // not a persisted channel row, so hasChannelPermission(threadId) would
+    // always return NO_PERMISSIONS and suppress unread/mention badges.
+    const bool canView = parentId.isValid() &&
+            permissionManager->hasChannelPermission(accountId, parentId, Discord::Permission::VIEW_CHANNEL);
+
     if (joined)
-        return computeChannelReadState(threadId, guildId, parentId);
+        return computeChannelReadState(threadId, guildId, parentId, /*isDM=*/false, canView);
 
     ChannelReadState result;
-    bool canView = permissionManager->hasChannelPermission(accountId, threadId, Discord::Permission::VIEW_CHANNEL);
     result.isMuted = isChannelMuted(threadId);
     result.mentionCount = canView ? getMentionCount(threadId) : 0;
+    result.unreadCount = canView ? unreadMessageCount(threadId) : 0;
 
     bool fullyMuted = result.isMuted ||
                       (parentId.isValid() && isChannelMuted(parentId)) ||
@@ -109,6 +119,7 @@ ChannelReadState ReadStateManager::computeThreadReadState(Snowflake threadId, Sn
     if (fullyMuted) {
         result.isMuted = true;
         result.mentionCount = 0;
+        result.unreadCount = 0;
     }
 
     result.isUnread = result.mentionCount > 0;
@@ -398,6 +409,9 @@ void ReadStateManager::updateLocalReadState(Snowflake channelId, Snowflake lastM
         it->mentionCount = 0;
     }
 
+    // Reading a channel clears its missed-message count.
+    unreadMessageCounts.remove(channelId);
+
     emit readStateUpdated(channelId);
 }
 
@@ -421,10 +435,13 @@ void ReadStateManager::setActiveChannel(Snowflake channelId)
     activeChannelId = channelId;
     activeChannelAckPending = false;
 
-    if (channelId.isValid())
+    if (channelId.isValid()) {
+        // Opening a channel clears its missed-message count.
+        unreadMessageCounts.remove(channelId);
         activeChannelAckTimer.start();
-    else
+    } else {
         activeChannelAckTimer.stop();
+    }
 }
 
 void ReadStateManager::markChannelAsRead(Snowflake channelId, Snowflake lastMessageId)
@@ -460,7 +477,7 @@ void ReadStateManager::markChannelsAsRead(
 }
 
 void ReadStateManager::handleMessageCreated(Snowflake channelId, Snowflake messageId,
-                                            bool isMention)
+                                            bool isMention, bool ownMessage)
 {
     updateChannelLastMessageId(channelId, messageId);
 
@@ -469,6 +486,16 @@ void ReadStateManager::handleMessageCreated(Snowflake channelId, Snowflake messa
         activeChannelAckPending = true;
         return;
     }
+
+    // The user's own messages sent from another channel never count as unread.
+    if (ownMessage)
+        return;
+
+    if (!unreadMessageCounts.contains(channelId))
+        unreadMessageCounts.insert(channelId, 1);
+    else
+        ++unreadMessageCounts[channelId];
+    emit readStateUpdated(channelId);
 
     if (isMention) {
         auto it = channelReadStates.find(channelId);
@@ -483,6 +510,30 @@ void ReadStateManager::handleMessageCreated(Snowflake channelId, Snowflake messa
         }
         emit readStateUpdated(channelId);
     }
+}
+
+int ReadStateManager::unreadMessageCount(Snowflake channelId) const
+{
+    return unreadMessageCounts.value(channelId, 0);
+}
+
+void ReadStateManager::seedUnreadCounts(const QHash<Snowflake, int> &counts)
+{
+    for (auto it = counts.constBegin(); it != counts.constEnd(); ++it) {
+        if (it.value() > 0)
+            unreadMessageCounts.insert(it.key(), it.value());
+    }
+    for (auto it = unreadMessageCounts.constBegin(); it != unreadMessageCounts.constEnd(); ++it)
+        emit readStateUpdated(it.key());
+}
+
+void ReadStateManager::seedUnreadCount(Snowflake channelId, int count)
+{
+    if (count > 0)
+        unreadMessageCounts.insert(channelId, count);
+    else
+        unreadMessageCounts.remove(channelId);
+    emit readStateUpdated(channelId);
 }
 
 void ReadStateManager::updateChannelLastMessageId(Snowflake channelId, Snowflake messageId)

@@ -231,9 +231,12 @@ inline DocCacheKey embedFieldValueDocKey(Snowflake msgId, int embedIdx, int fiel
 {
     return { msgId, (embedIdx + 1) * 1000 + 100 + fieldIdx * 2 + 1 };
 }
+// Out-of-band key: embed sub-keys occupy (embedIdx+1)*1000 + offset for
+// embedIdx 0..9 (max ~10150), so a poll-question key must sit clear of that
+// band. 9000 collided with the 9th embed's title ((8+1)*1000).
 inline DocCacheKey pollQuestionDocKey(Snowflake msgId)
 {
-    return { msgId, 9000 };
+    return { msgId, 100000 };
 }
 
 class ChatModel : public QAbstractListModel
@@ -404,6 +407,7 @@ private:
     mutable QHash<Snowflake, QList<EmbedData>> embedCache;
     mutable QHash<Snowflake, QList<AttachmentData>> attachmentCache;
     mutable QHash<Snowflake, QList<ReactionData>> reactionCache;
+    mutable QHash<Snowflake, PollData> pollCache;
     mutable QCache<DocCacheKey, QTextDocument> docCache{ 500 };
     mutable QHash<Snowflake, QSet<int>> docCacheSubIds;
 

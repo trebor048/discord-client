@@ -83,6 +83,11 @@ private:
     QString m_selectedValue;
     QSize m_defaultIconSize;
 
+    // Number of grid columns, derived from the viewport width so the grid
+    // fills the window horizontally instead of leaving a dead strip at the
+    // right edge when the dialog is resized wider.
+    int m_columns = EmojiGridMetrics::kColumns;
+
     // Layout model (content-space offsets).
     QVector<int> m_sectionTopY;
     QHash<QString, int> m_sectionIndexByKey;

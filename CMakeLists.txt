@@ -36,13 +36,25 @@ set(CMAKE_UNITY_BUILD_BATCH_SIZE 8)
 # Embed debug info in .obj files instead of .pdb to avoid MSBuild PDB locking overhead
 set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded)
 
-# Compiler caching — ccache dramatically speeds up incremental rebuilds
-find_program(CCACHE_PROGRAM ccache)
-if(CCACHE_PROGRAM)
-    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
-    message(STATUS "ccache found at ${CCACHE_PROGRAM} — incremental rebuilds will be faster")
-else()
-    message(STATUS "ccache not found — install with: winget install ccache")
+# Compiler caching — ccache dramatically speeds up incremental rebuilds on
+# Ninja/Make generators. It is intentionally NOT used with the Visual Studio
+# generator: as CMAKE_CXX_COMPILER_LAUNCHER it breaks MSBuild's .tlog
+# header-dependency tracking (producing silently stale, mixed binaries when a
+# header changes) and its MSVC PCH handling fails under memory pressure
+# ("PCH: Unable to commit memory across file map"). Keep it opt-out elsewhere.
+option(USE_CCACHE "Use ccache as the compiler launcher (auto-disabled for MSBuild)" ON)
+if(USE_CCACHE)
+    find_program(CCACHE_PROGRAM ccache)
+    if(CCACHE_PROGRAM)
+        if(CMAKE_GENERATOR MATCHES "Visual Studio")
+            message(STATUS "ccache found but disabled: it breaks MSBuild .tlog dependency tracking and MSVC PCH")
+        else()
+            set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+            message(STATUS "ccache found at ${CCACHE_PROGRAM} — incremental rebuilds will be faster")
+        endif()
+    else()
+        message(STATUS "ccache not found — install with: winget install ccache")
+    endif()
 endif()
 
 set(CMAKE_AUTORCC ON)
@@ -274,6 +286,7 @@ set(PROJECT_SOURCES
     src/UI/Dialogs/TokenInputDialog.cpp
     src/UI/Dialogs/QRLoginDialog.cpp
     src/UI/Dialogs/BasePopup.cpp
+    src/UI/Dialogs/DialogAnimator.cpp
     src/UI/Dialogs/ConfirmPopup.cpp
     src/UI/Dialogs/ShortcutSheet.cpp
     src/UI/Dialogs/UserProfilePopup.cpp
@@ -455,6 +468,26 @@ if(BUILD_TESTS)
     target_link_libraries(TestScaleStepper PRIVATE Qt::Core Qt::Widgets Qt::Test)
     target_include_directories(TestScaleStepper PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME ScaleStepperTests COMMAND TestScaleStepper)
+
+    qt_add_executable(TestReadState
+        tests/tst_ReadState.cpp
+        src/Core/ReadStateManager.cpp
+        src/Core/PermissionManager.cpp
+        src/Core/PermissionComputer.cpp
+        src/Core/Snowflake.cpp
+        src/Core/Logging.cpp
+        src/Storage/BaseRepository.cpp
+        src/Storage/ChannelRepository.cpp
+        src/Storage/RoleRepository.cpp
+        src/Storage/MemberRepository.cpp
+        src/Storage/GuildRepository.cpp
+        src/Storage/UserRepository.cpp
+        src/Storage/DatabaseManager.cpp
+        src/Storage/Transaction.cpp
+    )
+    target_link_libraries(TestReadState PRIVATE Qt::Core Qt::Gui Qt::Sql Qt::Test)
+    target_include_directories(TestReadState PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME ReadStateTests COMMAND TestReadState)
 
     # The CTest smoke test runs the build-tree executable, which on Windows
     # depends on runtime DLLs (Qt, opus, curl-impersonate) that are only

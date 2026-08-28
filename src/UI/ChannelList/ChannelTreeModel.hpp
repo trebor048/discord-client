@@ -46,6 +46,7 @@ public:
         LastMessageIdRole = Qt::UserRole + 3,
         IsUnreadRole = Qt::UserRole + 4,
         MentionCountRole = Qt::UserRole + 5,
+        UnreadCountRole = Qt::UserRole + 17,
         IsMutedRole = Qt::UserRole + 6,
         CollapsedRole = Qt::UserRole + 7,
         VoiceParticipantCountRole = Qt::UserRole + 8,
@@ -88,7 +89,8 @@ public:
     void clearTemporaryThread(Snowflake exceptThreadId = Snowflake::Invalid);
     void promoteTemporaryThread(Snowflake threadId);
     void invalidateGuildData(Snowflake guildId);
-    void updateReadState(Snowflake channelId, Snowflake accountId);
+    void updateReadState(Snowflake channelId, Snowflake accountId,
+                         ChannelNode *resolvedNode = nullptr);
     void updateForumBadge(Snowflake forumId, Snowflake accountId);
     void updateForumThreads(Snowflake forumId, Snowflake accountId);
     void updateGuildSettings(Snowflake guildId, Snowflake accountId);
@@ -130,6 +132,7 @@ private:
         bool countsForGuildUnread;
         int mentionCount;
         int subtreeMentionCount;
+        int unreadCount;
     };
     static ReadStateSnapshot readStateSnapshot(const ChannelNode *node);
     bool notifyIfReadStateChanged(ChannelNode *node, const ReadStateSnapshot &before);

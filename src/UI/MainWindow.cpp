@@ -204,6 +204,13 @@ MainWindow::MainWindow(Session *session, QWidget *parent) : QMainWindow(parent),
     }
 
     restoreWindowState();
+
+    // Apply the persisted member-list mode AFTER the splitter layout is
+    // restored: switchMemberListMode captures the splitter sizes and builds
+    // the overlay on top of the real restored layout. Before this, the mode
+    // was only ever applied when the user toggled it in settings, so a
+    // previously-enabled slide-out was silently ignored until re-toggled.
+    switchMemberListMode(Core::Appearance::AppearanceConfig::instance().memberListMode());
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)
@@ -461,9 +468,24 @@ void MainWindow::switchMemberListMode(Core::Appearance::MemberListMode mode)
     if (mode == Core::Appearance::MemberListMode::SlideOut && !memberListOverlay) {
         savedSplitterSizes = mainSplitter->sizes();
 
+        // The overlay floats over the chat, so the splitter must hand every
+        // pixel of the member pane back to the chat. A zero-width placeholder
+        // keeps the splitter row intact (for a clean restore) without
+        // reserving any space — otherwise the chat stays narrower than the
+        // window even while the overlay is collapsed.
         auto *placeholder = new QWidget(mainSplitter);
         placeholder->setMinimumWidth(0);
+        placeholder->setMaximumWidth(0);
+        placeholder->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
         mainSplitter->replaceWidget(2, placeholder);
+        mainSplitter->setCollapsible(2, true);
+        mainSplitter->setStretchFactor(2, 0);
+        QList<int> sizes = mainSplitter->sizes();
+        if (sizes.size() == mainSplitter->count()) {
+            sizes[1] += sizes[2]; // give the member pane's width to the chat
+            sizes[2] = 0;
+            mainSplitter->setSizes(sizes);
+        }
 
         memberListView->setMinimumWidth(0);
         memberListView->setMaximumWidth(QWIDGETSIZE_MAX);
@@ -471,9 +493,15 @@ void MainWindow::switchMemberListMode(Core::Appearance::MemberListMode mode)
 
         memberListOverlay = new MemberListOverlay(memberListView, centralWidget());
         memberListOverlay->setVisible(wasVisible);
+        memberListOverlay->raise();
         memberListView->setVisible(true);
     } else if (mode == Core::Appearance::MemberListMode::ResizeHandle && memberListOverlay) {
         const bool wasVisible = memberListOverlay->isVisible();
+
+        // The overlay re-parented memberListView into itself; detach the view
+        // first so deleting the overlay does not also delete it (which would
+        // leave memberListView dangling for replaceWidget below).
+        memberListView->setParent(nullptr);
 
         delete memberListOverlay;
         memberListOverlay = nullptr;
@@ -1007,7 +1035,9 @@ void MainWindow::setupUi()
     statusRowLayout->setSpacing(0);
     statusRowLayout->addWidget(typingIndicator, 1);
     statusRowLayout->addWidget(slowModeIndicator, 0);
-    statusRow->setFixedHeight(typingIndicator->minimumHeight());
+    // The status strip lives inside the input block (mounted via
+    // setStatusStrip below); it slides out only while typing/slowmode is
+    // active so the bottom region stays slim when idle.
 
     connect(slowModeIndicator, &SlowModeIndicator::cooldownChanged, this,
             [this](bool onCooldown) {
@@ -1052,8 +1082,17 @@ void MainWindow::setupUi()
     threadPaneLayout->setSpacing(0);
     threadPaneLayout->addWidget(threadHeader, 0);
     threadPaneLayout->addWidget(chatView, 1);
-    threadPaneLayout->addWidget(statusRow, 0);
+    messageInput->setStatusStrip(statusRow);
     threadPaneLayout->addWidget(messageInput, 0);
+
+    // Slide the status strip open/closed as typing or slowmode activity
+    // starts and stops.
+    const auto updateStatusStrip = [this]() {
+        messageInput->setStatusStripActive(typingIndicator->isActive() ||
+                                           slowModeIndicator->isActive());
+    };
+    connect(typingIndicator, &TypingIndicator::activityChanged, this, updateStatusStrip);
+    connect(slowModeIndicator, &SlowModeIndicator::activityChanged, this, updateStatusStrip);
 
     forumModel = new ForumPostModel(session->getImageManager(), this);
     forumModel->setDisplayNameResolver([this](Snowflake userId, Snowflake guildId) -> QString {
@@ -1158,6 +1197,11 @@ void MainWindow::setupUi()
             &Core::Appearance::AppearanceConfig::memberListModeChanged, this,
             &MainWindow::switchMemberListMode);
 
+    // Apply the persisted member-list mode once at startup. memberListModeChanged
+    // only fires on *changes*, so without this a saved "slide" mode would revert
+    // to the splitter pane on every launch until the user re-toggled the setting.
+    switchMemberListMode(Core::Appearance::AppearanceConfig::instance().memberListMode());
+
     connect(&Core::Appearance::AppearanceConfig::instance(),
             &Core::Appearance::AppearanceConfig::configChanged, this, [this]() {
                 memberListView->doItemsLayout();
@@ -1169,9 +1213,11 @@ void MainWindow::setupUi()
                 }
                 channelTree->doItemsLayout();
                 channelTree->viewport()->update();
-                const int icon = Core::Appearance::AppearanceConfig::scaledInt(
+                const int icon = Core::Appearance::AppearanceConfig::channelScaledInt(
                         24, Core::Appearance::AppearanceConfig::instance().channelScale());
                 channelTree->setIconSize(QSize(icon, icon));
+                if (tabBar)
+                    tabBar->update();
             });
 
     channelTree->setModel(channelFilterProxy);

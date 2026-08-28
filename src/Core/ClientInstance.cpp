@@ -559,6 +559,22 @@ void ClientInstance::onGuildDeleted(const Discord::GuildDelete &event)
     permissionManager->invalidateUserGuildCache(account.id, guildId);
     rolesCacheByGuild.remove(guildId);
 
+    // Drop the deleted guild's custom emojis, stickers, and cached/joined
+    // threads so they stop surfacing in the picker, autocomplete, and thread
+    // membership after the user leaves the guild.
+    EmojiCatalog::unregisterCustomEmojisByGuild(QString::number(guildId));
+    emit customEmojisChanged();
+    if (stickerStore.remove(guildId))
+        emit stickerStoreChanged(guildId);
+    for (auto it = threadCache.begin(); it != threadCache.end();) {
+        if (it.value().guildId.hasValue() && it.value().guildId.get() == guildId) {
+            joinedThreads.remove(it.key());
+            it = threadCache.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
     emit guildRemoved(guildId);
 }
 
@@ -1166,7 +1182,8 @@ void ClientInstance::onMessageCreated(const Discord::Message &msg)
         readStateManager->registerChannelGuild(channelId, msg.guildId.get());
 
     bool isMention = isMessageMentioningMe(msg);
-    readStateManager->handleMessageCreated(channelId, messageId, isMention);
+    const bool ownMessage = msg.author.hasValue() && msg.author->id.get() == account.id;
+    readStateManager->handleMessageCreated(channelId, messageId, isMention, ownMessage);
 
     emit channelLastMessageUpdated(channelId, messageId);
 }
@@ -1229,7 +1246,11 @@ void ClientInstance::handleBulkAckRequest(const QList<QPair<Snowflake, Snowflake
 
 ClientInstance::~ClientInstance()
 {
-    Storage::DatabaseManager::instance().closeCacheDatabase(account.id);
+    // Deliberately does NOT close the cache database here: the connection name
+    // is global per account, so a rapid reconnect that already opened a fresh
+    // connection before this pending deleteLater() ran would have it removed
+    // out from under the new instance. Session closes it synchronously before
+    // queueing the deletion instead.
 }
 
 void ClientInstance::start()

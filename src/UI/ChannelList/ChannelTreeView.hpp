@@ -2,6 +2,7 @@
 
 #include <QTreeView>
 #include <QHash>
+#include <QPersistentModelIndex>
 
 #include <functional>
 
@@ -62,7 +63,10 @@ private:
     Core::Snowflake findAccountIdForIndex(const QModelIndex &sourceIndex) const;
 
     QHash<Core::Snowflake, Core::Snowflake> accountVoiceChannels; // accountId -> channelId
-    QModelIndex reorderSourceIndex;
+    // Persistent so the drag source survives live tree mutations (rows
+    // inserted/removed by gateway events) between press and release. A plain
+    // QModelIndex would dangle or silently point at a different row.
+    QPersistentModelIndex reorderSourceIndex;
     QPoint reorderPressPos;
     bool reorderDragging = false;
     std::function<bool(Core::Snowflake)> m_notifyListContains;

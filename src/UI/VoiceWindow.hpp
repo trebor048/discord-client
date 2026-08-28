@@ -74,7 +74,6 @@ private:
 
     static constexpr int OUTER_SIZE = 32;
     static constexpr int BORDER_WIDTH = 2;
-    static constexpr int AVATAR_RADIUS = 4;
 };
 
 class VoiceUserWidget : public QWidget

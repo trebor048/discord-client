@@ -29,8 +29,15 @@ public:
 
     void setTypers(const QList<Core::TyperInfo> &typers);
 
+    /// True while someone is typing (drives the parent strip's slide-out).
+    [[nodiscard]] bool isActive() const { return activityActive_; }
+
     qreal opacity() const { return opacityEffect ? opacityEffect->opacity() : 1.0; }
     void setOpacity(qreal op);
+
+signals:
+    /// Emitted on transitions: true when typing starts, false when it stops.
+    void activityChanged(bool active);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -52,6 +59,7 @@ private:
     QGraphicsOpacityEffect *opacityEffect = nullptr;
     QPropertyAnimation *fadeAnimation = nullptr;
     bool isAnimatingVisible = false;
+    bool activityActive_ = false;
 };
 
 } // namespace UI

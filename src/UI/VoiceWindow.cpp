@@ -6,6 +6,7 @@
 #include "Core/ImageManager.hpp"
 #include "Core/Logging.hpp"
 #include "Core/Theme/Manager.hpp"
+#include "Core/Theme/RoundedAvatar.hpp"
 
 #include <QContextMenuEvent>
 #include <QCoreApplication>
@@ -101,20 +102,21 @@ void VoiceAvatar::paintEvent(QPaintEvent *)
     p.setRenderHint(QPainter::Antialiasing);
 
     const int s = qMin(width(), height());
+    const int radius = Core::Theme::avatarRadius(s);
 
     if (speaking) {
         p.setPen(QPen(palette().color(QPalette::Highlight), BORDER_WIDTH));
         p.setBrush(Qt::NoBrush);
         qreal half = BORDER_WIDTH / 2.0;
         p.drawRoundedRect(QRectF(half, half, s - BORDER_WIDTH, s - BORDER_WIDTH),
-                          AVATAR_RADIUS + 1, AVATAR_RADIUS + 1);
+                          radius + 1, radius + 1);
     }
 
     int inset = BORDER_WIDTH + 1;
     QRectF avatarRect(inset, inset, s - inset * 2, s - inset * 2);
 
     QPainterPath clip;
-    clip.addRoundedRect(avatarRect, AVATAR_RADIUS, AVATAR_RADIUS);
+    clip.addRoundedRect(avatarRect, radius, radius);
     p.setClipPath(clip);
 
     if (!avatar.isNull())
@@ -122,7 +124,7 @@ void VoiceAvatar::paintEvent(QPaintEvent *)
     else {
         p.setPen(Qt::NoPen);
         p.setBrush(palette().color(QPalette::Mid));
-        p.drawRoundedRect(avatarRect, AVATAR_RADIUS, AVATAR_RADIUS);
+        p.drawRoundedRect(avatarRect, radius, radius);
     }
 }
 
