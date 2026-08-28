@@ -8,6 +8,7 @@
 #include <QAbstractButton>
 #include <QAbstractItemView>
 #include <QAction>
+#include <QApplication>
 #include <QCursor>
 #include <QDialogButtonBox>
 #include <QEasingCurve>
@@ -89,7 +90,7 @@ QHash<QString, QIcon> &unicodeGlyphCache()
 
 QIcon renderUnicodeEmojiIcon(const QString &emojiText, int size)
 {
-    const qreal dpr = QGuiApplication::devicePixelRatio();
+    const qreal dpr = qApp->devicePixelRatio();
     const QString key = QStringLiteral("%1|%2|%3").arg(emojiText).arg(size).arg(dpr);
 
     QHash<QString, QIcon> &cache = unicodeGlyphCache();

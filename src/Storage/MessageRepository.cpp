@@ -238,7 +238,7 @@ void MessageRepository::markMessagesDeleted(const QList<Core::Snowflake> &messag
                       .arg(placeholders.join(QStringLiteral(", "))));
 
         for (int i = 0; i < count; ++i)
-            q.bindValue(i, static_cast<qint64>(messageIds[offset + i].get()));
+            q.bindValue(i, static_cast<qint64>(messageIds[offset + i]));
 
         execLogged(q, "MessageRepository: Mark messages deleted");
     }

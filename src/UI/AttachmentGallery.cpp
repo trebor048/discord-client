@@ -47,7 +47,11 @@ QCache<QString, QPixmap> &fullImageCache()
 
 void cacheFullImage(const QString &key, const QPixmap &pixmap)
 {
-    const qsizetype cost = qMax<qsizetype>(1, pixmap.sizeInBytes() / 1024);
+    // QPixmap has no sizeInBytes(); approximate with its raster size
+    // (width * height * bytes-per-pixel).
+    const qsizetype pixmapBytes = static_cast<qsizetype>(pixmap.width()) * pixmap.height()
+                                  * (pixmap.depth() / 8);
+    const qsizetype cost = qMax<qsizetype>(1, pixmapBytes / 1024);
     if (cost <= kImageCacheMaxBytes / 1024)
         fullImageCache().insert(key, new QPixmap(pixmap), static_cast<int>(cost));
 }

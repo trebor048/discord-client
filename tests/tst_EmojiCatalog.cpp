@@ -36,6 +36,11 @@ void TestEmojiCatalog::init()
     settings.clear();
     settings.sync();
     EmojiCatalog::clearCustomEmojis();
+    // EmojiPreferences keeps in-memory mirrors of the persisted lists, so the
+    // direct QSettings clear above leaves those mirrors stale. Reset through
+    // the public API so each test function still starts from an empty slate.
+    EmojiPreferences::setRecents({});
+    EmojiPreferences::setFavorites({});
 }
 
 void TestEmojiCatalog::lookupAndSearch()

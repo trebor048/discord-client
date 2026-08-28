@@ -61,6 +61,16 @@ void EmojiPreferences::saveList(const char *key, const QStringList &values)
     settings.setValue(QLatin1String(key), values);
 }
 
+bool EmojiPreferences::refreshMirror(const char *key, QStringList &mirror, int limit)
+{
+    const QStringList sanitized = sanitize(mirror, limit);
+    if (sanitized == mirror)
+        return false;
+    mirror = sanitized;
+    saveList(key, sanitized);
+    return true;
+}
+
 QStringList EmojiPreferences::recents()
 {
     CachedLists &cache = cachedLists();
@@ -73,6 +83,10 @@ QStringList EmojiPreferences::recents()
         // only when sanitization actually changed the stored value.
         if (sanitized != raw)
             saveList(kRecentsKey, sanitized);
+    } else {
+        // Emoji support can change between reads (a guild emoji is removed),
+        // so re-filter the mirror without a QSettings round-trip.
+        refreshMirror(kRecentsKey, cache.recents, kRecentLimit);
     }
     return cache.recents;
 }
@@ -87,6 +101,8 @@ QStringList EmojiPreferences::favorites()
         cache.favoritesLoaded = true;
         if (sanitized != raw)
             saveList(kFavoritesKey, sanitized);
+    } else {
+        refreshMirror(kFavoritesKey, cache.favorites, kFavoritesLimit);
     }
     return cache.favorites;
 }

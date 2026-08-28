@@ -1214,7 +1214,12 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
         if (contiguous) {
             const int numNew = trulyNew.size();
             beginInsertRows({}, insertRow, insertRow + numNew - 1);
-            messages.insert(firstIt, trulyNew.cbegin(), trulyNew.cend());
+            // QList (Qt 6) has no range/list insert overload, so grow the
+            // vector in one shift (insert numNew placeholder copies) and then
+            // move the fetched block into place.
+            messages.insert(insertRow, numNew, trulyNew.first());
+            for (int i = 0; i < numNew; ++i)
+                messages[insertRow + i] = std::move(trulyNew[i]);
             for (const auto &msg : trulyNew)
                 indexMessageEmojiUrls(msg);
             messageRowIndexDirty = true;

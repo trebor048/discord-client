@@ -177,7 +177,7 @@ void appendDiscordHeaders(curl_slist **headers, const ClientIdentity &identity, 
     std::vector<std::string> formattedHeaders;
     formattedHeaders.push_back(("X-Discord-Timezone: " + tz).toUtf8().toStdString());
     formattedHeaders.push_back(("X-Discord-Locale: " + locale).toUtf8().toStdString());
-    formattedHeaders.push_back(("X-Super-Properties: " + superProperties).toUtf8().toStdString());
+    formattedHeaders.push_back(("X-Super-Properties: " + superProperties).toStdString());
     formattedHeaders.push_back("X-Debug-Options: bugReporterEnabled");
     formattedHeaders.push_back(("Referer: " + referer).toUtf8().toStdString());
 
