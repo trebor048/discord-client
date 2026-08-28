@@ -55,9 +55,16 @@ std::optional<Discord::Member> UserManager::getMember(Snowflake guildId, Snowfla
 
 std::optional<QList<Snowflake>> UserManager::getMemberRoles(Snowflake guildId, Snowflake userId)
 {
-    if (auto *member = memberCache.object(MemberKey{ guildId, userId }))
+    // Populate the member cache on miss so repeated role lookups for the same
+    // member (role mentions, notification mention checks) do not re-query
+    // SQLite on every call.
+    auto member = getMember(guildId, userId);
+    if (member.has_value())
         return member->roles.hasValue() ? member->roles.get() : QList<Snowflake>{};
 
+    // getMember() additionally requires the users row, but roles live on the
+    // member row alone; fall back to it directly so a member whose user row is
+    // missing/uncached still returns its roles.
     auto dbMember = memberRepo.getMember(guildId, userId);
     if (!dbMember.has_value())
         return std::nullopt;

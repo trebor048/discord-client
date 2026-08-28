@@ -29,6 +29,22 @@ static uint32_t mmh32(const std::string &input, uint32_t seed)
 namespace Acheron {
 namespace Core {
 
+// True when the ordered set of group ids differs. Discord ships the full
+// groups array on every GUILD_MEMBER_LIST_UPDATE and bumps group *counts* on
+// presence changes, so comparing ids (not counts) is what separates a genuine
+// structural change from a cosmetic count refresh.
+static bool groupIdsDiffer(const QList<Discord::GuildMemberListUpdate::Group> &a,
+                           const QList<Discord::GuildMemberListUpdate::Group> &b)
+{
+    if (a.size() != b.size())
+        return true;
+    for (int i = 0; i < a.size(); ++i) {
+        if (a[i].id.get() != b[i].id.get())
+            return true;
+    }
+    return false;
+}
+
 MemberListManager::MemberListManager(Storage::ChannelRepository &channelRepo,
                                      Storage::RoleRepository &roleRepo,
                                      QObject *parent)
@@ -270,6 +286,12 @@ void MemberListManager::handleMemberListUpdate(const Discord::GuildMemberListUpd
     ListData &ld = gs.lists[update.id];
     ld.lastUsed = QDateTime::currentMSecsSinceEpoch();
 
+    // Snapshot the cached group list before replacement: a payload that only
+    // bumps group *counts* (e.g. a presence change) must not be classified as
+    // a structural change, or the full model reset fires on virtually every
+    // update and the user's scroll position is lost each time.
+    const auto oldGroups = ld.groups;
+
     if (hasGroups && !update.groups->isEmpty())
         ld.groups = update.groups;
 
@@ -280,7 +302,29 @@ void MemberListManager::handleMemberListUpdate(const Discord::GuildMemberListUpd
         responseTimer.stop();
     }
 
-    if (isActiveList)
+    // A batch is purely cosmetic when every op is an in-place UPDATE and the
+    // group list is unchanged. Those only repaint their target rows; structural
+    // ops (SYNC/INSERT/DELETE/INVALIDATE) or a replaced group list can shift
+    // indices / change the row count and must keep the full model reset.
+    bool pureUpdate = hasOps;
+    if (pureUpdate) {
+        for (const auto &op : update.ops.get()) {
+            if (op.op != QLatin1String("UPDATE")) {
+                pureUpdate = false;
+                break;
+            }
+        }
+    }
+    // Note: `groups` is a non-optional Field, so hasGroups is always true; the
+    // group list only *structurally* changes when the ordered set of group ids
+    // changes. Count-only updates (presence changes) refresh header rows in
+    // place below instead of forcing the full model reset.
+    const bool groupsReplaced = hasGroups && !update.groups->isEmpty()
+            && groupIdsDiffer(oldGroups, update.groups.get());
+    const bool structuralChange = groupsReplaced || !pureUpdate;
+    QList<int> updatedRows;
+
+    if (isActiveList && structuralChange)
         emit listAboutToReset();
 
     const QList<Discord::GuildMemberListUpdate::ListOp> emptyOps;
@@ -320,6 +364,8 @@ void MemberListManager::handleMemberListUpdate(const Discord::GuildMemberListUpd
             flushBatches();
             ML_LOG << "[ML]  UPDATE idx:" << (op.index.isUndefined() ? -1 : (int)op.index);
             processUpdate(op, ld, gs);
+            if (pureUpdate && !op.index.isUndefined())
+                updatedRows.append(op.index);
         } else if (opType == "DELETE") {
             if (!insertBatch.isEmpty()) {
                 processBatchInserts(insertBatch, ld, gs);
@@ -336,6 +382,18 @@ void MemberListManager::handleMemberListUpdate(const Discord::GuildMemberListUpd
     }
     flushBatches();
 
+    // Count-only group change on the cosmetic path: re-resolve the cached
+    // group header items against the new counts and repaint just those rows
+    // (the reset is skipped, so scroll position is preserved).
+    if (isActiveList && pureUpdate && !groupsReplaced && hasGroups && !update.groups->isEmpty()) {
+        for (auto it = ld.items.begin(); it != ld.items.end(); ++it) {
+            if (it.value().type == MemberListItem::Type::Group) {
+                resolveGroupInfo(it.value(), gs, ld);
+                updatedRows.append(it.key());
+            }
+        }
+    }
+
     if (isActiveList)
         updateTotalItemCountCache();
 
@@ -345,8 +403,10 @@ void MemberListManager::handleMemberListUpdate(const Discord::GuildMemberListUpd
            << "isActive:" << isActiveList
            << "totalItemCount:" << (isActiveList ? totalItemCount() : -1);
 
-    if (isActiveList)
+    if (isActiveList && structuralChange)
         emit listReset();
+    else if (isActiveList && pureUpdate && !updatedRows.isEmpty())
+        emit listRowsChanged(updatedRows);
 
     if (isActiveList && hasPendingRanges && pendingRanges != ranges)
         applyAndSendRanges(pendingRanges);
@@ -492,16 +552,17 @@ void MemberListManager::updateSubscriptionRange(int firstVisible, int lastVisibl
     // always [0, 99]
     QList<QPair<int, int>> newRanges = { { 0, 99 } };
 
-    if (lastVisible > 99) {
-        int firstRangeStart = (firstVisible / 100) * 100;
-        if (firstRangeStart > 0)
-            newRanges.append({ firstRangeStart, firstRangeStart + 99 });
-
-        int lastRangeStart = (lastVisible / 100) * 100;
-        if (lastRangeStart != firstRangeStart && lastRangeStart > 0) {
-            if (newRanges.size() < 3)
-                newRanges.append({ lastRangeStart, lastRangeStart + 99 });
-        }
+    // Subscribe every 100-row block that intersects the visible window. The
+    // previous first+last-only logic skipped the middle blocks of any viewport
+    // spanning 3+ blocks, and evictUnsubscribedItems() then evicted exactly
+    // those rows, leaving a blank band in the middle of the visible list.
+    const int firstBlock = firstVisible / 100;
+    const int lastBlock = lastVisible / 100;
+    for (int block = firstBlock; block <= lastBlock; ++block) {
+        const int start = block * 100;
+        if (start <= 0)
+            continue;
+        newRanges.append({ start, start + 99 });
     }
 
     if (newRanges == ranges && !hasPendingRanges)

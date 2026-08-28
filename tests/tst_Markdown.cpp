@@ -26,6 +26,7 @@ private slots:
     void testNewlines();
     void testBold();
     void testItalic();
+    void testItalicUnderscoreWordBoundary();
     void testStrikethrough();
     void testSpoiler();
     void testInlineCode();
@@ -89,6 +90,33 @@ void TestMarkdown::testItalic()
     QVERIFY(html == "<em>italic</em>");
 
     return;
+}
+
+void TestMarkdown::testItalicUnderscoreWordBoundary()
+{
+    Parser parser;
+    ParseState state;
+    state.isInline = true;
+
+    // Underscore emphasis requires word boundaries (Discord semantics): the
+    // opening _ must not be adjacent to a word character.
+    auto nodes = parser.parse("_italic_", state);
+    QVERIFY(parser.toHtml(nodes) == "<em>italic</em>");
+
+    nodes = parser.parse("x _italic_ y", state);
+    QVERIFY(parser.toHtml(nodes) == "x <em>italic</em> y");
+
+    // Mid-word underscores stay literal: no word boundary before the opener.
+    nodes = parser.parse("abc_foo_", state);
+    QVERIFY(parser.toHtml(nodes) == "abc_foo_");
+
+    nodes = parser.parse("a_b_c", state);
+    QVERIFY(parser.toHtml(nodes) == "a_b_c");
+
+    // Asterisk emphasis has no word-boundary requirement, so mid-word *
+    // still italicizes (consistent with Discord).
+    nodes = parser.parse("abc*foo*", state);
+    QVERIFY(parser.toHtml(nodes) == "abc<em>foo</em>");
 }
 
 void TestMarkdown::testStrikethrough()

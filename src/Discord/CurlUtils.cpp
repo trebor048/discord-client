@@ -189,6 +189,12 @@ bool wsSend(CURL *&curl, std::mutex &mutex, const char *data, size_t len, unsign
         return false;
 
     size_t sentTotal = 0;
+    // Bound the total time blocked on a congested socket. These payloads are
+    // ephemeral gateway frames (presence/typing/voice state) sent from the UI
+    // thread; freezing the UI while the socket drains is worse than dropping a
+    // single frame. 10 * 10ms = at most ~100ms per send.
+    constexpr int kMaxAgains = 10;
+    int againCount = 0;
     while (sentTotal < len) {
         size_t sentNow = 0;
         CURLcode res = curl_ws_send(curl, data + sentTotal, len - sentTotal, &sentNow, 0, flags);
@@ -196,7 +202,12 @@ bool wsSend(CURL *&curl, std::mutex &mutex, const char *data, size_t len, unsign
         if (res == CURLE_OK) {
             sentTotal += sentNow;
         } else if (res == CURLE_AGAIN) {
-            waitOnSocket(getActiveSocket(curl), true, 100);
+            if (++againCount >= kMaxAgains) {
+                qCWarning(LogNetwork) << "Giving up sending" << what
+                                      << "after" << againCount << "socket-busy retries";
+                return false;
+            }
+            waitOnSocket(getActiveSocket(curl), true, 10);
         } else {
             qCWarning(LogNetwork) << "Error sending" << what
                                   << "WebSocket payload:" << curl_easy_strerror(res);

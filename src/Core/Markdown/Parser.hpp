@@ -30,7 +30,10 @@ using Capture = QRegularExpressionMatch;
 
 // clang-format off
 using NestedParseFn = std::function<QList<AstNode>(QString, ParseState)>;
-using MatchFn = std::function<Capture(const QString &, const ParseState &)>;
+// MatchFn matches at `offset` within `source` (anchored). Keeping the offset
+// lets the parse loop advance without repeatedly removing from the front of
+// the string, which is O(n^2) on long messages.
+using MatchFn = std::function<Capture(const QString &, int, const ParseState &)>;
 using ParseFn = std::function<AstNode(const Capture &, NestedParseFn, ParseState)>;
 using QualityFn = std::function<double(const Capture&, const ParseState&, const QString&)>;
 using HtmlOutputFn = std::function<QString(const AstNode&, std::function<QString(const QList<AstNode>&)>)>;

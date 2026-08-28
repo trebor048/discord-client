@@ -141,8 +141,11 @@ void MessageManager::requestLoadChannel(Snowflake channelId)
         // disk cache
         QList<Discord::Message> msgs = repo.getLatestMessages(channelId, 30);
         if (!msgs.isEmpty()) { // probably good
+            // Reuse the persisted rendered markdown; only fall back to parsing
+            // for rows written before parsed_content existed (NULL column).
             for (auto &msg : msgs)
-                parseMessageContent(msg);
+                if (msg.parsedContentCached.isEmpty())
+                    parseMessageContent(msg);
 
             emit messagesReceived({
                     true,
@@ -248,8 +251,11 @@ void MessageManager::requestLoadHistory(Snowflake channelId, Snowflake beforeId)
         // disk cache
         QList<Discord::Message> msgs = repo.getMessagesBefore(channelId, beforeId, 30);
 
+        // Reuse the persisted rendered markdown; only fall back to parsing for
+        // rows written before parsed_content existed (NULL column).
         for (auto &msg : msgs)
-            parseMessageContent(msg);
+            if (msg.parsedContentCached.isEmpty())
+                parseMessageContent(msg);
 
         if (!msgs.isEmpty()) { // probably good
             emit messagesReceived({
@@ -381,6 +387,15 @@ void MessageManager::onMessageUpdated(const Discord::Message &message)
         haveBaseline = true;
     }
 
+    // Content/type drive the markdown parse; capture the persisted fields
+    // before applying so a reaction/embed/flag-only update skips both the
+    // re-parse and the full-row UPDATE (reactions are persisted separately).
+    const QString oldContent = haveBaseline ? merged.content.get() : QString();
+    const qint64 oldType = haveBaseline ? static_cast<qint64>(merged.type.get()) : -1;
+    const QDateTime oldEdited = haveBaseline ? merged.editedTimestamp.get() : QDateTime();
+    const QString oldEmbeds = haveBaseline ? merged.embedsJson : QString();
+    const qint64 oldFlags = haveBaseline ? static_cast<qint64>(merged.flags.get()) : 0;
+
     if (haveBaseline) {
         merged.applyUpdate(message);
     } else {
@@ -390,12 +405,26 @@ void MessageManager::onMessageUpdated(const Discord::Message &message)
         merged = message;
     }
 
-    parseMessageContent(merged);
+    // Most MESSAGE_UPDATEs carry only reactions/embeds/flags. Re-parsing the
+    // (unchanged) content each time wasted a full markdown pass on the UI
+    // thread; the parsed HTML only needs rebuilding when content or type
+    // actually changed, or when no cached parse exists yet (disk reload).
+    const bool contentChanged = merged.content != oldContent
+                                || static_cast<qint64>(merged.type.get()) != oldType;
+    if (contentChanged || merged.parsedContentCached.isEmpty())
+        parseMessageContent(merged);
 
     if (messageCache.contains(message.id))
         messageCache.insert(message.id, new Discord::Message(merged));
 
-    repo.updateMessageContent(merged);
+    // Persist only when a persisted column actually changed. Reaction-only
+    // updates are handled by the targeted updateReactionsJson below instead
+    // of a full-row UPDATE on the UI thread.
+    const bool metaChanged = merged.editedTimestamp.get() != oldEdited
+                             || merged.embedsJson != oldEmbeds
+                             || static_cast<qint64>(merged.flags.get()) != oldFlags;
+    if (contentChanged || metaChanged)
+        repo.updateMessageContent(merged);
 
     if (message.presentKeys.contains(QStringLiteral("reactions")))
         repo.updateReactionsJson(merged.id, merged.reactionsJson);
@@ -662,7 +691,11 @@ void MessageManager::emitReactionUpdate(Discord::Message &msg)
 {
     rebuildReactionsJson(msg);
     messageCache.insert(msg.id, new Discord::Message(msg));
-    repo.saveMessages({ msg });
+    // Reactions live in a single column; a targeted UPDATE is far cheaper than
+    // the full INSERT + user + attachments + prune + commit transaction that
+    // saveMessages runs (which happened here on every reaction click on the UI
+    // thread). Cached messages are always persisted, so the row exists.
+    repo.updateReactionsJson(msg.id, msg.reactionsJson);
     emit messagesReceived({ true, Discord::Client::MessageLoadType::Updated, msg.channelId, { msg } });
 }
 
@@ -907,8 +940,6 @@ void MessageManager::onApiMessagesReceived(const QList<Discord::Message> &messag
                                            Discord::Client::MessageLoadType type,
                                            Snowflake channelId)
 {
-    repo.saveMessages(messages);
-
     auto sortedMessages = messages;
     std::sort(sortedMessages.begin(), sortedMessages.end(),
               [](const auto &a, const auto &b) { return a.id.get() < b.id.get(); });
@@ -924,8 +955,13 @@ void MessageManager::onApiMessagesReceived(const QList<Discord::Message> &messag
             lowestKnownId[channelId] = sortedMessages.first().id;
     }
 
+    // Parse BEFORE persisting so the rendered markdown is stored in the cache
+    // DB and the next disk reload reuses it instead of re-parsing every
+    // message on the UI thread.
     for (auto &msg : sortedMessages)
         parseMessageContent(msg);
+
+    repo.saveMessages(sortedMessages);
 
     for (const auto &msg : sortedMessages) {
         // cache owns its own copy

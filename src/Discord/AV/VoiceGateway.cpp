@@ -52,6 +52,10 @@ void VoiceGateway::start()
 
     wantToClose = false;
     running = true;
+    // A fresh join starts with a clean retry budget; otherwise an exhausted
+    // session (5/5 attempts) would leave the new join's first-connect retry
+    // silently disabled.
+    reconnectAttempts = 0;
     networkThread = std::thread(&VoiceGateway::networkLoop, this);
 }
 
@@ -408,6 +412,12 @@ void VoiceGateway::interruptibleSleep(int milliseconds)
 void VoiceGateway::networkLoop()
 {
     do {
+        // A hardStop() that landed during the reconnect backoff must not fall
+        // through into another blocking connect (up to 10s) and then emit
+        // connected() on a gateway that is being torn down.
+        if (!running)
+            break;
+
         shouldReconnect = false;
 
         QString connectUrl = QStringLiteral("wss://%1/?v=%2")
@@ -430,7 +440,11 @@ void VoiceGateway::networkLoop()
             qCWarning(LogVoice) << "Failed to connect to voice gateway:"
                                 << curl_easy_strerror(res);
 
-            if (isResuming && reconnectAttempts < maxReconnectAttempts) {
+            // Retry any connect failure (first connect or resume): a
+            // transient blip on a brand-new join is no less recoverable than
+            // one during a resume, and previously it tore the voice session
+            // down immediately.
+            if (reconnectAttempts < maxReconnectAttempts) {
                 std::lock_guard lock(curlMutex);
                 curl_easy_cleanup(curl);
                 curl = nullptr;
@@ -465,7 +479,8 @@ void VoiceGateway::networkLoop()
         }
 
         generation++;
-        emit connected();
+        if (running)
+            emit connected();
 
         char chunk[8192];
         size_t rlen = 0;

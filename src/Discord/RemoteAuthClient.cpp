@@ -66,6 +66,11 @@ void RemoteAuthClient::stop()
     if (!running.exchange(false))
         return;
 
+    // Intentional teardown: mark the flow done so networkLoop's
+    // "exited without a terminal state" fallback does not surface a spurious
+    // ConnectionFailed after the user closed the dialog.
+    done = true;
+
     heartbeatCv.notify_all();
     if (networkThread.joinable())
         networkThread.join();

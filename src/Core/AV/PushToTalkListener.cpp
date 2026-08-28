@@ -108,7 +108,11 @@ void PushToTalkListener::refreshGlobalHotKey()
         return;
 
     const int combined = keySequence[0].toCombined();
-    const Qt::Key key = Qt::Key(combined & 0x00FFFFFF);
+    // Mask with ~KeyboardModifierMask (0x01FFFFFF), NOT 0x00FFFFFF: Qt special
+    // keys live in 0x01000000..0x01FFFFFF, so the narrower mask would strip the
+    // marker bit and turn e.g. F2 (0x01000031) into 0x31, which can never match
+    // a real keyEvent->key().
+    const Qt::Key key = Qt::Key(combined & int(~Qt::KeyboardModifierMask));
     const int modifiers = combined & int(Qt::KeyboardModifierMask);
 
     // Only letters and digits map to a sensible global hotkey. Any other key
@@ -190,8 +194,23 @@ bool PushToTalkListener::eventFilter(QObject *watched, QEvent *event)
 {
     if (event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease) {
         const auto *keyEvent = static_cast<QKeyEvent *>(event);
-        if (!keyEvent->isAutoRepeat() && !keySequence.isEmpty() && keyEvent->key() == keySequence[0]) {
-            setHeld(event->type() == QEvent::KeyPress);
+        if (!keyEvent->isAutoRepeat() && !keySequence.isEmpty()) {
+            // keySequence[0] is a combined key (modifiers | base key) while
+            // keyEvent->key() reports the base key alone, so the two can never
+            // be compared directly for any binding that includes modifiers.
+            const int combined = keySequence[0].toCombined();
+            const Qt::Key base = Qt::Key(combined & int(~Qt::KeyboardModifierMask));
+            const int mods = combined & int(Qt::KeyboardModifierMask);
+            const bool isPress = event->type() == QEvent::KeyPress;
+            // A KeyRelease always ends the hold once the base key lifts, even
+            // if the user already released the modifier(s): requiring exact
+            // modifier equality on the release edge would leave the mic stuck
+            // open when the modifier leaves first (press matched Ctrl+V, but
+            // the V release arrives with modifiers()==0).
+            if (keyEvent->key() == base
+                && (isPress
+                    || (int(keyEvent->modifiers()) & int(Qt::KeyboardModifierMask)) == mods))
+                setHeld(isPress);
         }
     } else if (event->type() == QEvent::ApplicationDeactivate) {
         // Losing focus while the key is held would otherwise leave the mic

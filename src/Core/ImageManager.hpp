@@ -4,6 +4,7 @@
 #include <QString>
 #include <QUrl>
 #include <QCache>
+#include <QImage>
 #include <QPixmap>
 #include <QTemporaryDir>
 #include <QHash>
@@ -12,6 +13,7 @@
 #include <QBuffer>
 #include <QMovie>
 #include <QLabel>
+#include <QThreadPool>
 #include <QTimer>
 
 #include <limits>
@@ -235,17 +237,32 @@ signals:
     void imageFailed(const QUrl &url, const QSize &size);
 
 private:
+    // Result of a worker-thread decode. `image` is already downscaled to the
+    // physical (dpr-aware) display size; only QPixmap::fromImage happens on
+    // the main thread because QPixmap is not thread-safe.
+    struct DecodeResult
+    {
+        QImage image;
+        bool ok = false;
+    };
+
     QPixmap getImpl(const QUrl &url, const QSize &size, PinGroup pin, bool fetchIfNeeded);
     void request(const QUrl &url, const QSize &size, PinGroup pin);
     void fetchFromNetwork(const QUrl &url, const QSize &size, PinGroup pin);
     void fetchRawProxyUrl(const ImageRequestKey &k, const QUrl &url, const QSize &size,
                           qreal dpr);
+    void scheduleAsyncDecode(const ImageRequestKey &k, const QUrl &url, const QSize &size,
+                             bool proxy, bool allowProxyFallback, qreal dpr, QByteArray data);
+    void onImageDecoded(const ImageRequestKey &k, const QUrl &url, const QSize &size, bool proxy,
+                        bool allowProxyFallback, qreal dpr, const QByteArray &data,
+                        DecodeResult result);
     void failRequest(const ImageRequestKey &k, const QUrl &url, const QSize &size,
                      const QString &reason);
     void storeFetchedPixmap(const ImageRequestKey &k, const QUrl &url, const QSize &size,
                             const QByteArray &data, QPixmap pixmap, PinGroup pin, bool proxy,
                             qreal dpr);
     void onDiskCacheWritten(const ImageRequestKey &k, const QString &path, bool ok);
+    void onDiskCachePruned(const QStringList &removedPaths);
     QString getCachePath(const QUrl &url, const QSize &size) const;
     static bool isDiscordProxyUrl(const QUrl &url);
     static QUrl buildOptimizedUrl(const QUrl &proxyUrl, const QSize &displaySize, qreal dpr);
@@ -257,6 +274,13 @@ private:
     QNetworkAccessManager *networkManager;
     QTemporaryDir tempDir;
     int storesSincePrune = 0;
+    bool m_pruneInFlight = false;
+
+    // Dedicated, bounded pool for image decodes: a channel load enqueues many
+    // decodes, and running them all on QThreadPool::globalInstance() (cores-1
+    // threads) turns a scroll into a CPU spike. Decode work is CPU-bound, so a
+    // small fixed pool keeps the UI responsive.
+    QThreadPool m_decodePool;
 
     QSet<ImageRequestKey> requests;
     QSet<ImageRequestKey> failedRequests;

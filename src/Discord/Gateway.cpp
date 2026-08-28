@@ -12,6 +12,8 @@
 #include "Proto/ProtoReader.hpp"
 #include "Proto/UserSettings.hpp"
 
+#include <QJsonDocument>
+#include <QJsonParseError>
 #include <QUrl>
 
 #include <algorithm>
@@ -117,7 +119,16 @@ void Gateway::sendPayload(const QJsonObject &obj)
 
 void Gateway::sendPayload(const QByteArray &data)
 {
-    CurlUtils::wsSend(curl, curlMutex, data.constData(), data.size(), CURLWS_TEXT, "gateway");
+    const bool ok =
+            CurlUtils::wsSend(curl, curlMutex, data.constData(), data.size(), CURLWS_TEXT, "gateway");
+    if (!ok) {
+        // A blocked/partial frame leaves the outbound WS stream corrupt: the
+        // peer either closes it (decode error) or the connection hangs until
+        // the heartbeat zombie detector fires. Reconnect immediately instead —
+        // the inbound session is untouched, so the reconnect resumes cleanly.
+        qCWarning(LogDiscord) << "Gateway send failed — forcing reconnect";
+        shouldReconnect = true;
+    }
 }
 
 void Gateway::onPayloadReceived(const QJsonObject &root)
@@ -861,31 +872,27 @@ void Gateway::networkLoop()
         if (res != CURLE_OK) {
             qWarning() << "Failed to connect to gateway:" << curl_easy_strerror(res);
 
-            // Retry any connect failure (initial or reconnect) with backoff
-            if (reconnectAttempts < maxReconnectAttempts) {
-                curl_easy_cleanup(connectingCurl);
-
-                // Snapshot after incrementing: the UI thread resets
-                // reconnectAttempts on READY, and reading it again later could
-                // observe 0 and compute an invalid backoff.
-                const int attempt = reconnectAttempts.fetch_add(1) + 1;
-                int delay = reconnectBackoffMs(attempt);
-                qCInfo(LogDiscord) << "Connect attempt" << attempt
-                                   << "failed, retrying in" << delay << "ms";
-                emit reconnecting(attempt, maxReconnectAttempts);
-                if (!waitInterruptible(std::chrono::milliseconds(delay)))
-                    break;
-                shouldReconnect = true;
-                continue;
-            }
-
-            emit disconnected(CloseCode::INTERNAL,
-                              QString("Failed to connect to gateway: ") + curl_easy_strerror(res));
+            // Retry connect failures (initial or reconnect) with capped backoff
+            // and no attempt ceiling: Discord expects clients to keep retrying,
+            // and only a fatal close code or an explicit stop() should end the
+            // gateway. A transient network blip must not strand the client.
             curl_easy_cleanup(connectingCurl);
-            running = false;
-            if (ingest)
-                ingest->stop();
-            return;
+
+            // Snapshot after incrementing: the UI thread resets
+            // reconnectAttempts on READY, and reading it again later could
+            // observe 0 and compute an invalid backoff.
+            const int attempt = reconnectAttempts.fetch_add(1) + 1;
+            int delay = reconnectBackoffMs(attempt);
+            const int overrideMs = nextReconnectDelayMs.exchange(0);
+            if (overrideMs > 0)
+                delay = std::max(delay, overrideMs);
+            qCInfo(LogDiscord) << "Connect attempt" << attempt
+                               << "failed, retrying in" << delay << "ms";
+            emit reconnecting(attempt, maxReconnectAttempts);
+            if (!waitInterruptible(std::chrono::milliseconds(delay)))
+                break;
+            shouldReconnect = true;
+            continue;
         }
 
         {
@@ -895,7 +902,6 @@ void Gateway::networkLoop()
         emit connected();
 
         char chunk[8192];
-        bool alreadyEmittedDisconnect = false;
         size_t rlen = 0;
         const curl_ws_frame *meta = nullptr;
 
@@ -978,7 +984,29 @@ void Gateway::networkLoop()
                                    << "reason:" << closeReason;
                 CloseCode cc = static_cast<CloseCode>(closeCode);
                 emit disconnected(cc, closeReason);
-                alreadyEmittedDisconnect = true;
+                // 4008 (RATE_LIMITED) carries {"retry_after": ms} in the close
+                // payload — honor it so a reconnect storm (e.g. session
+                // replacement while another client is open) doesn't ping-pong
+                // against the rate limiter.
+                if (cc == CloseCode::RATE_LIMITED) {
+                    QJsonParseError parseError;
+                    const QJsonDocument doc =
+                            QJsonDocument::fromJson(closeReason.toUtf8(), &parseError);
+                    if (parseError.error == QJsonParseError::NoError && doc.isObject()) {
+                        const double retryAfterMs = doc.object().value("retry_after").toDouble();
+                        if (retryAfterMs > 0)
+                            nextReconnectDelayMs = qMin(static_cast<int>(retryAfterMs), 120'000);
+                    }
+                } else if (cc == CloseCode::TOO_MANY_SESSIONS) {
+                    // The account is at its concurrent-session cap (another
+                    // Discord client is open). Retry slowly so the user has
+                    // time to close one — hot-looping here just gets us kicked
+                    // again and again.
+                    qCWarning(LogDiscord)
+                            << "Too many concurrent sessions — close another Discord client "
+                               "to free a slot; retrying slowly";
+                    nextReconnectDelayMs = 60'000;
+                }
                 // 4006 (SESSION_NO_LONGER_VALID) and 4007 (INVALID_SEQ) mean
                 // the resume session is dead — clear it so the reconnect does a
                 // fresh IDENTIFY instead of looping RESUME → 4006 forever.
@@ -1008,20 +1036,12 @@ void Gateway::networkLoop()
             curl = nullptr;
         }
 
-        // If shouldReconnect was set (by RECONNECT/INVALID_SESSION opcode handlers
-        // or by zombie detection), prepare for reconnection.
-        // Don't emit a second "attempts exhausted" disconnect if the close-frame
-        // handler already emitted the real close code — that would override the
-        // true reason with a misleading INTERNAL code.
-        if (shouldReconnect && running && reconnectAttempts >= maxReconnectAttempts) {
-            shouldReconnect = false;
-            if (!alreadyEmittedDisconnect)
-                emit disconnected(CloseCode::INTERNAL,
-                                  QStringLiteral("Gateway reconnect attempts exhausted"));
-            break;
-        }
-
-        if (shouldReconnect && running && reconnectAttempts < maxReconnectAttempts) {
+        // If shouldReconnect was set (by RECONNECT/INVALID_SESSION opcode
+        // handlers, zombie detection, a send failure, or a server close),
+        // prepare for reconnection. There is no attempt ceiling: keep retrying
+        // with capped exponential backoff until the session is restored, a
+        // fatal close code stops us, or the gateway is explicitly stopped.
+        if (shouldReconnect && running) {
             reconnectAttempts++;
             isResuming.store(canResume.load());
 
@@ -1041,6 +1061,9 @@ void Gateway::networkLoop()
 
             const int attempt = reconnectAttempts.load();
             int delay = reconnectBackoffMs(attempt);
+            const int overrideMs = nextReconnectDelayMs.exchange(0);
+            if (overrideMs > 0)
+                delay = std::max(delay, overrideMs);
             qCInfo(LogDiscord) << "Reconnecting in" << delay << "ms (attempt" << attempt << ")";
             emit reconnecting(attempt, maxReconnectAttempts);
             if (!waitInterruptible(std::chrono::milliseconds(delay))) {
@@ -1049,7 +1072,7 @@ void Gateway::networkLoop()
             }
         }
 
-    } while (shouldReconnect && running && reconnectAttempts <= maxReconnectAttempts);
+    } while (shouldReconnect && running);
 
     // Ensure heartbeat thread exits when the network loop is done
     running = false;

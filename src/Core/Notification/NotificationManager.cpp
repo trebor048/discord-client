@@ -16,6 +16,7 @@
 #include <QRegularExpression>
 #include <QSystemTrayIcon>
 #include <QPointer>
+#include <QThreadPool>
 
 #include <vector>
 
@@ -677,15 +678,17 @@ void NotificationManager::onMessageCreated(const Discord::Message &message)
     // Ignore bots
     if (author.bot.getOr(false)) return;
 
+    // Don't notify for the currently active channel. Resolve this before the
+    // channel DB lookup: the active channel is the most common case, and each
+    // lookup otherwise runs two SELECTs on the UI thread per incoming message.
+    if (channelId == m_activeChannelId) return;
+
     // Get channel
     auto channel = m_instance->getChannel(channelId);
     if (!channel) {
         qCWarning(LogCore) << "notification dropped: channel not found for message" << message.id.get().toString();
         return;
     }
-
-    // Don't notify for current active channel
-    if (channelId == m_activeChannelId) return;
 
     // Check streamer mode
     auto streamer = evaluateStreamerMode();
@@ -748,10 +751,11 @@ void NotificationManager::onVoiceStateUpdated(const Discord::VoiceState &state)
     // Check ignore list
     if (m_ignoreUsersSet.contains(userId.toString())) return;
 
-    // Per-user debounce
+    // Per-user debounce. Checked here (cheap early-out) but only recorded
+    // right before a notification is actually shown, so mute/deafen/stream
+    // toggles and unknown users don't consume the window.
     qint64 lastUserVoice = m_lastVoiceNotification.value(userId, 0);
     if (now - lastUserVoice < m_settings.voiceDebounceMs) return;
-    m_lastVoiceNotification[userId] = now;
 
     auto user = getUser(userId);
     if (!user) return;
@@ -824,6 +828,7 @@ void NotificationManager::onVoiceStateUpdated(const Discord::VoiceState &state)
     // Handle join
     if (!oldChannelId.has_value() && state.channelId.hasValue()) {
         if (shouldNotify(newChannel)) {
+            m_lastVoiceNotification[userId] = now;
             auto notification = createVoiceNotification(*user, *newChannel, "joined");
             showNotification(notification);
         }
@@ -831,6 +836,7 @@ void NotificationManager::onVoiceStateUpdated(const Discord::VoiceState &state)
     // Handle leave
     else if (oldChannelId.has_value() && !state.channelId.hasValue()) {
         if (shouldNotify(oldChannel)) {
+            m_lastVoiceNotification[userId] = now;
             auto notification = createVoiceNotification(*user, *oldChannel, "left");
             showNotification(notification);
         }
@@ -839,11 +845,13 @@ void NotificationManager::onVoiceStateUpdated(const Discord::VoiceState &state)
     else if (oldChannelId.has_value() && state.channelId.hasValue() && oldChannelId.value() != state.channelId.get()) {
         // Left old channel
         if (shouldNotify(oldChannel)) {
+            m_lastVoiceNotification[userId] = now;
             auto notification = createVoiceNotification(*user, *oldChannel, "left");
             showNotification(notification);
         }
         // Joined new channel
         if (shouldNotify(newChannel)) {
+            m_lastVoiceNotification[userId] = now;
             auto notification = createVoiceNotification(*user, *newChannel, "joined");
             showNotification(notification);
         }
@@ -1407,10 +1415,42 @@ void NotificationManager::checkStreamerMode()
     const QSettings settings;
     const bool manualEnabled = settings.value("streamer/enabled", false).toBool();
     const bool autoDetect = settings.value("streamer/auto_detect", false).toBool();
-    const bool detected = autoDetect && streamingSoftwareRunning();
 
-    m_streamerModeEnabled = manualEnabled || detected;
-    m_isStreaming = m_streamerModeEnabled;
+    if (!autoDetect) {
+        m_streamerModeEnabled = manualEnabled;
+        m_isStreaming = m_streamerModeEnabled;
+        return;
+    }
+
+    // Manual enable applies immediately; the process-table scan runs off the
+    // UI thread so EnumProcesses/OpenProcess over every process can't stutter
+    // the client every 5s. One scan in flight at a time is enough.
+    if (m_streamerDetectInFlight)
+        return;
+    m_streamerDetectInFlight = true;
+
+    QPointer<NotificationManager> guard(this);
+    QThreadPool::globalInstance()->start([guard, manualEnabled]() {
+        const bool detected = streamingSoftwareRunning();
+        if (guard) {
+            QMetaObject::invokeMethod(
+                    guard, [guard, detected]() {
+                        guard->m_streamerDetectInFlight = false;
+                        // Re-read the settings on the UI thread: the user may
+                        // have toggled enable/auto-detect while the scan was in
+                        // flight, and the result must not override that.
+                        const QSettings settings;
+                        const bool enabledNow =
+                                settings.value("streamer/enabled", false).toBool();
+                        const bool autoDetectNow =
+                                settings.value("streamer/auto_detect", false).toBool();
+                        guard->m_streamerModeEnabled =
+                                autoDetectNow ? (enabledNow || detected) : enabledNow;
+                        guard->m_isStreaming = guard->m_streamerModeEnabled;
+                    },
+                    Qt::QueuedConnection);
+        }
+    });
 }
 
 bool NotificationManager::shouldPlaySoundForType(const Notification::ToastNotificationData &data) const

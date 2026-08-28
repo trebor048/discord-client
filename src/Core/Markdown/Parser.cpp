@@ -30,7 +30,10 @@ QList<AstNode> Parser::parse(QString source, ParseState state)
         source += "\n\n";
     }
 
-    while (!source.isEmpty()) {
+    int pos = 0;
+    const int sourceLength = source.size();
+
+    while (pos < sourceLength) {
         MarkdownRule *bestRule = nullptr;
         Capture bestCapture;
         double bestQuality = std::numeric_limits<double>::lowest();
@@ -44,7 +47,7 @@ QList<AstNode> Parser::parse(QString source, ParseState state)
 
             // Cheap pre-filter: skip rules whose anchored regex cannot
             // possibly match the current starting character.
-            if (!rule.firstChars.isEmpty() && !rule.firstChars.contains(source.at(0)))
+            if (!rule.firstChars.isEmpty() && !rule.firstChars.contains(source.at(pos)))
                 continue;
 
             if (foundMatch && rule.order > currentBestOrder)
@@ -53,9 +56,9 @@ QList<AstNode> Parser::parse(QString source, ParseState state)
             Capture capture;
 
             if (rule.match) {
-                capture = rule.match(source, state);
+                capture = rule.match(source, pos, state);
             } else {
-                capture = rule.regex.match(source, 0, QRegularExpression::NormalMatch,
+                capture = rule.regex.match(source, pos, QRegularExpression::NormalMatch,
                                            QRegularExpression::AnchorAtOffsetMatchOption);
             }
 
@@ -86,11 +89,11 @@ QList<AstNode> Parser::parse(QString source, ParseState state)
             // bad! error!
             AstNode node;
             node.type = "text";
-            node.content = source.left(1);
+            node.content = source.mid(pos, 1);
             result.append(node);
 
             state.prevCapture = node.content;
-            source.remove(0, 1);
+            pos += 1;
             continue;
         }
 
@@ -107,9 +110,11 @@ QList<AstNode> Parser::parse(QString source, ParseState state)
         // maybe flatten here
         result.append(parsedNode);
 
+        // Because every rule is anchored at `pos`, captured(0) spans exactly
+        // [pos, pos+length) of the original source.
         QString capturedStr = bestCapture.captured(0);
         state.prevCapture = capturedStr;
-        source.remove(0, capturedStr.length());
+        pos += capturedStr.length();
     }
 
     return result;
@@ -226,9 +231,9 @@ void Parser::setChannelResolver(ChannelResolverFn resolver)
 
 static MatchFn inlineRegex(QRegularExpression regex)
 {
-    return [regex](const QString &source, const ParseState &state) -> Capture {
+    return [regex](const QString &source, int offset, const ParseState &state) -> Capture {
         if (state.isInline)
-            return regex.match(source, 0, QRegularExpression::NormalMatch,
+            return regex.match(source, offset, QRegularExpression::NormalMatch,
                                QRegularExpression::AnchorAtOffsetMatchOption);
         else
             return Capture();
@@ -237,9 +242,9 @@ static MatchFn inlineRegex(QRegularExpression regex)
 
 static MatchFn blockRegex(QRegularExpression regex)
 {
-    return [regex](const QString &source, const ParseState &state) -> Capture {
+    return [regex](const QString &source, int offset, const ParseState &state) -> Capture {
         if (!state.isInline)
-            return regex.match(source, 0, QRegularExpression::NormalMatch,
+            return regex.match(source, offset, QRegularExpression::NormalMatch,
                                QRegularExpression::AnchorAtOffsetMatchOption);
         else
             return Capture();
@@ -248,8 +253,8 @@ static MatchFn blockRegex(QRegularExpression regex)
 
 static MatchFn anyScopeRegex(QRegularExpression regex)
 {
-    return [regex](const QString &source, const ParseState &state) -> Capture {
-        return regex.match(source, 0, QRegularExpression::NormalMatch,
+    return [regex](const QString &source, int offset, const ParseState &state) -> Capture {
+        return regex.match(source, offset, QRegularExpression::NormalMatch,
                            QRegularExpression::AnchorAtOffsetMatchOption);
     };
 }
@@ -259,7 +264,9 @@ void Parser::setupDefaultRules()
     MarkdownRule newline;
     newline.name = "newline";
     newline.order = 10;
-    newline.regex = QRegularExpression(R"(^(?:\n *)*\n)");
+    // \G anchors at the match() offset, unlike ^ which binds to the string
+    // start; the parse loop advances an offset instead of trimming the string.
+    newline.regex = QRegularExpression(R"(\G(?:\n *)*\n)");
     newline.match = blockRegex(newline.regex);
     newline.parse = [](const Capture &match, NestedParseFn nestedParse,
                        ParseState state) -> AstNode { return {}; };
@@ -272,7 +279,7 @@ void Parser::setupDefaultRules()
     MarkdownRule escape;
     escape.name = "escape";
     escape.order = 12;
-    escape.regex = QRegularExpression(R"(^\\([^0-9A-Za-z\s]))");
+    escape.regex = QRegularExpression(R"(\G\\([^0-9A-Za-z\s]))");
     escape.match = inlineRegex(escape.regex);
     escape.parse = [](const Capture &match, NestedParseFn nestedParse,
                       ParseState state) -> AstNode {
@@ -290,7 +297,7 @@ void Parser::setupDefaultRules()
     MarkdownRule codeBlock;
     codeBlock.name = "codeBlock";
     codeBlock.order = 14;
-    codeBlock.regex = QRegularExpression(R"(^```([a-zA-Z0-9_+#.-]*)\n([\s\S]*?)```)");
+    codeBlock.regex = QRegularExpression(R"(\G```([a-zA-Z0-9_+#.-]*)\n([\s\S]*?)```)");
     codeBlock.match = anyScopeRegex(codeBlock.regex);
     codeBlock.parse = [](const Capture &match, NestedParseFn nestedParse,
                          ParseState state) -> AstNode {
@@ -315,7 +322,7 @@ void Parser::setupDefaultRules()
     MarkdownRule url;
     url.name = "url";
     url.order = 16;
-    url.regex = QRegularExpression(R"(^(https?:\/\/[^\s<]+[^<.,:;"')\]\s]))");
+    url.regex = QRegularExpression(R"(\G(https?:\/\/[^\s<]+[^<.,:;"')\]\s]))");
     url.match = inlineRegex(url.regex);
     url.parse = [](const Capture &match, NestedParseFn nestedParse, ParseState state) -> AstNode {
         AstNode node;
@@ -336,7 +343,7 @@ void Parser::setupDefaultRules()
     link.name = "link";
     link.order = 17;
     link.regex = QRegularExpression(
-            R"(^\[((?:\[[^\]]*\]|[^\[\]]|\](?=[^\[]*\]))*)\]\(\s*<?((?:\([^)]*\)|[^\s\\]|\\.)*?)>?(?:\s+['"]([\s\S]*?)['"])?\s*\))");
+            R"(\G\[((?:\[[^\]]*\]|[^\[\]]|\](?=[^\[]*\]))*)\]\(\s*<?((?:\([^)]*\)|[^\s\\]|\\.)*?)>?(?:\s+['"]([\s\S]*?)['"])?\s*\))");
     link.match = inlineRegex(link.regex);
     link.parse = [](const Capture &match, NestedParseFn nestedParse, ParseState state) -> AstNode {
         AstNode node;
@@ -362,7 +369,7 @@ void Parser::setupDefaultRules()
     em.name = "em";
     em.order = 20;
     em.regex = QRegularExpression(
-            R"(^\b_((?:__|\\[\s\S]|[^\\_])+?)_\b|^\*(?=\S)((?:\*\*|\\[\s\S]|\s+(?:\\[\s\S]|[^\s\*\\]|\*\*)|[^\s\*\\])+?)\*(?!\*))");
+            R"(\G\b_((?:__|\\[\s\S]|[^\\_])+?)_\b|\G\*(?=\S)((?:\*\*|\\[\s\S]|\s+(?:\\[\s\S]|[^\s\*\\]|\*\*)|[^\s\*\\])+?)\*(?!\*))");
     em.match = inlineRegex(em.regex);
     em.parse = [](const Capture &match, NestedParseFn nestedParse, ParseState state) -> AstNode {
         AstNode node;
@@ -384,7 +391,7 @@ void Parser::setupDefaultRules()
     MarkdownRule user;
     user.name = "user";
     user.order = 21;
-    user.regex = QRegularExpression(R"(^<@!?([0-9]+)>)");
+    user.regex = QRegularExpression(R"(\G<@!?([0-9]+)>)");
     user.match = anyScopeRegex(user.regex);
     user.parse = [](const Capture &match, NestedParseFn nestedParse, ParseState state) -> AstNode {
         AstNode node;
@@ -399,7 +406,7 @@ void Parser::setupDefaultRules()
     channel.name = "channel";
     channel.order = 21;
     // Discord only treats <#id> as a channel mention; bare <id> is plain text.
-    channel.regex = QRegularExpression(R"(^<#([0-9]+)>)");
+    channel.regex = QRegularExpression(R"(\G<#([0-9]+)>)");
     channel.match = anyScopeRegex(channel.regex);
     channel.parse = [](const Capture &match, NestedParseFn nestedParse, ParseState state) -> AstNode {
         AstNode node;
@@ -413,7 +420,7 @@ void Parser::setupDefaultRules()
     MarkdownRule customEmoji;
     customEmoji.name = "customEmoji";
     customEmoji.order = 21;
-    customEmoji.regex = QRegularExpression(R"(^<(a?):([a-zA-Z0-9_]{1,32}):(\d+)>)");
+    customEmoji.regex = QRegularExpression(R"(\G<(a?):([a-zA-Z0-9_]{1,32}):(\d+)>)");
     customEmoji.match = anyScopeRegex(customEmoji.regex);
     customEmoji.parse = [](const Capture &match, NestedParseFn nestedParse,
                            ParseState state) -> AstNode {
@@ -430,7 +437,7 @@ void Parser::setupDefaultRules()
     MarkdownRule strong;
     strong.name = "strong";
     strong.order = 21;
-    strong.regex = QRegularExpression(R"(^\*\*((?:\\[\s\S]|[^\\])+?)\*\*(?!\*))");
+    strong.regex = QRegularExpression(R"(\G\*\*((?:\\[\s\S]|[^\\])+?)\*\*(?!\*))");
     strong.match = inlineRegex(strong.regex);
     strong.parse = [](const Capture &match, NestedParseFn nestedParse,
                       ParseState state) -> AstNode {
@@ -455,7 +462,7 @@ void Parser::setupDefaultRules()
     MarkdownRule u;
     u.name = "u";
     u.order = 21;
-    u.regex = QRegularExpression(R"(^__((?:\\[\s\S]|[^\\])+?)__(?!_))");
+    u.regex = QRegularExpression(R"(\G__((?:\\[\s\S]|[^\\])+?)__(?!_))");
     u.match = inlineRegex(u.regex);
     u.parse = [](const Capture &match, NestedParseFn nestedParse, ParseState state) -> AstNode {
         AstNode node;
@@ -477,7 +484,7 @@ void Parser::setupDefaultRules()
     MarkdownRule strike;
     strike.name = "strike";
     strike.order = 22;
-    strike.regex = QRegularExpression(R"(^~~([\s\S]+?)~~(?!_))");
+    strike.regex = QRegularExpression(R"(\G~~([\s\S]+?)~~(?!_))");
     strike.match = inlineRegex(strike.regex);
     strike.parse = [](const Capture &match, NestedParseFn nestedParse,
                       ParseState state) -> AstNode {
@@ -498,7 +505,7 @@ void Parser::setupDefaultRules()
     MarkdownRule spoiler;
     spoiler.name = "spoiler";
     spoiler.order = 22;
-    spoiler.regex = QRegularExpression(R"(^\|\|([\s\S]+?)\|\|)");
+    spoiler.regex = QRegularExpression(R"(\G\|\|([\s\S]+?)\|\|)");
     spoiler.match = inlineRegex(spoiler.regex);
     spoiler.parse = [](const Capture &match, NestedParseFn nestedParse,
                        ParseState state) -> AstNode {
@@ -521,7 +528,7 @@ void Parser::setupDefaultRules()
     inlineCode.order = 23;
     // Content may be empty (``) or a single space (` `); the lazy body plus
     // backreference handles both without requiring a non-backtick char.
-    inlineCode.regex = QRegularExpression(R"(^(`+)([\s\S]*?)\1(?!`))");
+    inlineCode.regex = QRegularExpression(R"(\G(`+)([\s\S]*?)\1(?!`))");
     inlineCode.match = inlineRegex(inlineCode.regex);
     inlineCode.parse = [](const Capture &match, NestedParseFn nestedParse,
                           ParseState state) -> AstNode {
@@ -545,7 +552,7 @@ void Parser::setupDefaultRules()
     MarkdownRule br;
     br.name = "br";
     br.order = 24;
-    br.regex = QRegularExpression(R"(^\n)");
+    br.regex = QRegularExpression(R"(\G\n)");
     br.match = anyScopeRegex(br.regex);
     br.parse = [](const Capture &match, NestedParseFn nestedParse, ParseState state) -> AstNode {
         return {};
@@ -560,7 +567,7 @@ void Parser::setupDefaultRules()
     text.name = "text";
     text.order = 25;
     text.regex =
-            QRegularExpression(R"(^[\s\S]+?(?=[^0-9A-Za-z\s\x{00C0}-\x{ffff}-]|\n\n|\n|\w+:\S|$))");
+            QRegularExpression(R"(\G[\s\S]+?(?=[^0-9A-Za-z\s\x{00C0}-\x{ffff}-]|\n\n|\n|\w+:\S|$))");
     text.match = anyScopeRegex(text.regex);
     text.parse = [](const Capture &match, NestedParseFn nestedParse, ParseState state) -> AstNode {
         AstNode node;

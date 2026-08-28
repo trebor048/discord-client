@@ -252,6 +252,9 @@ private:
     std::atomic<bool> canResume{ false };
     std::atomic<bool> isResuming{ false };
     std::atomic<int> reconnectAttempts{ 0 };
+    // Server-imposed delay (ms) before the next reconnect: set by close-code
+    // handling (4008 retry_after, 4015 session cap), consumed by the backoff.
+    std::atomic<int> nextReconnectDelayMs{ 0 };
     static constexpr int maxReconnectAttempts = 5;
 };
 

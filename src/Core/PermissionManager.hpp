@@ -3,6 +3,8 @@
 #include <QObject>
 #include <QCache>
 #include <QPair>
+#include <iterator>
+#include <list>
 #include <optional>
 
 #include "Snowflake.hpp"
@@ -49,7 +51,12 @@ private:
     Storage::MemberRepository memberRepo;
 
     QHash<CacheKey, Discord::Permissions> permissionCache;
-    QList<CacheKey> permissionCacheLru; // oldest first, most-recently-used last
+    // O(1) LRU: `std::list` front = least recently used, back = most recently
+    // used. The index maps each key to its list iterator so cache hits can
+    // promote without an O(n) `removeOne` scan (this is the sidebar's hot path).
+    using LruList = std::list<CacheKey>;
+    LruList permissionCacheLru;
+    QHash<CacheKey, LruList::iterator> permissionCacheLruIndex;
 };
 
 } // namespace Core

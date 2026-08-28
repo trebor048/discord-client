@@ -474,6 +474,7 @@ ImageManager::ImageManager(QObject *parent) : QObject(parent)
     networkManager = new QNetworkAccessManager(this);
     // QCache cost is per-entry; we budget in decoded bytes (32bpp).
     cache.setMaxCost(kRamCacheBudgetBytes);
+    m_decodePool.setMaxThreadCount(3);
 
     if (!tempDir.isValid())
         qCWarning(LogCore) << "Failed to create temp directory for image cache";
@@ -678,20 +679,10 @@ void ImageManager::fetchFromNetwork(const QUrl &url, const QSize &size, PinGroup
         QByteArray data = reply->readAll();
         reply->deleteLater();
 
-        QPixmap pixmap;
-        if (pixmap.loadFromData(data)) {
-            storeFetchedPixmap(k, url, size, data, pixmap, pin, proxy, dpr);
-            return;
-        }
-
-        // The optimized URL (format/width params) was rejected or undecodable.
-        // Fall back to the raw proxy URL, which Discord serves without resize
-        // params (this is what the full-image viewer uses successfully).
-        if (proxy) {
-            fetchRawProxyUrl(k, url, size, dpr);
-            return;
-        }
-        failRequest(k, url, size, QStringLiteral("undecodable image data"));
+        // Decode + smooth downscale on the thread pool; the UI thread only
+        // converts the finished QImage to a QPixmap (QPixmap is not
+        // thread-safe). This keeps large-image decodes from freezing the UI.
+        scheduleAsyncDecode(k, url, size, proxy, true, dpr, std::move(data));
     });
 }
 
@@ -716,13 +707,61 @@ void ImageManager::fetchRawProxyUrl(const ImageRequestKey &k, const QUrl &url,
         }
         QByteArray rawData = rawReply->readAll();
         rawReply->deleteLater();
-        QPixmap raw;
-        if (raw.loadFromData(rawData)) {
-            storeFetchedPixmap(k, url, size, rawData, raw, pin, true, dpr);
+        // No further proxy fallback after the raw fetch fails to decode.
+        scheduleAsyncDecode(k, url, size, true, false, dpr, std::move(rawData));
+    });
+}
+
+void ImageManager::scheduleAsyncDecode(const ImageRequestKey &k, const QUrl &url,
+                                       const QSize &size, bool proxy, bool allowProxyFallback,
+                                       qreal dpr, QByteArray data)
+{
+    QPointer<ImageManager> guard(this);
+    m_decodePool.start(
+            [guard, k, url, size, proxy, allowProxyFallback, dpr, data]() {
+        DecodeResult result;
+        if (result.image.loadFromData(data)) {
+            const QSize physicalSize(qRound(size.width() * dpr),
+                                     qRound(size.height() * dpr));
+            if (result.image.size() != physicalSize) {
+                result.image = result.image.scaled(physicalSize, Qt::KeepAspectRatio,
+                                                   Qt::SmoothTransformation);
+            }
+            result.image.setDevicePixelRatio(dpr);
+            result.ok = true;
+        }
+        if (guard) {
+            QMetaObject::invokeMethod(
+                    guard,
+                    [guard, k, url, size, proxy, allowProxyFallback, dpr, data, result]() {
+                        guard->onImageDecoded(k, url, size, proxy, allowProxyFallback, dpr, data,
+                                              result);
+                    },
+                    Qt::QueuedConnection);
+        }
+    });
+}
+
+void ImageManager::onImageDecoded(const ImageRequestKey &k, const QUrl &url, const QSize &size,
+                                  bool proxy, bool allowProxyFallback, qreal dpr,
+                                  const QByteArray &data, DecodeResult result)
+{
+    PinGroup pin = pendingPins.value(k, PinGroup::None);
+
+    if (!result.ok) {
+        // The optimized URL (format/width params) was rejected or undecodable.
+        // Fall back to the raw proxy URL, which Discord serves without resize
+        // params (this is what the full-image viewer uses successfully).
+        if (proxy && allowProxyFallback) {
+            fetchRawProxyUrl(k, url, size, dpr);
             return;
         }
         failRequest(k, url, size, QStringLiteral("undecodable image data"));
-    });
+        return;
+    }
+
+    QPixmap pixmap = QPixmap::fromImage(result.image);
+    storeFetchedPixmap(k, url, size, data, pixmap, pin, proxy, dpr);
 }
 
 void ImageManager::guardReply(QNetworkReply *reply)
@@ -746,28 +785,54 @@ void ImageManager::pruneDiskCache()
     if (!tempDir.isValid())
         return;
 
-    // Bound the session disk cache: delete oldest files until back under the
-    // byte and file-count budgets.
-    const QDir dir(tempDir.path());
-    const QFileInfoList files = dir.entryInfoList(QDir::Files, QDir::Time); // oldest first
+    // Directory scan + deletes run on a worker thread; the UI thread only
+    // updates the diskCacheKeys/diskCachePathToKey index from the result
+    // (those maps are not thread-safe). One prune in flight at a time.
+    if (m_pruneInFlight)
+        return;
+    m_pruneInFlight = true;
 
-    qint64 totalBytes = 0;
-    for (const QFileInfo &fi : files)
-        totalBytes += fi.size();
+    const QString dirPath = tempDir.path();
+    QPointer<ImageManager> guard(this);
+    QThreadPool::globalInstance()->start([guard, dirPath]() {
+        // Bound the session disk cache: delete oldest files until back under
+        // the byte and file-count budgets.
+        const QDir dir(dirPath);
+        const QFileInfoList files = dir.entryInfoList(QDir::Files, QDir::Time); // oldest first
 
-    int count = files.size();
-    for (const QFileInfo &fi : files) {
-        if (totalBytes <= kDiskCacheBudgetBytes && count <= kDiskCacheMaxFiles)
-            break;
-        const QString path = fi.absoluteFilePath();
-        if (QFile::remove(path)) {
-            totalBytes -= fi.size();
-            --count;
-            auto it = diskCachePathToKey.find(path);
-            if (it != diskCachePathToKey.end()) {
-                diskCacheKeys.remove(it.value());
-                diskCachePathToKey.erase(it);
+        qint64 totalBytes = 0;
+        for (const QFileInfo &fi : files)
+            totalBytes += fi.size();
+
+        int count = files.size();
+        QStringList removed;
+        for (const QFileInfo &fi : files) {
+            if (totalBytes <= kDiskCacheBudgetBytes && count <= kDiskCacheMaxFiles)
+                break;
+            const QString path = fi.absoluteFilePath();
+            if (QFile::remove(path)) {
+                totalBytes -= fi.size();
+                --count;
+                removed.append(path);
             }
+        }
+
+        if (guard) {
+            QMetaObject::invokeMethod(
+                    guard, [guard, removed]() { guard->onDiskCachePruned(removed); },
+                    Qt::QueuedConnection);
+        }
+    });
+}
+
+void ImageManager::onDiskCachePruned(const QStringList &removedPaths)
+{
+    m_pruneInFlight = false;
+    for (const QString &path : removedPaths) {
+        auto it = diskCachePathToKey.find(path);
+        if (it != diskCachePathToKey.end()) {
+            diskCacheKeys.remove(it.value());
+            diskCachePathToKey.erase(it);
         }
     }
 }

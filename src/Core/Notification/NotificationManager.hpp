@@ -181,6 +181,7 @@ private:
     // Streamer mode tracking
     bool m_streamerModeEnabled = false;
     bool m_isStreaming = false;
+    bool m_streamerDetectInFlight = false;
     QTimer *m_streamerTimer = nullptr;
 
     // Voice debounce

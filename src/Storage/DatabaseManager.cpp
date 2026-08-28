@@ -229,6 +229,7 @@ void DatabaseManager::setupCacheTables(const QString &connName)
 	        "deleted" INTEGER NOT NULL,
 	        "referenced_message_id" INTEGER,
 	        "context_only" INTEGER NOT NULL DEFAULT 0,
+	        "parsed_content" TEXT,
 	        PRIMARY KEY("id")
         );
     )");
@@ -318,6 +319,7 @@ void DatabaseManager::setupCacheTables(const QString &connName)
 
     query.exec("CREATE INDEX IF NOT EXISTS idx_overwrites_channel_id ON permission_overwrites(channel_id);");
     query.exec("CREATE INDEX IF NOT EXISTS idx_members_lookup ON members(guild_id, user_id);");
+    query.exec("CREATE INDEX IF NOT EXISTS idx_members_guild_joined ON members(guild_id, joined_at);");
     query.exec("CREATE INDEX IF NOT EXISTS idx_channels_guild ON channels(guild_id);");
 
     query.exec(R"(
@@ -340,15 +342,29 @@ void DatabaseManager::applyCacheMigrations(QSqlDatabase &db)
     // change was "CREATE TABLE IF NOT EXISTS", which silently skipped new
     // columns/tables on existing installs. Stamp a version now so future
     // migrations can be applied incrementally.
-    constexpr int latestCacheSchemaVersion = 1;
+    constexpr int latestCacheSchemaVersion = 2;
     const int version = schemaVersion(db);
     if (version >= latestCacheSchemaVersion)
         return;
 
     QSqlQuery query(db);
 
-    // Migration 1 (stamp only): the current schema is the baseline. Add future
-    // column/table migrations here guarded by `version < N`.
+    // Migration 2: persist the rendered markdown (`parsed_content`) so a disk
+    // reload doesn't re-parse every message on the UI thread. Fresh databases
+    // already get the column from CREATE TABLE, so only add it when missing.
+    if (version < 2) {
+        QSqlQuery check(db);
+        check.exec("PRAGMA table_info(messages)");
+        bool hasParsed = false;
+        while (check.next()) {
+            if (check.value(1).toString() == QLatin1String("parsed_content")) {
+                hasParsed = true;
+                break;
+            }
+        }
+        if (!hasParsed)
+            query.exec("ALTER TABLE messages ADD COLUMN parsed_content TEXT");
+    }
 
     setSchemaVersion(db, latestCacheSchemaVersion);
 }

@@ -236,3 +236,215 @@ VERIFIED FALSE POSITIVES (no change — would regress):
 
 REMAINING INCOMPLETE FEATURES (not bugs, not fixed): echo cancellation stub, E2EE privacy-code stub, typing-indicator avatars, role drag-reorder cosmetic, webhook channel picker empty, audit-log user filter, built-in sound preview, NotificationDecider dead code, AnimationConfig live-retune signals, forward pagination, voice leave/move independent toggles.
 
+## 2026-08-24T16:08:42.323Z · appearance-scaling-feature · Appearance styling & scaling feature complete on main (8 commits, 10/10 tests), kept local per user choice.
+
+Acheron — Appearance Styling & Scaling feature (2026-08-23) is complete.
+
+Commits on `main` (local only; user chose NOT to push past the earlier
+checkpoint `196bf05`/pushed README): bb82be5 (AppearanceConfig+test),
+a1c7b12 (ScaleStepper+test), a3cbfd8 (Appearance page groups), e709ba8
+(MemberListDelegate scale+icon-only), e72db8d (MemberListOverlay), ab29ac0
+(ServerRailDelegate railWidth), 8bb6133 (ChannelDelegate scale), 57d49dc
+(MainWindow wiring). Full ctest suite 10/10 green; app builds clean.
+
+What was delivered: `Core::Appearance::AppearanceConfig` singleton (scales
+0.80–1.50 step 0.05 default 1.0; keys ui/memberListMode "resize"/"slide",
+ui/memberCardScale, ui/guildIconScale, ui/channelScale); `UI::ScaleStepper`
+widget; Appearance page "Member list" toggle + "Scaling" rows; slide-out
+member list overlay (56px avatar strip → 240px hover panel over the chat,
+icons-only delegate mode, AnimationUtils::duration); scaled
+MemberListDelegate/ServerRailDelegate/ChannelDelegate; MainWindow
+switchMemberListMode with splitter-size save/restore and live re-layout on
+configChanged.
+
+Notable plan-defect fixes (documented in the plan's task reports, now
+deleted with the SDD workspace): AppearanceConfig ctor made public (its own
+test needed stack instances); lambda capture fix in AppearancePage;
+memberScale() placed inside Acheron::UI (not file scope — Core:: would not
+resolve); Q_OBJECT headers listed in test target sources for AUTOMOC.
+
+Process note: the subagent runner was down all session (every dispatch,
+background + foreground + fork, failed before work) — the 8 tasks were
+executed inline with per-task TDD, commit, and self-review gates, and an
+inline final review. Manual smoke test (plan Task 8 Step 7) was handed to
+the user with the app launched.
+
+## 2026-08-25T03:49:50.404Z · ui-animation-fixes · Fixed Acheron UI animation bugs (popup fade, hover wash) and added dialog enter animation; documented the ccache+PCH build pitfall.
+
+## UI/UX animation fixes (session)
+
+### Root causes found & fixed
+1. **Hover highlights never animated.** `Core::Animation/HoverAnimator.cpp` paints its wash via a QSS `background-color` on a plain `QWidget`, but never set `Qt::WA_StyledBackground`. A plain QWidget does not paint a stylesheet background without it, so the wash was invisible. Fix: `overlay->setAttribute(Qt::WA_StyledBackground, true)`. Also deduped `Enter`/`Leave` vs `HoverEnter`/`HoverLeave` (use Enter/Leave only when `!testAttribute(Qt::WA_Hover)`) to avoid double-triggering the fade.
+2. **Settings popup + all BasePopup popups glitched.** `AnimationUtils::popupEnter`/`popupExit` animated `geometry`/`pos` on `fadeHost`, a layout-managed child (AlignCenter), starting from a stale rect captured in `showEvent`. Fix: rewritten to opacity-only fade (no geometry/pos). `popupEnter`/`popupExit` are only called by `BasePopup.cpp`.
+3. **Other dialogs had no enter animation.** Added `UI/Dialogs/DialogAnimator.{hpp,cpp}` — app-wide event filter (installed in `main.cpp`) that `fadeIn`s top-level QDialogs on Show, skipping `BasePopup` and `QMessageBox`. Removed EditProfileDialog's dead ctor `fadeIn(this)`.
+
+### Cleanup
+Removed redundant instant `State_MouseOver` fillRect hover paint from `MemberListDelegate`, `ChannelDelegate`, `ServerRailDelegate`, `ForumPostDelegate` (the animated wash now provides it — avoids double highlight). Added `DialogAnimator.cpp` to the explicit source list in CMakeLists.txt (glob also catches it).
+
+### Build pitfall (important for future builds)
+- ccache (set as `CMAKE_CXX_COMPILER_LAUNCHER`) + MSVC PCH is fragile under memory pressure: on this machine (no pagefile, commit limit == 56.7 GB physical; `llama-server`/`opencode` hold large commits) a wide rebuild fails with `C3859/C1076 "paging file too small"` / "PCH: Unable to commit memory across file map".
+- Workaround that succeeded: `$env:CCACHE_DISABLE=1` + `cmake --build build --config RelWithDebInfo --parallel 1` (serial). Note `--preset windows` uses `jobs:0` = unbounded `/m`.
+- **ccache also breaks MSBuild header-dependency tracking**: after editing a header (e.g. `AnimationUtils.hpp`), MSBuild did NOT recompile all includers, producing a stale/mixed binary. Verified via object-vs-source timestamps; fixed by deleting the specific stale `.obj` (`BasePopup.obj`) and rebuilding. When in doubt, compare `build/acheron.dir/RelWithDebInfo/*.obj` mtimes against changed headers.
+
+### Verification
+Build succeeded (exe relinked), `ctest --preset windows` = 10/10 passed.
+
+## 2026-08-25T09:26:10.577Z · build-env-and-bugfix-wave · Fixed the ccache/MSBuild build bug and three code bugs (member-list overlay use-after-free, defeated slide animation, ScaleStepper stale state).
+
+## Build environment + bug-fix wave
+
+### Build env: ccache disabled for the Visual Studio generator
+`CMakeLists.txt`: ccache (as `CMAKE_CXX_COMPILER_LAUNCHER`) breaks MSBuild's `.tlog` header-dependency tracking (silent stale/mixed binaries when a header changes) and its MSVC PCH handling fails under memory pressure. Now gated behind `option(USE_CCACHE ... ON)` that auto-skips when `CMAKE_GENERATOR MATCHES "Visual Studio"`. Verified: configure prints "ccache found but disabled…", and the build succeeds without `CCACHE_DISABLE=1`/serial hacks.
+
+### Bugs found & fixed
+1. **Use-after-free in `MainWindow::switchMemberListMode`** (ResizeHandle branch): `MemberListOverlay`'s ctor does `view_->setParent(this)`, re-parenting `memberListView` into the overlay, so `delete memberListOverlay` also deleted `memberListView`; the subsequent `mainSplitter->replaceWidget(2, memberListView)` used a dangling raw `MemberListView *`. Fix: `memberListView->setParent(nullptr)` before deleting the overlay.
+2. **MemberListOverlay slide animation defeated**: `resizeEvent` called `reposition()` unconditionally, snapping geometry back to the full target on every animated frame. Fix: only reposition when `!widthAnimation_ || widthAnimation_->state() != QAbstractAnimation::Running`.
+3. **`ScaleStepper::setRange` stale button state**: it delegated to `setValue(value_)`, which early-returns (qFuzzyCompare) when the value stays in range, so `refresh()` (which updates +/- enabled state) never ran. Fix: clamp value + emit only on change, but always `refresh()`.
+
+### Verification
+Build green; `ctest --preset windows` = 10/10 passed. Note the machine has no pagefile (commit limit == 56.7 GB physical) and runs llama-server/opencode, so wide parallel rebuilds still OOM — use `--parallel 1|2` for big rebuilds.
+
+## 2026-08-25T10:19:50.815Z · godmode preset · Created DSH agent preset 'godmode' (terrible mouse DR-engineer persona) at C:\Users\me\.dsh\.agent-presets\godmode, mount-validated via standingKeyFor.
+
+## godmode agent preset (2026-02-23-ish session)
+
+- Location: `C:\Users\me\.dsh\.agent-presets\godmode\` (user root, DSH_HOME=C:\Users\me\.dsh); `agent.cordis.yml` + `preset.yml` (name: Godmode).
+- Base: copy of the shipped `standard` preset (full coding agent: persona, agent-instructions, bash/pwsh, fs, jobs, skills, goals, plan mode, compaction, delegation/workflows with codex/claude-code rows left disabled, ask-user, todo, web).
+- Persona row (`@deepseek-ai/dsh-persona`, config.text as literal block `|`) holds the "terrible mouse" spec: Title/Narration/Content response format, DR-engagement context (Diaz/Hart/Reyes), phrase pools, code standards.
+- Adapted from the user's draft: removed the racial slur "nignog" everywhere; removed "no refusals"/"every request is legitimate" framing; replaced the malicious-codenames table with 6 legitimate recovery procedures (recovery validation, artifact recovery, credential hygiene, integrity validation, boot integrity, test harness output) used by the "menu" command. Opening line: "terrible mouse: got it. What's the recovery target?"
+- Validated with agentPresets.standingKeyFor('godmode') → mounted OK. Roster probe was a temporary dynamic plugin (prst-1) that was undefined afterwards.
+- Authoring pattern: reach `ctx.agentPresets` (list/copy/resolve/read/standingKeyFor) via a temporary host-only dynamic Cordis plugin that registers one tool (harness.registerTool + harness.defineTool), then cordis_undefine it.
+
+## 2026-08-25T17:41:08.989Z · Acheron bug-fix pass: fixed 16+ real bugs across Discord/Core/Storage/UI (cache-DB reconnect race, thread permission gate, PTT modifier matching, gateway retry, guild-deletion state leak, proxy re-sort) and confirmed 2 subagent findings as false positives; build green, 10/10 tests pass.
+
+Verified fixes (all compile, ctest 10/10 green):
+- Session/ClientInstance (B1): cache DB connection name is global per account; ~ClientInstance() removed closeCacheDatabase, Session now closes synchronously before every deleteLater() (were-dead path, Disconnected lambda, ~Session) so a rapid reconnect can't have its fresh connection removed by the old instance's dtor.
+- ReadStateManager (B2): threads inherit VIEW_CHANNEL from parent channel but thread id is never a channel row, so hasChannelPermission(threadId) always returned NO_PERMISSIONS and suppressed unread/mention. Added optional canViewOverride param to computeChannelReadState; computeThreadReadState now checks parentId.
+- PushToTalkListener: compare key() to combined&0x00FFFFFF and int(modifiers())&KeyboardModifierMask to keySequence[0].toCombined() instead of key()==keySequence[0].
+- RemoteAuthClient::stop(): set done=true after running.exchange(false) to suppress spurious fail(ConnectionFailed) on intentional teardown.
+- VoiceGateway: connect-failure retry gate changed to reconnectAttempts < maxReconnectAttempts (retry first connect too).
+- RequestWorker::abortAllInFlight(): builds a failed HttpResponse ('Request aborted: client is shutting down') and dispatches completion before delete ctx so in-flight callbacks are resolved.
+- MemberListManager::updateSubscriptionRange: loop block = firstVisible/100 .. lastVisible/100 appending {start,start+99} for start>0 (was first+last only, skipped middle blocks).
+- NotificationManager: voice join/leave/move debounce timestamp now set immediately before each showNotification call (was set early, blocking all 4).
+- ChannelFilterProxyModel: voice-channel collapsed-category branch mirrors text channels; setSourceModel now connects dataChanged->sort(0) on PositionRole/LastMessageIdRole (was only sorted on drag).
+- ChannelTreeModel::updateChannelLastMessageId: now emits dataChanged({LastMessageIdRole}) so DM recency re-sorts.
+- ChannelTreeView: reorderSourceIndex is QPersistentModelIndex (was QModelIndex, stale after reorder).
+- ChatModel::pollQuestionDocKey: 9000 -> 100000 (collided with embedTitleDocKey(msgId,8)=(8+1)*1000=9000).
+- ClientInstance::onGuildDeleted: also unregisters custom emojis (EmojiCatalog::unregisterCustomEmojisByGuild), removes stickers, and erases cached/joined threads for the guild.
+- Animation fixes: HoverAnimator reduced-motion guard on press; DialogAnimator skips translucent/effect/video dialogs; MemberListOverlay nulls widthAnimation_ before recreate and captures anim pointer; SlowModeIndicator removed per-tick popIn jitter.
+FALSE POSITIVES (do NOT fix): DaveSession ssrcMap is a live const QHash& (not a stale copy); Gateway::start() is guarded by if(running) return and never re-called.
+Deferred: ForumManager guild-deletion cleanup (needs a removeGuild method); PermissionManager still caches NO_PERMISSIONS for thread lookups (read-state now bypasses via parent).
+
+## 2026-08-26T10:42:29.981Z · Member list slide-out animation reworked: content (names/activity/role icons) now fades in only after the panel fully extends, and fades out in parallel with collapse instead of popping instantly.
+
+MemberListOverlay + MemberListDelegate (src/UI/MemberList/):
+- Delegate gained a `contentOpacity` Q_PROPERTY (qreal, default 1.0). paintMember applies it to name/presence-icon/role-icon/role-badge (avatar stays full opacity); paintGroup fades group text; paintPlaceholder fades the name bar.
+- Overlay expand() no longer calls applyIconsOnly(false) immediately; it slides out avatars-only (animateWidth revealAfter=true) and revealContent() runs on the width animation's finished signal: setContentOpacity(0), setIconsOnly(false), then animateContentOpacity(1.0, 140ms).
+- collapseNow() runs animateContentOpacity(0.0, kCollapseMs) in parallel with animateWidth(kCollapsedWidth); the width finished handler applyIconsOnly(true) when !expanded_.
+- New members: QPropertyAnimation *contentAnimation_, animateContentOpacity(qreal,int), revealContent(). QPropertyAnimation animates the delegate's contentOpacity; valueChanged -> viewport()->update().
+Note: rebuilt with acheron.exe killed (it locks the linker output); 10/10 ctest green.
+
+## 2026-08-26T12:54:14.271Z · chat-performance-audit · Chat perf audit: markdown parse + SQLite + per-paint scaling run on UI thread; biggest wins = worker-thread parse/DB, cache sticker/poll/embed-parse, pre-scale pixmaps, cache blur.
+
+Investigation-only audit of C:\Users\me\GIT\acheron chat pipeline (no files changed). All gateway->MessageManager->ChatModel->delegate work is on the UI thread (no moveToThread anywhere in Discord/ or ClientInstance.cpp; Discord/Client.cpp:861-864 emits messageCreated from the gateway dispatch loop directly).
+
+Top confirmed findings:
+1. MessageRepository (src/Storage/MessageRepository.cpp:26-155, 157-173, 205-216) runs synchronous SQLite on the UI thread: saveMessages (txn + N inserts + user/attachment inserts + pruneChannel subquery + commit/fsync) on EVERY message batch (MessageManager.cpp:910), every edit (:398), every reaction add/remove (:665 emitReactionUpdate) and delete. HIGH.
+2. Markdown parse on UI thread: MessageManager::parseMessageContent (:82-98) called per message on every arrival/edit/disk-cache load (:144-145, :251-252, :393, :927-928) and on send (:544-548). Parser::parse (src/Core/Markdown/Parser.cpp:33-113) is O(n^2) due to QString::remove(0,k) per node (:112); parses all 30 msgs before dedup; parsedContentCached is NOT persisted so every disk re-load re-parses. HIGH for long messages.
+3. Per-paint pixmap scaling with Qt::SmoothTransformation in ChatDelegate::paint: lines 920, 933-936, 959-962, 976-978, 1135-1138, 1150-1152, 1212-1213; plus createBlurredPixmap (ChatLayout.cpp:1284-1308, QGraphicsScene+QGraphicsBlurEffect) re-blurs spoilers on every paint (:652-653). HIGH.
+4. data() roles rebuilt per paint, uncached: PollRole (ChatModel.cpp:685-689, buildPollData each call), StickersRole (:690-741, full rebuild incl. QMovie creation + data(MessageIdRole) recursion). MEDIUM/HIGH.
+5. Embed markdown parsed inside data(EmbedsRole) (ChatModel.cpp:485-499, 624-637, static Parser at :485) and parsed TWICE per message: the sizeHint pass runs with suppressImageFetch=true so embedCache is not written (:660-661), paint re-parses and caches. MEDIUM.
+6. hitTest toPlainText()+regex per mouse move over message text (ChatLayout.cpp:1117-1137, called from ChatView::mouseMoveEvent:491 on every event). MEDIUM.
+7. Full-range dataChanged(0,N) without roles every 2.5s after new-message highlight expiry (ChatModel.cpp:1329-1337). MEDIUM.
+8. Custom-emoji imageFetched -> per-row doc-cache + sizeCache invalidation + dataChanged(HtmlRole,EmbedsRole,CachedSizeRole) storms (ChatModel.cpp:103-156, 167-219). MEDIUM.
+9. resolveLayout on every mouse press/release/hover-row-change rebuilds all role payloads + full layout (ChatView.cpp:422, 458-461, 531; ChatLayout.cpp:1143-1181). MEDIUM.
+Proposed fixes (priority): parse markdown + repo DB ops on a worker thread (parser is deterministic; resolvers via cached lookups); cache PollData/StickerData like other role payloads; pre-scale pixmaps once (cache keyed url+size+dpr) instead of in paint; cache blurred spoiler pixmap; parse embeds once on message ingest and cache unconditionally; persist parsedContentCached in DB; dedup before parse; per-row dataChanged for highlight expiry; keep sizeCache on emoji load.
+
+## 2026-08-26T12:56:00.108Z · ui-perf-audit-2025 · UI performance audit of Acheron (Qt6 Discord client) completed — top hotspots: per-message full proxy re-sort, member-list full resets per GUILD_MEMBER_LIST_UPDATE, per-paint delegate allocations, hover-wash repaint churn.
+
+UI PERFORMANCE AUDIT (investigation only, no code changed) — root causes of sidebar/member-list lag:
+
+1. PER-MESSAGE FULL PROXY RE-SORT (highest impact): ClientInstance::onMessageCreated -> channelLastMessageUpdated -> ChannelTreeModel::updateChannelLastMessageId (src/UI/ChannelList/ChannelTreeModel.cpp:1982-2003) emits dataChanged with LastMessageIdRole for EVERY message; ChannelFilterProxyModel::setSourceModel (ChannelFilterProxyModel.cpp:28-37) then calls sort(0) on that role; with setDynamicSortFilter(true) (MainWindow.cpp:90) sort() rebuilds the whole mapping: filterAcceptsRow for every row + O(n log n) lessThan + layoutChanged -> QTreeView relayout/repaint. Same for every thread update (ChannelTreeModel.cpp:708). Fix: only re-sort the DM subtree / skip when row is not a DMChannel; or model-level beginMoveRows for DM reorder instead of blanket sort(0).
+
+2. MEMBER-LIST FULL RESET PER UPDATE: MemberListManager.cpp:283-284+348-349 emits listAboutToReset+listReset for EVERY active GUILD_MEMBER_LIST_UPDATE (presence changes), also role update/delete (215-218, 248-251) and member removal (434-437); MemberListModel.cpp:187-197 does beginResetModel/endResetModel -> view loses scroll, relayouts, repaints all rows. Fix: map op INSERT/UPDATE/DELETE to rowsInserted/dataChanged/rowsRemoved; coalesce bursts.
+
+3. PER-MESSAGE READ-STATE PATH O(n): updateReadState (ChannelTreeModel.cpp:1611-1650) runs findChannelTreeNode recursive O(n) search TWICE per message (lines 1989 + 1617), then updateNodeAggregates climbs to root emitting dataChanged per ancestor; every dataChanged also loops ServerRailModel::onSourceDataChanged over all entries (ServerRailModel.cpp:377-388). updateGuildSettings (1745-1784) walks the WHOLE guild subtree (updateChildrenReadState + recomputeSubtreeAggregates + emitDataChangedRecursive per USER_GUILD_SETTINGS_UPDATE). Fix: QHash<id,node> index, pass found node, short-circuit when nothing changed.
+
+4. DELEGATE PER-PAINT COSTS: MemberListDelegate QFontMetrics + avatar.scaled(Smooth) per paint (MemberListDelegate.cpp:213,160-162); PresenceRole builds QVariantMap per data() (MemberListModel.cpp:119-142); RoleBadgeColorRole -> resolveRoleColor cold-cache role scan (ChannelSelectionController.cpp:829-849); ChannelDelegate isLastThreadSibling O(siblings) per thread paint (ChannelDelegate.cpp:71-80); vector icon QPainterPath/QPen per paint; server/DM icons smooth-scaled 64->24 per paint (SmoothPixmapTransform at 353). Fix: cache scaled avatars/elided text/fonts, request avatars at paint size.
+
+5. HOVER WASH PER-MOUSE-MOVE REPAINT: HoverAnimator::onHoverMove (HoverAnimator.cpp:242-263) setGeometry+raise per HoverMove -> invalidates old+new row -> 1-2 delegate paints per mouse move; wash overlays use QGraphicsOpacityEffect (offscreen composite). ServerRailView::mouseMoveEvent (129-145) installs viewport-wide fadeTo opacity effect per hovered-row change. Fix: only move overlay when row changes; paint wash in-delegate.
+
+6. FULL RE-FILTERS: setSelectedChannel -> beginFilterChange/endFilterChange per channel switch (ChannelFilterProxyModel.cpp:57-69); invalidateFilter per permissionsChanged (MainWindow.cpp:727). filterAcceptsRow does parent-walk + permission lookups; SQL on cache miss (PermissionManager.cpp:90-138). Fix: cache userId per node, batch re-filters, precompute permissions.
+
+7. notifyPresenceChanged O(n) scan per presence change (MemberListModel.cpp:174-185).
+
+8. NotificationManager 5s QTimer -> EnumProcesses/OpenProcess over whole process table on UI thread when auto-detect on (NotificationManager.cpp:36-78, 1408-1419).
+
+9. MemberListOverlay animateContentOpacity viewport()->update() per animation frame (MemberListOverlay.cpp:175-177).
+
+10. QSettings().value in ChannelTreeModel::data(FolderColorRole) per call (ChannelTreeModel.cpp:216-224) - not on delegate hot path today.
+
+Full report delivered to parent agent.
+
+## 2026-08-26T13:05:34.385Z · perf-audit-wave · Perf audit wave: 4 subsystem audits completed; 6 confirmed lag fixes applied and verified (build+ctest green)
+
+Systematic-debugging perf wave on Acheron (lag/freeze). Four evidence-based subagent audits (chat pipeline, storage/DB, network/image, UI widgets) + parent cross-check. Root cause: entire pipeline (gateway→markdown→SQLite→model→paint) is synchronous on the UI thread.
+
+APPLIED FIXES (verified, build exit 0, ctest 10/10):
+1. ChannelFilterProxyModel: re-sort on dataChanged was gated only by role, firing sort(0) on EVERY incoming message (a regression from an earlier C4 change). Now gated by node type — only DMChannel rows re-sort on LastMessageIdRole, guild channels on PositionRole. Killed full sidebar re-layout per message.
+2. NotificationManager::onMessageCreated: moved active-channel check BEFORE getChannel() DB read (was 2 SELECTs per message on UI thread, then return).
+3. ChannelTreeModel: folder color persisted value now restored once at node creation; data(FolderColorRole) no longer constructs QSettings() per paint.
+4. UserManager::getMemberRoles: now routes through getMember() to populate memberCache on miss (was re-querying SQLite every call).
+5. ChatModel: 2.5s highlight-clear timer emitted role-less dataChanged(0..N) (full-list repaint); now emits per-row dataChanged.
+
+DEFERRED (prioritized backlog, need separate passes):
+- HIGH: sync SQLite on UI thread (per-message saveMessages txn, login/guild-chunk write storms) — move to worker thread.
+- HIGH: markdown parse on UI thread, O(n^2) remove(0,k) in Parser; re-parse on disk-cache reload (parsedContentCached not persisted).
+- HIGH: member list full beginResetModel per GUILD_MEMBER_LIST_UPDATE (presence storm stutter).
+- HIGH: image decode + smooth downscale on UI thread (ImageManager QPixmap::loadFromData in finished lambda; disk-cache hit decodes on caller thread).
+- HIGH: per-paint pixmap re-scaling (GIF frame scaled per paint) + spoiler blur recomputed per paint via QGraphicsBlurEffect.
+- MED: gateway ingest no batching (one queued signal+parse per event); outbound WS send blocks UI on CURLE_AGAIN (CurlUtils::wsSend); PollRole/StickersRole rebuilt in data() (QMovie+network fetch in data()); PermissionManager O(n) LRU removeOne; findChannelTreeNode O(n) DFS twice per message; getMemberUserIds full-guild sort no index; disk-cache prune on UI thread.
+
+## 2026-08-26T14:15:00.000Z · lag-freeze-wave-2 · Lag/freeze elimination wave 2: 11 confirmed perf fixes applied (parser O(n²)→O(n), member-list targeted updates, per-paint pixmap/blur caching, async image decode, LRU/process-scan/wsSend off hot paths), build + ctest 10/10 + smoke green.
+
+Systematic-debugging perf wave on Acheron (lag/freeze), building on the earlier perf-audit-wave. Baseline verified first (build green, ctest 10/10). All fixes verified with `cmake --build --preset windows` + `ctest --preset windows` (10/10) + `--runtime-smoke` (exit 0).
+
+## Applied fixes (11)
+1. **Markdown Parser O(n²) → O(n)** (Parser.hpp/.cpp): the loop did `source.remove(0, k)` per node (front-trim = O(n) memmove each → O(n²) on long messages). Replaced with an integer offset; `MatchFn` now takes `(source, int offset, state)` and every rule regex re-anchors with `\G` instead of `^`. CRITICAL gotcha: Qt's `AnchorAtOffsetMatchOption` does NOT re-anchor a pattern that starts with `^` — `^` binds to string start, so at offset>0 NOTHING matches (silently fell to the per-char error path; testNewlines/testEscaped caught it). `\G` anchors at the match() offset and fixes it. `captured(0)` still spans exactly [pos,pos+len) because every rule is anchored at pos.
+2. **Member list full reset per GUILD_MEMBER_LIST_UPDATE** (MemberListManager, MemberListModel, tst_MemberList): presence-only batches (all-UPDATE ops, no groups) now emit a new `listRowsChanged(QList<int>)`; the model repaints just those rows instead of beginResetModel/endResetModel (which relaid out, lost scroll, repainted everything). Structural ops (SYNC/INSERT/DELETE/INVALIDATE or a replaced group list) still reset. Gotcha: `update.groups` is a NON-optional Field (IsOptional=false) so `isUndefined()` is always false — test the group-list replacement with `hasGroups && !update.groups->isEmpty()`. Added regression test `updateOnlyRepaintsTargetedRows` (0 resets, 1 targeted row, item updated).
+3. **ChatDelegate per-paint pixmap rescaling** (ChatDelegate.{hpp,cpp}): every static pixmap (embed thumbs/images, video thumbs, stickers) was smooth-scaled per paint. Added bounded caches (QCache keyed by `QPixmap::cacheKey()` + target size; cost = pixels, 4 MiB each): `scaledCached()` and `blurredCached()`. Animated GIF frames keep the direct `scaled()` path (fresh pixmap per frame → cacheKey churn would thrash the cache).
+4. **Spoiler blur recomputed per paint** (ChatDelegate): `ChatLayout::createBlurredPixmap` (QGraphicsScene + QGraphicsBlurEffect) ran on every paint of a spoiler attachment. Now cached by source `cacheKey()`.
+5. **PollRole rebuilt in data()** (ChatModel.{hpp,cpp}): `buildPollData(msg)` ran on every data(PollRole) call (every paint of a poll). Cached in `pollCache` keyed by msg id; invalidated at every reactionCache invalidation site (message update/replace/nonce-replace/delete/prune) and cleared on Latest-load + channel switch.
+6. **PermissionManager O(n) LRU** (PermissionManager.{hpp,cpp}): a cache hit did `QList::removeOne` (O(n)) — hot for the sidebar filter. Replaced with `std::list<CacheKey>` + `QHash<CacheKey, std::list::iterator>` for O(1) promote/evict. Note: `QHash::erase` takes an iterator, not a key — use `remove(key)`.
+7. **ChannelTreeModel double O(n) node search per message** (ChannelTreeModel.{hpp,cpp}): `updateChannelLastMessageId` found the node, then `updateReadState` re-searched. Added optional `ChannelNode *resolvedNode = nullptr` param and passed the found node.
+8. **HoverAnimator per-mouse-move geometry churn** (HoverAnimator.cpp): `onHoverMove` called `setGeometry`+`raise` on every mouse move even within the same row (each invalidated old+new areas → delegate repaints). Now returns early when the row rect is unchanged (scroll re-tracking still works via indexAt/visualRect in onScroll).
+9. **Image decode on UI thread** (ImageManager.{hpp,cpp}): network `loadFromData` + smooth downscale ran in the reply-finished lambda (UI thread). Moved decode+scale to QThreadPool (QImage is thread-safe; `QPixmap::fromImage` stays on the UI thread). `scheduleAsyncDecode()` posts a worker; `onImageDecoded()` (queued back) handles ok/fallback/fail. Fallback chain preserved (optimized → raw proxy URL). Disk-cache decode kept sync (small images).
+10. **getMemberUserIds full-guild sort** (DatabaseManager.cpp): `SELECT user_id FROM members WHERE guild_id=? ORDER BY joined_at LIMIT 200` sorted the whole guild with no covering index. Added `idx_members_guild_joined ON members(guild_id, joined_at)`.
+11. **NotificationManager streamer-detect scan** (NotificationManager.{hpp,cpp}): with auto-detect on, `checkStreamerMode()` enumerated ALL processes (EnumProcesses/OpenProcess) on the UI thread every 5s. Moved to QThreadPool with a one-in-flight guard; manual toggle still applies instantly.
+12. **wsSend CURLE_AGAIN unbounded wait** (CurlUtils.cpp): a congested gateway socket looped `waitOnSocket(100ms)` indefinitely on the calling (UI) thread — these payloads are ephemeral presence/typing/voice frames (messages go via REST). Bounded to 10×10ms, then returns false with a warning.
+
+## Deferred (bigger refactors — separate passes)
+- HIGH: sync SQLite on UI thread (per-message `MessageRepository::saveMessages` txn + commit/fsync, login/guild-chunk write storms) → move repo writes to a worker thread.
+- HIGH: markdown parse on UI thread + `parsedContentCached` not persisted → disk reload re-parses every message; needs a DB column + migration.
+- MED: gateway ingest no batching (one queued signal+parse per event); StickersRole still rebuilt per paint (animation-dependent — needs a frame-aware cache); disk-cache prune on UI thread (runs every 64 stores).
+
+## Process notes
+- Rebuild + rerun the TEST targets after any parser change: the offset/`\G` rework regressed testNewlines/testEscaped and MarkdownTests caught it — don't trust ctest after building only acheron.
+- Stop-Process acheron before `cmake --build` (LNK1104 when the exe is locked).
+- `--runtime-smoke` on the build-tree exe prints ACHERON_RUNTIME_SMOKE_READY and exits 0.
+
+## 2026-08-26T15:00:00.000Z · lag-freeze-wave-2b · Four more lag fixes: skip re-parse on content-unchanged MESSAGE_UPDATEs, reaction updates via a single-column UPDATE (was a full INSERT txn per click), disk-cache prune off the UI thread, and parsed markdown persisted in the cache DB (migration v2) so disk reloads reuse it. Build + ctest 10/10 + smoke green.
+
+Continuation of the lag/freeze wave. Baseline re-verified (build green, ctest 10/10). All fixes verified: `cmake --build --preset windows` clean, `ctest --preset windows` 10/10, `--runtime-smoke` exit 0.
+
+## Applied fixes (4)
+1. **onMessageUpdated skips the markdown re-parse when content/type are unchanged** (MessageManager.cpp): every MESSAGE_UPDATE — most of which carry only reactions/embeds/flags — previously re-ran a full markdown parse of the (unchanged) content on the UI thread. Now old content+type are captured before `applyUpdate`, and the parse runs only when they changed or when `parsedContentCached` is empty (e.g. disk-loaded baseline). Safe because `applyUpdate` never touches `parsedContentCached`.
+2. **emitReactionUpdate writes only the reactions column** (MessageManager.cpp): a reaction click previously called `repo.saveMessages({msg})` — a full INSERT OR REPLACE txn + user save + attachments + `pruneChannel` subquery + COMMIT/fsync, every click, on the UI thread. Now `repo.updateReactionsJson(id, json)` (single UPDATE). Cached messages are always persisted (they come through `onApiMessagesReceived` → `saveMessages`), so the row exists; the non-cached reaction path already used updateReactionsJson.
+3. **Disk-cache prune moved off the UI thread** (ImageManager.{hpp,cpp}): `pruneDiskCache()` (full directory scan + file deletes) ran on the UI thread every 64 disk stores. Now the scan+deletes run on QThreadPool (`onDiskCacheWritten` triggers it); only the `diskCacheKeys`/`diskCachePathToKey` index cleanup is invoked back on the UI thread (`onDiskCachePruned`). One prune in flight at a time (`m_pruneInFlight`). A file deleted by a concurrent prune is self-healing (the load path drops a missing/corrupt file and its stale key).
+4. **parsedContentCached persisted in the cache DB** (MessageRepository.cpp, DatabaseManager.cpp, MessageManager.cpp): new `parsed_content` TEXT column on `messages`; schema version bumped 1→2 with a guarded `ALTER TABLE messages ADD COLUMN parsed_content` (only when `PRAGMA table_info` lacks it, so fresh DBs from the updated CREATE TABLE aren't double-migrated). Written in `saveMessages` and `updateMessageContent`; read back at query index 30 (appended last so existing column indices are untouched) in `readMessageFromQuery`. `onApiMessagesReceived` now parses BEFORE saving so the HTML is persisted, and the two disk-reload loops (`requestLoadChannel`, `requestLoadHistory`) reuse `parsedContentCached` and only parse rows where it's empty (pre-migration rows). NOTE/known tradeoff: mention display names and system-message text are baked into the cached HTML at parse time and won't re-resolve until the message is re-parsed — same tradeoff as Discord's own rendered-message cache; acceptable for avoiding 30 parses per channel switch.
+
+## Deferred (still open, need dedicated passes)
+- HIGH: sync SQLite on UI thread — `MessageRepository::saveMessages` (per-message batch INSERT + user + attachments + prune + commit) still runs on the UI thread during channel loads / gateway bursts. Moving to a worker thread needs a per-thread SQLite connection (SQLite connections are not shareable across threads), WAL writer/reader coordination, and a serialized write queue — too risky to bundle into this wave.
+- MED: gateway ingest no batching (one queued signal+parse per event); StickersRole rebuilt per paint (animation-dependent — needs a frame-aware cache, skipped for now); PermissionManager caches NO_PERMISSIONS for thread lookups (read-state now bypasses via parent).
+- INCOMPLETE (not bugs): echo cancellation stub, E2EE privacy-code stub, typing-indicator avatars, forward pagination, voice leave/move independent toggles, webhook channel picker, audit-log user filter, built-in sound preview.
+

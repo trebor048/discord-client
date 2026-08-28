@@ -98,6 +98,10 @@ public:
 signals:
     void listAboutToReset();
     void listReset();
+    // Emitted for batches that only update in-place rows (presence/display
+    // changes) with no structural reordering. Consumers should repaint just
+    // these rows instead of resetting the whole model.
+    void listRowsChanged(const QList<int> &rows);
 
     void subscriptionRequested(Snowflake guildId, Snowflake channelId, const QList<QPair<int, int>> &ranges);
 

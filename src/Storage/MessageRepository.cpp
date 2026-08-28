@@ -48,9 +48,9 @@ void MessageRepository::saveMessages(const QList<Discord::Message> &messages, QS
     qMsg.prepare(R"(
         INSERT OR REPLACE INTO messages
 		(id, channel_id, author_id, content, timestamp, edited_timestamp, type, flags, embeds, reactions, deleted,
-		 referenced_message_id, context_only)
+		 referenced_message_id, context_only, parsed_content)
 		VALUES (:id, :channel_id, :author_id, :content, :timestamp, :edited_timestamp, :type, :flags, :embeds, :reactions, 0,
-		        :ref_msg_id, 0)
+		        :ref_msg_id, 0, :parsed_content)
     )");
 
     QSqlQuery qAtt(db);
@@ -84,6 +84,10 @@ void MessageRepository::saveMessages(const QList<Discord::Message> &messages, QS
         } else {
             qMsg.bindValue(":ref_msg_id", QVariant());
         }
+
+        qMsg.bindValue(":parsed_content",
+                       message.parsedContentCached.isEmpty() ? QVariant()
+                                                             : message.parsedContentCached);
 
         if (!execLogged(qMsg, "MessageRepository: Save messages"))
             goto rollback;
@@ -190,13 +194,16 @@ void MessageRepository::updateMessageContent(const Discord::Message &message)
     QSqlQuery q(db);
     q.prepare(R"(
         UPDATE messages
-        SET content = :content, edited_timestamp = :edited_timestamp, embeds = :embeds, flags = :flags
+        SET content = :content, edited_timestamp = :edited_timestamp, embeds = :embeds, flags = :flags,
+            parsed_content = :parsed_content
         WHERE id = :id
     )");
     q.bindValue(":content", message.content);
     q.bindValue(":edited_timestamp", message.editedTimestamp);
     q.bindValue(":embeds", message.embedsJson.isEmpty() ? QVariant() : message.embedsJson);
     q.bindValue(":flags", static_cast<qint64>(message.flags.get()));
+    q.bindValue(":parsed_content",
+                message.parsedContentCached.isEmpty() ? QVariant() : message.parsedContentCached);
     q.bindValue(":id", static_cast<qint64>(message.id.get()));
 
     execLogged(q, "MessageRepository: Update message content");
@@ -241,7 +248,8 @@ QList<Discord::Message> MessageRepository::getLatestMessages(Core::Snowflake cha
                u.id, u.username, u.global_name, u.avatar, u.bot,
                m.referenced_message_id,
                rm.id, rm.channel_id, rm.author_id, rm.content, rm.timestamp, rm.edited_timestamp, rm.type, rm.flags, rm.embeds,
-               ru.id, ru.username, ru.global_name, ru.avatar, ru.bot
+               ru.id, ru.username, ru.global_name, ru.avatar, ru.bot,
+               m.parsed_content
 		FROM messages m
 		LEFT JOIN users u ON m.author_id = u.id
         LEFT JOIN messages rm ON m.referenced_message_id = rm.id
@@ -279,7 +287,8 @@ QList<Discord::Message> MessageRepository::getMessagesBefore(Core::Snowflake cha
 			   u.id, u.username, u.global_name, u.avatar, u.bot,
 			   m.referenced_message_id,
 			   rm.id, rm.channel_id, rm.author_id, rm.content, rm.timestamp, rm.edited_timestamp, rm.type, rm.flags, rm.embeds,
-			   ru.id, ru.username, ru.global_name, ru.avatar, ru.bot
+			   ru.id, ru.username, ru.global_name, ru.avatar, ru.bot,
+			   m.parsed_content
 		FROM messages m
 		LEFT JOIN users u ON m.author_id = u.id
 		LEFT JOIN messages rm ON m.referenced_message_id = rm.id
@@ -316,7 +325,8 @@ std::optional<Discord::Message> MessageRepository::getMessage(Core::Snowflake me
                u.id, u.username, u.global_name, u.avatar, u.bot,
                m.referenced_message_id,
                rm.id, rm.channel_id, rm.author_id, rm.content, rm.timestamp, rm.edited_timestamp, rm.type, rm.flags, rm.embeds,
-               ru.id, ru.username, ru.global_name, ru.avatar, ru.bot
+               ru.id, ru.username, ru.global_name, ru.avatar, ru.bot,
+               m.parsed_content
 		FROM messages m
 		LEFT JOIN users u ON m.author_id = u.id
         LEFT JOIN messages rm ON m.referenced_message_id = rm.id
@@ -348,11 +358,13 @@ Discord::Message MessageRepository::readMessageFromQuery(const QSqlQuery &q)
     // Column 15: m.referenced_message_id
     // Columns 16-24: rm.id, rm.channel_id, rm.author_id, rm.content, rm.timestamp, rm.edited_timestamp, rm.type, rm.flags, rm.embeds
     // Columns 25-29: ru.id, ru.username, ru.global_name, ru.avatar, ru.bot
+    // Column 30: m.parsed_content
 
     Discord::Message message;
     message.id = static_cast<Core::Snowflake>(q.value(0).toLongLong());
     message.channelId = static_cast<Core::Snowflake>(q.value(1).toLongLong());
     message.content = q.value(3).toString();
+    message.parsedContentCached = q.value(30).toString();
     message.timestamp = q.value(4).toDateTime();
     message.editedTimestamp = q.value(5).toDateTime();
     message.type = static_cast<Discord::MessageType>(q.value(6).toLongLong());

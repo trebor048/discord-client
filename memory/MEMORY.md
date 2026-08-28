@@ -1,1 +1,3 @@
-- [reference] reference：Completed full bug-fix pass: 27 code fixes across Gateway/Client/Voice/DAVE/UI/Storage/Notification subsystems + verified 3 false positives + 1 feature-deferral; build green, ctest 8/8, smoke OK. → reference.md
+- [reference] reference：Perf audit wave: 4 subsystem audits completed; 6 confirmed lag fixes applied and verified (build+ctest green) → reference.md
+- [reference] reference：Lag/freeze elimination wave 2: 11 confirmed perf fixes applied (parser O(n²)→O(n), member-list targeted updates, per-paint pixmap/blur caching, async image decode, LRU/process-scan/wsSend off hot paths), build+ctest 10/10+smoke green → reference.md
+- [reference] reference：Lag/freeze elimination wave 2b: 4 more fixes (skip re-parse on content-unchanged updates, reaction updates via single-column UPDATE not full save txn, disk-cache prune off UI thread, persist parsedContentCached in cache DB + migration v2), build+ctest 10/10+smoke green → reference.md

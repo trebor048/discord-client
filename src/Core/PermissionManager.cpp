@@ -27,16 +27,25 @@ void PermissionManager::insertIntoCache(const CacheKey &key, Discord::Permission
 {
     if (permissionCache.contains(key)) {
         permissionCache.insert(key, permissions);
-        permissionCacheLru.removeOne(key);
-        permissionCacheLru.append(key);
+        // Promote to back (most recently used).
+        auto lit = permissionCacheLruIndex.constFind(key);
+        if (lit != permissionCacheLruIndex.constEnd())
+            permissionCacheLru.splice(permissionCacheLru.end(), permissionCacheLru, lit.value());
+        else
+            permissionCacheLru.push_back(key);
         return;
     }
 
-    while (permissionCache.size() >= MaxPermissionCacheSize && !permissionCacheLru.isEmpty())
-        permissionCache.remove(permissionCacheLru.takeFirst());
+    while (permissionCache.size() >= MaxPermissionCacheSize && !permissionCacheLru.empty()) {
+        const CacheKey victim = permissionCacheLru.front();
+        permissionCacheLru.pop_front();
+        permissionCacheLruIndex.remove(victim);
+        permissionCache.remove(victim);
+    }
 
     permissionCache.insert(key, permissions);
-    permissionCacheLru.append(key);
+    permissionCacheLru.push_back(key);
+    permissionCacheLruIndex.insert(key, std::prev(permissionCacheLru.end()));
 }
 
 Discord::Permissions PermissionManager::getChannelPermissions(Snowflake userId, Snowflake channelId)
@@ -45,8 +54,9 @@ Discord::Permissions PermissionManager::getChannelPermissions(Snowflake userId, 
     auto it = permissionCache.constFind(cacheKey);
     if (it != permissionCache.constEnd()) {
         // touch: most recently used goes to the back
-        permissionCacheLru.removeOne(cacheKey);
-        permissionCacheLru.append(cacheKey);
+        auto lit = permissionCacheLruIndex.constFind(cacheKey);
+        if (lit != permissionCacheLruIndex.constEnd())
+            permissionCacheLru.splice(permissionCacheLru.end(), permissionCacheLru, lit.value());
         return it.value();
     }
 
@@ -142,7 +152,10 @@ void PermissionManager::invalidateChannelCache(Snowflake channelId)
     auto it = permissionCache.begin();
     while (it != permissionCache.end()) {
         if (it.key().second == channelId) {
-            permissionCacheLru.removeOne(it.key());
+            auto lit = permissionCacheLruIndex.find(it.key());
+            if (lit != permissionCacheLruIndex.end())
+                permissionCacheLru.erase(lit.value());
+            permissionCacheLruIndex.remove(it.key());
             it = permissionCache.erase(it);
         } else {
             ++it;
@@ -167,7 +180,10 @@ void PermissionManager::invalidateUserGuildCache(Snowflake userId, Snowflake gui
     while (it != permissionCache.end()) {
         if (it.key().first == userId && channelIds.contains(it.key().second)) {
             invalidated.append(it.key().second);
-            permissionCacheLru.removeOne(it.key());
+            auto lit = permissionCacheLruIndex.find(it.key());
+            if (lit != permissionCacheLruIndex.end())
+                permissionCacheLru.erase(lit.value());
+            permissionCacheLruIndex.remove(it.key());
             it = permissionCache.erase(it);
         } else {
             ++it;

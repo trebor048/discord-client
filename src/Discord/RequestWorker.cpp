@@ -417,11 +417,31 @@ void RequestWorker::abortAllInFlight()
             delete ctx->uploadFile;
             ctx->uploadFile = nullptr;
         }
-        delete ctx; // no callback fired
+
+        // Fail the transfer rather than dropping its callback (same policy as
+        // submit()'s rejected-request path: the caller's callback must never
+        // be left hanging). dispatchCompletion is QPointer-guarded.
+        HttpResponse response;
+        response.success = false;
+        response.statusCode = 0;
+        response.error = QStringLiteral("Request aborted: client is shutting down");
+        dispatchCompletion(std::move(ctx->descriptor), std::move(response), std::nullopt);
+
+        delete ctx;
     }
     active.clear();
 
     std::lock_guard<std::mutex> lock(mutex);
+    // Drain queued-but-unstarted submissions with the same failure dispatch as
+    // the active transfers: dropping them silently would leak their callbacks
+    // (the caller waits forever for a response).
+    for (auto &descriptor : pending) {
+        HttpResponse response;
+        response.success = false;
+        response.statusCode = 0;
+        response.error = QStringLiteral("Request aborted: client is shutting down");
+        dispatchCompletion(std::move(descriptor), std::move(response), std::nullopt);
+    }
     pending.clear();
 }
 

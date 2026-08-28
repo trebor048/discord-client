@@ -35,6 +35,7 @@ void Session::shutdown()
             continue;
         disconnect(instance, nullptr, this, nullptr);
         instance->stop();
+        Storage::DatabaseManager::instance().closeCacheDatabase(instance->accountId());
         instance->deleteLater();
     }
 }
@@ -50,7 +51,9 @@ void Session::connectAccount(Snowflake accountId)
         }
 
         // were dead
-        clients.take(accountId)->deleteLater();
+        ClientInstance *dead = clients.take(accountId);
+        Storage::DatabaseManager::instance().closeCacheDatabase(accountId);
+        dead->deleteLater();
     }
 
     AccountInfo acc = repo.getAccount(accountId);
@@ -73,7 +76,9 @@ void Session::connectAccount(Snowflake accountId)
 
                 if (state == ConnectionState::Disconnected) {
                     if (clients.value(accountId) == instance) {
-                        clients.take(accountId)->deleteLater();
+                        ClientInstance *dead = clients.take(accountId);
+                        Storage::DatabaseManager::instance().closeCacheDatabase(accountId);
+                        dead->deleteLater();
                     }
                 }
             });

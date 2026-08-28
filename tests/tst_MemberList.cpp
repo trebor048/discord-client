@@ -123,6 +123,92 @@ private slots:
         QCOMPARE(member->type, Core::MemberListItem::Type::Member);
         QCOMPARE(member->displayName, QStringLiteral("user3"));
     }
+
+    // Regression: presence-only GUILD_MEMBER_LIST_UPDATE batches (in-place
+    // UPDATE ops, no structural changes) must repaint only the affected rows
+    // instead of resetting the whole model. Resetting every presence change
+    // made the member list relayout and lose scroll position.
+    void updateOnlyRepaintsTargetedRows()
+    {
+        Storage::ChannelRepository channelRepo(Core::Snowflake(9004));
+        Storage::RoleRepository roleRepo(Core::Snowflake(9004));
+        Core::MemberListManager manager(channelRepo, roleRepo);
+
+        manager.setActiveChannel(Core::Snowflake(1), Core::Snowflake(10));
+        manager.handleMemberListUpdate(makeUpdate(QStringLiteral("0"), 3));
+
+        QSignalSpy resetSpy(&manager, &Core::MemberListManager::listReset);
+        QSignalSpy rowsSpy(&manager, &Core::MemberListManager::listRowsChanged);
+
+        // A pure UPDATE batch touching index 1 (second member row).
+        QJsonObject member{
+            { "user", QJsonObject{ { "id", "101" }, { "username", "renamed" } } }
+        };
+        QJsonObject root{
+            { "id", "0" },
+            { "guild_id", "1" },
+            { "member_count", 3 },
+            { "online_count", 3 },
+            { "ops",
+              QJsonArray{ QJsonObject{ { "op", "UPDATE" },
+                                       { "index", 1 },
+                                       { "item", QJsonObject{ { "member", member } } } } } },
+        };
+        manager.handleMemberListUpdate(Discord::GuildMemberListUpdate::fromJson(root));
+
+        QCOMPARE(resetSpy.count(), 0); // no full model reset
+        QCOMPARE(rowsSpy.count(), 1);
+        QCOMPARE(rowsSpy.at(0).at(0).toList().at(0).toInt(), 1);
+
+        const auto *updated = manager.itemAt(1);
+        QVERIFY(updated);
+        QCOMPARE(updated->type, Core::MemberListItem::Type::Member);
+        QCOMPARE(updated->displayName, QStringLiteral("renamed"));
+    }
+
+    // Real Discord payloads always carry the full `groups` array (a required
+    // field), and presence changes bump the group *counts*. The ordered set of
+    // group ids is unchanged, so this must still be treated as a cosmetic
+    // update — repaint the affected rows (including the group header) instead
+    // of resetting the model, which would lose scroll position.
+    void updateWithCountOnlyGroupChangeRepaintsWithoutReset()
+    {
+        Storage::ChannelRepository channelRepo(Core::Snowflake(9005));
+        Storage::RoleRepository roleRepo(Core::Snowflake(9005));
+        Core::MemberListManager manager(channelRepo, roleRepo);
+
+        manager.setActiveChannel(Core::Snowflake(1), Core::Snowflake(10));
+        manager.handleMemberListUpdate(makeUpdate(QStringLiteral("0"), 3));
+
+        QSignalSpy resetSpy(&manager, &Core::MemberListManager::listReset);
+        QSignalSpy rowsSpy(&manager, &Core::MemberListManager::listRowsChanged);
+
+        QJsonObject member{
+            { "user", QJsonObject{ { "id", "101" }, { "username", "renamed" } } }
+        };
+        QJsonObject root{
+            { "id", "0" },
+            { "guild_id", "1" },
+            { "member_count", 3 },
+            { "online_count", 2 },
+            // Same group ids, new counts (presence changed one member offline).
+            { "groups", QJsonArray{ QJsonObject{ { "id", "online" }, { "count", 2 } } } },
+            { "ops",
+              QJsonArray{ QJsonObject{ { "op", "UPDATE" },
+                                       { "index", 1 },
+                                       { "item", QJsonObject{ { "member", member } } } } } },
+        };
+        manager.handleMemberListUpdate(Discord::GuildMemberListUpdate::fromJson(root));
+
+        QCOMPARE(resetSpy.count(), 0); // same group ids -> no structural reset
+        QVERIFY(rowsSpy.count() >= 1);
+        const QList<QVariant> rows = rowsSpy.at(0).at(0).toList();
+        QVERIFY2(rows.contains(1),
+                 qPrintable(QStringLiteral("expected row 1 in %1 rows").arg(rows.size())));
+        // The group header row must be refreshed so its count stays current.
+        QVERIFY2(rows.contains(0),
+                 qPrintable(QStringLiteral("expected row 0 in %1 rows").arg(rows.size())));
+    }
 };
 
 QTEST_MAIN(TestMemberList)
