@@ -168,7 +168,7 @@ void AttachmentPreviewPanel::addImage(const QImage &image)
 }
 
 void AttachmentPreviewPanel::addGifData(const QByteArray &data, const QImage &preview,
-                                           const QString &filename)
+                                        const QString &filename, const QString &mimeType)
 {
     if (data.isEmpty())
         return;
@@ -177,7 +177,7 @@ void AttachmentPreviewPanel::addGifData(const QByteArray &data, const QImage &pr
     attachment.data = data;
     attachment.image = preview;
     attachment.filename = filename.isEmpty() ? QStringLiteral("gif.gif") : filename;
-    attachment.mimeType = QStringLiteral("image/gif");
+    attachment.mimeType = mimeType;
     attachment.size = data.size();
     appendAttachment(attachment);
 }

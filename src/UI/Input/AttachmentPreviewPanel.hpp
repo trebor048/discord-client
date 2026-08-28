@@ -21,7 +21,8 @@ public:
     void setMaxFileSize(qint64 bytes);
     void addFiles(const QList<QUrl> &urls);
     void addImage(const QImage &image);
-    void addGifData(const QByteArray &data, const QImage &preview, const QString &filename);
+    void addGifData(const QByteArray &data, const QImage &preview, const QString &filename,
+                    const QString &mimeType = QStringLiteral("image/gif"));
     void showTransientError(const QString &message);
     [[nodiscard]] bool hasAttachments() const { return !items.isEmpty(); }
     [[nodiscard]] QList<Core::PendingAttachment> attachments() const { return items; }

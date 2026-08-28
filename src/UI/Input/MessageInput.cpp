@@ -2131,19 +2131,39 @@ void MessageInput::downloadAndAttachGif(const QUrl &url, const QString &filename
             return;
         }
 
-        // Load the first frame as preview image
+        // Auto-detect the container instead of forcing "gif": klipy media is
+        // frequently served as webp (see ImageManager), and a forced-format
+        // decode of that data fails — the GIF would never attach. Sniffing
+        // also lets us label the attachment with the real extension/mime so
+        // Discord and the chat renderer treat it correctly on the other side.
         QBuffer buf;
         buf.setData(data);
         buf.open(QIODevice::ReadOnly);
-        QImageReader reader(&buf, QByteArrayLiteral("gif"));
+        QByteArray detectedFormat = QImageReader::imageFormat(&buf);
+        if (detectedFormat.isEmpty())
+            detectedFormat = QByteArrayLiteral("gif");
+        buf.seek(0);
+
+        QImageReader reader(&buf, detectedFormat);
         QImage preview = reader.read();
         if (preview.isNull()) {
             attachmentPanel->showTransientError(tr("Couldn't decode GIF preview"));
             return;
         }
 
+        // Re-label the attachment with the real extension + mime so a webp
+        // payload isn't sent as "image/gif" (which renders broken in chat).
+        const QString fmtName = QString::fromLatin1(detectedFormat);
+        const QString ext = QLatin1Char('.') + fmtName;
+        QString realFilename = filename;
+        if (!realFilename.endsWith(ext, Qt::CaseInsensitive)) {
+            const int dot = realFilename.lastIndexOf(QLatin1Char('.'));
+            realFilename = (dot > 0 ? realFilename.left(dot) : realFilename) + ext;
+        }
+        const QString mime = QStringLiteral("image/") + fmtName;
+
         // Queue via the attachment panel with full GIF data preserved
-        attachmentPanel->addGifData(data, preview, filename);
+        attachmentPanel->addGifData(data, preview, realFilename, mime);
     });
 }
 

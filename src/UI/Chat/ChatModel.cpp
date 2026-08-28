@@ -821,13 +821,22 @@ QList<AttachmentData> ChatModel::buildAttachmentData(const Discord::Message &msg
         data.fileSizeBytes = att.size.hasValue() ? *att.size : 0;
         data.isSpoiler = att.isSpoiler();
 
-        // Detect animated GIF attachments
+        // Detect animated attachments: gif and animated webp/avif (klipy media
+        // is frequently served as webp despite being a "GIF"). GifAnimation
+        // sniffs the real container and falls back to a static render for
+        // non-animated payloads, so treating webp as animated-capable is safe.
         bool isGif = false;
-        if (att.contentType.hasValue() && *att.contentType == QStringLiteral("image/gif"))
-            isGif = true;
-        if (!isGif && att.filename.hasValue() &&
-            att.filename->endsWith(QStringLiteral(".gif"), Qt::CaseInsensitive))
-            isGif = true;
+        if (att.contentType.hasValue()) {
+            const QString ct = *att.contentType;
+            isGif = ct == QStringLiteral("image/gif") || ct == QStringLiteral("image/webp") ||
+                    ct == QStringLiteral("image/avif");
+        }
+        if (!isGif && att.filename.hasValue()) {
+            const QString name = att.filename->toLower();
+            isGif = name.endsWith(QStringLiteral(".gif")) ||
+                    name.endsWith(QStringLiteral(".webp")) ||
+                    name.endsWith(QStringLiteral(".avif"));
+        }
         data.isGif = isGif;
 
         // Detect video attachments (video/* content type)
