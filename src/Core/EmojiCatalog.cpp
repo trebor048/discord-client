@@ -38,6 +38,27 @@ QString normalizeQuery(const QString &text)
     return text.trimmed().toCaseFolded();
 }
 
+// Precomputed folded-name index over combinedEmojiData(). Folding ~4k names on
+// every keystroke/lookup (search, completions, exact name lookups, category
+// scans) is measurable; the index is rebuilt in the same locked pass as the
+// combined data and invalidated by the same dirty flag.
+struct EmojiSearchIndex
+{
+    // folded name -> index of the FIRST matching item (scan order), preserving
+    // the original "first match wins" semantics of the linear scans.
+    QHash<QString, int> exactAny;      // any item
+    QHash<QString, int> exactUnicode;  // non-custom items only
+    // Parallel to combinedEmojiData(): pre-folded names/categories.
+    QVector<QString> foldedNames;
+    QVector<QString> foldedCategories;
+};
+
+EmojiSearchIndex &emojiSearchIndex()
+{
+    static EmojiSearchIndex index;
+    return index;
+}
+
 } // namespace
 
 static QMutex &customEmojiMutex()
@@ -67,6 +88,25 @@ static const QVector<EmojiCatalogItem> &combinedEmojiData()
         combined.reserve(combined.size() + customEmojiRegistry().size());
         for (const auto &item : customEmojiRegistry())
             combined.push_back(item);
+
+        // Rebuild the folded-name index in the same locked pass so it always
+        // matches the combined data exactly.
+        EmojiSearchIndex &index = emojiSearchIndex();
+        index.exactAny.clear();
+        index.exactUnicode.clear();
+        index.foldedNames.resize(combined.size());
+        index.foldedCategories.resize(combined.size());
+        for (int i = 0; i < combined.size(); ++i) {
+            const EmojiCatalogItem &item = combined[i];
+            const QString foldedName = item.name.toCaseFolded();
+            index.foldedNames[i] = foldedName;
+            index.foldedCategories[i] = item.category.toCaseFolded();
+            if (!index.exactAny.contains(foldedName))
+                index.exactAny.insert(foldedName, i);
+            if (!item.isCustom() && !index.exactUnicode.contains(foldedName))
+                index.exactUnicode.insert(foldedName, i);
+        }
+
         combinedEmojiDirty() = false;
     }
     return combined;
@@ -96,9 +136,11 @@ QVector<EmojiCatalogItem> EmojiCatalog::itemsForCategory(const QString &category
 {
     QVector<EmojiCatalogItem> results;
     const QString needle = category.toCaseFolded();
-    for (const auto &item : items()) {
-        if (item.category.toCaseFolded() == needle)
-            results.push_back(item);
+    const auto &data = items();
+    const auto &index = emojiSearchIndex();
+    for (int i = 0; i < data.size(); ++i) {
+        if (index.foldedCategories[i] == needle)
+            results.push_back(data[i]);
     }
     return results;
 }
@@ -110,10 +152,11 @@ QVector<EmojiCatalogItem> EmojiCatalog::search(const QString &query)
     if (needle.isEmpty())
         return items();
 
-    for (const auto &item : items()) {
-        const QString name = item.name.toCaseFolded();
-        if (name.contains(needle))
-            results.push_back(item);
+    const auto &data = items();
+    const auto &index = emojiSearchIndex();
+    for (int i = 0; i < data.size(); ++i) {
+        if (index.foldedNames[i].contains(needle))
+            results.push_back(data[i]);
     }
 
     std::sort(results.begin(), results.end(), [](const auto &a, const auto &b) {
@@ -126,9 +169,11 @@ QStringList EmojiCatalog::completionNames(const QString &prefix)
 {
     QStringList names;
     const QString needle = normalizeQuery(prefix);
-    for (const auto &item : items()) {
-        if (needle.isEmpty() || item.name.toCaseFolded().startsWith(needle))
-            names.append(item.name);
+    const auto &data = items();
+    const auto &index = emojiSearchIndex();
+    for (int i = 0; i < data.size(); ++i) {
+        if (needle.isEmpty() || index.foldedNames[i].startsWith(needle))
+            names.append(data[i].name);
     }
     return names;
 }
@@ -136,21 +181,23 @@ QStringList EmojiCatalog::completionNames(const QString &prefix)
 QString EmojiCatalog::unicodeForName(const QString &name)
 {
     const QString needle = normalizeQuery(name);
-    for (const auto &item : items()) {
-        if (!item.isCustom() && item.name.toCaseFolded() == needle)
-            return item.unicodeEmoji;
-    }
-    return {};
+    const auto &data = items();
+    const auto &index = emojiSearchIndex();
+    const auto it = index.exactUnicode.constFind(needle);
+    if (it == index.exactUnicode.constEnd())
+        return {};
+    return data[it.value()].unicodeEmoji;
 }
 
 QString EmojiCatalog::valueForName(const QString &name)
 {
     const QString needle = normalizeQuery(name);
-    for (const auto &item : items()) {
-        if (item.name.toCaseFolded() == needle)
-            return item.selectionValue();
-    }
-    return {};
+    const auto &data = items();
+    const auto &index = emojiSearchIndex();
+    const auto it = index.exactAny.constFind(needle);
+    if (it == index.exactAny.constEnd())
+        return {};
+    return data[it.value()].selectionValue();
 }
 
 std::optional<EmojiSelectionValue> EmojiCatalog::parseCustomEmoji(const QString &value)

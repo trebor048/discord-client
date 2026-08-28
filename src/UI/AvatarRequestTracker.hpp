@@ -18,7 +18,12 @@ public:
                   const Target &target, Core::PinGroup pin = Core::PinGroup::None)
     {
         QPixmap pixmap = imageManager->get(url, size, pin);
-        if (!imageManager->isCached(url, size))
+        // Track only pixmaps that are usable but not yet cached: get() returns
+        // a non-null placeholder for in-flight fetches (so they still get
+        // tracked and refreshed on arrival), while a null result means the URL
+        // is unresolvable/failed — tracking that would leak a pending entry
+        // that can never be notified.
+        if (!pixmap.isNull() && !imageManager->isCached(url, size))
             track(url, target);
         return pixmap;
     }

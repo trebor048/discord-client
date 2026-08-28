@@ -50,10 +50,10 @@ void TypingTracker::addTyper(Snowflake channelId, Snowflake userId,
     }
     if (!found) {
         typers.append(entry);
-    }
-
-    if (channelId == activeChannel) {
-        emit typersChanged();
+        // Only a genuinely new typer changes the visible name set; refreshing
+        // an existing entry's expiry must not re-emit on every gateway update.
+        if (channelId == activeChannel)
+            emit typersChanged();
     }
 }
 

@@ -97,9 +97,109 @@ void FriendsPage::onTabChanged(int)
         Acheron::Core::AnimationUtils::fadeIn(list, 150);
 }
 
-void FriendsPage::onRelationshipChanged(Core::Snowflake)
+void FriendsPage::onRelationshipChanged(Core::Snowflake userId)
 {
-    rebuildList();
+    // Coalesce bursts of relationship changes (e.g. a batch arriving in one
+    // event-loop pass) into a single deferred rebuild: the previous handler
+    // destroyed and recreated every widget on each individual change.
+    changedUserIds.insert(userId);
+    scheduleRebuild();
+}
+
+void FriendsPage::scheduleRebuild()
+{
+    if (!rebuildTimer) {
+        rebuildTimer = new QTimer(this);
+        rebuildTimer->setSingleShot(true);
+        rebuildTimer->setInterval(0);
+        connect(rebuildTimer, &QTimer::timeout,
+                this, &FriendsPage::applyPendingRelationshipChanges);
+    }
+    rebuildTimer->start();
+}
+
+void FriendsPage::applyPendingRelationshipChanges()
+{
+    const QSet<Core::Snowflake> pending = changedUserIds;
+    changedUserIds.clear();
+
+    QListWidget *list = qobject_cast<QListWidget *>(tabs->currentWidget());
+    if (!list) {
+        rebuildList();
+        return;
+    }
+
+    const Tab tab = static_cast<Tab>(tabs->currentIndex());
+    bool needsFullRebuild = false;
+    for (const Core::Snowflake &userId : pending) {
+        if (!updateRowInPlace(list, tab, userId)) {
+            needsFullRebuild = true;
+            break;
+        }
+    }
+
+    if (needsFullRebuild)
+        rebuildList();
+}
+
+bool FriendsPage::updateRowInPlace(QListWidget *list, Tab tab, Core::Snowflake userId)
+{
+    QListWidgetItem *row = nullptr;
+    for (int i = 0; i < list->count(); ++i) {
+        QListWidgetItem *candidate = list->item(i);
+        if (candidate && Core::Snowflake(candidate->data(Qt::UserRole).toULongLong()) == userId) {
+            row = candidate;
+            break;
+        }
+    }
+
+    const auto relOpt = relationships->getRelationship(userId);
+    if (!relOpt)
+        return false; // relationship removed -> the row (if present) must go away
+
+    const Discord::Relationship &rel = *relOpt;
+    if (!relationshipMatchesTab(tab, rel.type.get()))
+        return !row; // the row must leave this tab (or was never in it): rebuild only if visible here
+
+    if (!row)
+        return false; // belongs in this tab but is not present (fresh add) -> rebuild
+
+    // Same tab, same type: only the display text can have changed. Updating it
+    // in place keeps the widget (and any scroll/selection state) intact.
+    const QString label = labelFor(rel);
+    row->setText(label);
+    row->setToolTip(label);
+    return true;
+}
+
+bool FriendsPage::relationshipMatchesTab(Tab tab, Discord::RelationshipType type) const
+{
+    switch (tab) {
+    case Tab::Online:
+    case Tab::All:
+        return type == Discord::RelationshipType::FRIEND;
+    case Tab::Pending:
+        return type == Discord::RelationshipType::INCOMING_REQUEST ||
+               type == Discord::RelationshipType::OUTGOING_REQUEST;
+    case Tab::Blocked:
+        return type == Discord::RelationshipType::BLOCKED;
+    }
+    return false;
+}
+
+QString FriendsPage::labelFor(const Discord::Relationship &rel) const
+{
+    QString label;
+    if (rel.user.hasValue()) {
+        label = rel.user->getDisplayName();
+    } else {
+        label = QString::number(rel.id.get());
+    }
+
+    const QString status = statusText(rel);
+    if (!status.isEmpty())
+        label += QStringLiteral(" — %1").arg(status);
+    return label;
 }
 
 void FriendsPage::onAddFriendClicked()
@@ -151,37 +251,10 @@ void FriendsPage::rebuildList()
 
     auto allRelationships = relationships->allRelationships();
     for (const auto &rel : allRelationships) {
-        switch (tab) {
-        case Tab::Online:
-            // Simple heuristic: friends with valid user data
-            if (rel.type.get() != Discord::RelationshipType::FRIEND)
-                continue;
-            break;
-        case Tab::All:
-            if (rel.type.get() != Discord::RelationshipType::FRIEND)
-                continue;
-            break;
-        case Tab::Pending:
-            if (rel.type.get() != Discord::RelationshipType::INCOMING_REQUEST &&
-                rel.type.get() != Discord::RelationshipType::OUTGOING_REQUEST)
-                continue;
-            break;
-        case Tab::Blocked:
-            if (rel.type.get() != Discord::RelationshipType::BLOCKED)
-                continue;
-            break;
-        }
+        if (!relationshipMatchesTab(tab, rel.type.get()))
+            continue;
 
-        QString label;
-        if (rel.user.hasValue()) {
-            label = rel.user->getDisplayName();
-        } else {
-            label = QString::number(rel.id.get());
-        }
-
-        QString status = statusText(rel);
-        if (!status.isEmpty())
-            label += QStringLiteral(" — %1").arg(status);
+        const QString label = labelFor(rel);
 
         auto *item = new QListWidgetItem(label, list);
         item->setData(Qt::UserRole, static_cast<qulonglong>(rel.id.get()));

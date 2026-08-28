@@ -12,6 +12,25 @@ constexpr int kRecentLimit = 20;
 constexpr int kFavoritesLimit = 100;
 constexpr char kRecentsKey[] = "emoji/recents";
 constexpr char kFavoritesKey[] = "emoji/favorites";
+
+// In-memory mirrors of the persisted lists. recents()/favorites() previously
+// read AND wrote QSettings on every call (hit per emoji click, grid rebuild,
+// and favorite toggle). The QSettings round-trip now happens once per list,
+// with write-through only when the sanitized value actually changed, so the
+// on-disk format and contents stay identical.
+struct CachedLists
+{
+    QStringList recents;
+    QStringList favorites;
+    bool recentsLoaded = false;
+    bool favoritesLoaded = false;
+};
+
+CachedLists &cachedLists()
+{
+    static CachedLists cache;
+    return cache;
+}
 }
 
 QStringList EmojiPreferences::sanitize(const QStringList &values, int maxCount)
@@ -44,26 +63,54 @@ void EmojiPreferences::saveList(const char *key, const QStringList &values)
 
 QStringList EmojiPreferences::recents()
 {
-    const QStringList sanitized = sanitize(loadList(kRecentsKey), kRecentLimit);
-    saveList(kRecentsKey, sanitized);
-    return sanitized;
+    CachedLists &cache = cachedLists();
+    if (!cache.recentsLoaded) {
+        const QStringList raw = loadList(kRecentsKey);
+        const QStringList sanitized = sanitize(raw, kRecentLimit);
+        cache.recents = sanitized;
+        cache.recentsLoaded = true;
+        // Preserve the historical write-on-read self-heal, but only once and
+        // only when sanitization actually changed the stored value.
+        if (sanitized != raw)
+            saveList(kRecentsKey, sanitized);
+    }
+    return cache.recents;
 }
 
 QStringList EmojiPreferences::favorites()
 {
-    const QStringList sanitized = sanitize(loadList(kFavoritesKey), kFavoritesLimit);
-    saveList(kFavoritesKey, sanitized);
-    return sanitized;
+    CachedLists &cache = cachedLists();
+    if (!cache.favoritesLoaded) {
+        const QStringList raw = loadList(kFavoritesKey);
+        const QStringList sanitized = sanitize(raw, kFavoritesLimit);
+        cache.favorites = sanitized;
+        cache.favoritesLoaded = true;
+        if (sanitized != raw)
+            saveList(kFavoritesKey, sanitized);
+    }
+    return cache.favorites;
 }
 
 void EmojiPreferences::setRecents(const QStringList &values)
 {
-    saveList(kRecentsKey, sanitize(values, kRecentLimit));
+    const QStringList sanitized = sanitize(values, kRecentLimit);
+    CachedLists &cache = cachedLists();
+    if (!cache.recentsLoaded || cache.recents != sanitized) {
+        cache.recents = sanitized;
+        cache.recentsLoaded = true;
+        saveList(kRecentsKey, sanitized);
+    }
 }
 
 void EmojiPreferences::setFavorites(const QStringList &values)
 {
-    saveList(kFavoritesKey, sanitize(values, kFavoritesLimit));
+    const QStringList sanitized = sanitize(values, kFavoritesLimit);
+    CachedLists &cache = cachedLists();
+    if (!cache.favoritesLoaded || cache.favorites != sanitized) {
+        cache.favorites = sanitized;
+        cache.favoritesLoaded = true;
+        saveList(kFavoritesKey, sanitized);
+    }
 }
 
 void EmojiPreferences::addRecent(const QString &value)

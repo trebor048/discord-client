@@ -128,13 +128,13 @@ void MemberListManager::setActiveChannel(Snowflake guildId, Snowflake channelId)
     if (gs.roleCache.isEmpty()) {
         const auto roles = roleRepo.getRolesForGuild(activeGuildId);
         for (const auto &role : roles)
-            gs.roleCache.insert(QString::number(role.id.get()), role);
+            gs.roleCache.insert(role.id.get(), role);
         ML_LOG << "[ML] loaded" << gs.roleCache.size() << "roles";
     }
 
     auto overwrites = channelRepo.getPermissionOverwrites(activeChannelId);
     Discord::Permissions everyonePerms;
-    auto rit = gs.roleCache.find(QString::number(activeGuildId));
+    auto rit = gs.roleCache.find(activeGuildId);
     if (rit != gs.roleCache.end())
         everyonePerms = rit->permissions;
     QString newListId = computeListId(overwrites, everyonePerms);
@@ -194,8 +194,7 @@ void MemberListManager::handleRoleCreated(Snowflake guildId, const Discord::Role
     if (it == guildStates.end())
         return;
 
-    QString roleIdStr = QString::number(role.id.get());
-    it->roleCache.insert(roleIdStr, role);
+    it->roleCache.insert(role.id.get(), role);
 }
 
 void MemberListManager::handleRoleUpdated(Snowflake guildId, const Discord::Role &role)
@@ -205,20 +204,21 @@ void MemberListManager::handleRoleUpdated(Snowflake guildId, const Discord::Role
         return;
 
     GuildListState &gs = it.value();
-    QString roleIdStr = QString::number(role.id.get());
-    gs.roleCache.insert(roleIdStr, role);
+    const Snowflake roleId = role.id.get();
+    gs.roleCache.insert(roleId, role);
 
     bool changed = false;
     for (auto lit = gs.lists.begin(); lit != gs.lists.end(); ++lit) {
         ListData &ld = lit.value();
         for (auto iit = ld.items.begin(); iit != ld.items.end(); ++iit) {
             auto &item = iit.value();
-            if (item.type == MemberListItem::Type::Group && item.groupId == roleIdStr) {
+            if (item.type == MemberListItem::Type::Group
+                && Snowflake(item.groupId.toULongLong()) == roleId) {
                 resolveGroupInfo(item, gs, ld);
                 changed = true;
             } else if (item.type == MemberListItem::Type::Member && !item.member.roles.isUndefined()) {
                 for (const auto &rid : item.member.roles.get()) {
-                    if (QString::number(rid) == roleIdStr) {
+                    if (rid == roleId) {
                         resolveMemberInfo(item, gs);
                         changed = true;
                         break;
@@ -241,8 +241,7 @@ void MemberListManager::handleRoleDeleted(Snowflake guildId, Snowflake roleId)
         return;
 
     GuildListState &gs = it.value();
-    QString roleIdStr = QString::number(roleId);
-    gs.roleCache.remove(roleIdStr);
+    gs.roleCache.remove(roleId);
 
     bool changed = false;
     for (auto lit = gs.lists.begin(); lit != gs.lists.end(); ++lit) {
@@ -251,7 +250,7 @@ void MemberListManager::handleRoleDeleted(Snowflake guildId, Snowflake roleId)
             auto &item = iit.value();
             if (item.type == MemberListItem::Type::Member && !item.member.roles.isUndefined()) {
                 for (const auto &rid : item.member.roles.get()) {
-                    if (QString::number(rid) == roleIdStr) {
+                    if (rid == roleId) {
                         resolveMemberInfo(item, gs);
                         changed = true;
                         break;
@@ -701,7 +700,7 @@ void MemberListManager::resolveGroupInfo(MemberListItem &item, const GuildListSt
         item.groupName = "Offline";
         item.groupColor = QColor();
     } else {
-        auto it = guildState.roleCache.find(item.groupId);
+        auto it = guildState.roleCache.find(Snowflake(item.groupId.toULongLong()));
         if (it != guildState.roleCache.end()) {
             item.groupName = it->name;
             if (it->hasColor())
@@ -732,8 +731,7 @@ void MemberListManager::resolveMemberInfo(MemberListItem &item, const GuildListS
         int highestIconPos = -1;
 
         for (const auto &roleId : member.roles.get()) {
-            QString roleIdStr = QString::number(roleId);
-            auto it = guildState.roleCache.find(roleIdStr);
+            auto it = guildState.roleCache.find(roleId);
             if (it != guildState.roleCache.end()) {
                 if (!it->color.isUndefined() && it->color.get() != 0 && it->position.get() > highestPos) {
                     highestPos = it->position.get();

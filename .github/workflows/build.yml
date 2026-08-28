@@ -151,7 +151,7 @@ jobs:
       - name: Test
         shell: pwsh
         run: |
-          ctest --preset windows -C RelWithDebInfo --output-on-failure
+          ctest --preset windows -C RelWithDebInfo --output-on-failure -j 0
 
       - name: Deploy Qt
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
@@ -214,7 +214,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential cmake ninja-build pkg-config \
+            build-essential cmake ninja-build pkg-config ccache \
             autoconf automake libtool perl \
             libgl1-mesa-dev libegl1 libfontconfig1-dev \
             libxkbcommon-x11-0 libxkbcommon-dev libx11-xcb1 libdbus-1-3 \
@@ -223,6 +223,14 @@ jobs:
             libxcb-xkb1 libxrender1 libxi6 libsm6 libice6 libxext6 \
             libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 libpulse0 \
             zlib1g-dev libsecret-1-dev
+
+      - name: Cache ccache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ runner.os }}-${{ env.VCPKG_BASELINE }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ env.VCPKG_BASELINE }}-
 
       - name: Install Qt
         uses: jurplel/install-qt-action@v4.3.1
@@ -264,10 +272,17 @@ jobs:
             "-DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
 
       - name: Build
-        run: cmake --build --preset linux --parallel
+        run: |
+          # ccache is optional: only point CCACHE_DIR at the cache step's path
+          # when ccache is actually installed, so a missing ccache never fails
+          # the job (CMakeLists.txt already tolerates its absence).
+          if command -v ccache >/dev/null 2>&1; then
+            export CCACHE_DIR="$HOME/.cache/ccache"
+          fi
+          cmake --build --preset linux --parallel
 
       - name: Test
-        run: ctest --preset linux --output-on-failure
+        run: ctest --preset linux --output-on-failure -j 0
 
       - name: Upload artifact
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')

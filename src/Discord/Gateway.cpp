@@ -416,7 +416,9 @@ void Gateway::handleReadySupplemental(const Inbound &data)
 
 void Gateway::handleMessageCreate(const Inbound &data)
 {
-    Message msg = data.getData<Message>();
+    // presentKeys is consumed only for MESSAGE_UPDATE messages (applyUpdate /
+    // MessageManager::onMessageUpdated), so skip building it for the create path.
+    Message msg = Message::fromJson(data.data.toObject(), false);
 
     emit gatewayMessageCreate(msg);
 }

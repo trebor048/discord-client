@@ -64,6 +64,9 @@ bool DatabaseManager::init()
     {
         QSqlQuery config(persistentDb);
         config.exec("PRAGMA foreign_keys = ON");
+        config.exec("PRAGMA journal_mode = WAL");
+        config.exec("PRAGMA synchronous = NORMAL");
+        config.exec("PRAGMA busy_timeout = 5000");
     }
 
     setupPersistentTables();
@@ -110,6 +113,7 @@ QString DatabaseManager::openCacheDatabase(Core::Snowflake accountId)
         if (!inMemory) {
             config.exec("PRAGMA journal_mode = WAL");
             config.exec("PRAGMA synchronous = OFF");
+            config.exec("PRAGMA busy_timeout = 5000");
         }
     }
 

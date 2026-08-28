@@ -5,6 +5,31 @@
 namespace Acheron {
 namespace UI {
 
+namespace {
+// Builds the PresenceRole payload (identical keys/values to the previous
+// per-paint code); now computed once per presence change and cached.
+QVariantMap buildPresenceMap(const Core::ClientInstance::UserPresence &p)
+{
+    // Pick the primary device (desktop > mobile > web), first non-offline.
+    QString device;
+    QString deviceStatus;
+    const auto pick = [&device, &deviceStatus](const QString &d, const QString &s) {
+        if (device.isEmpty() && !s.isEmpty() && s != QLatin1String("offline")) {
+            device = d;
+            deviceStatus = s;
+        }
+    };
+    pick(QStringLiteral("desktop"), p.desktop);
+    pick(QStringLiteral("mobile"), p.mobile);
+    pick(QStringLiteral("web"), p.web);
+    QVariantMap map;
+    map["status"] = p.status;
+    map["device"] = device;
+    map["deviceStatus"] = deviceStatus.isEmpty() ? p.status : deviceStatus;
+    return map;
+}
+} // namespace
+
 constexpr static QSize AvatarRequestSize = QSize(32, 32);
 
 MemberListModel::MemberListModel(Core::ImageManager *imageManager, QObject *parent)
@@ -24,6 +49,7 @@ void MemberListModel::setManager(Core::MemberListManager *newManager)
     avatarTracker.clear();
     roleIconTracker.clear();
     connectManager();
+    rebuildPresenceCache();
     endResetModel();
 }
 
@@ -117,28 +143,12 @@ QVariant MemberListModel::data(const QModelIndex &index, int role) const
                 m_roleColorProvider(item->userId, manager->currentGuildId()));
     }
     case PresenceRole: {
-        if (item->type != Core::MemberListItem::Type::Member || !m_presenceProvider)
+        if (item->type != Core::MemberListItem::Type::Member)
             return QVariant();
-        const auto p = m_presenceProvider(item->userId);
-        if (!p)
+        const auto it = m_presenceCache.constFind(item->userId);
+        if (it == m_presenceCache.constEnd())
             return QVariant();
-        // Pick the primary device (desktop > mobile > web), first non-offline.
-        QString device;
-        QString deviceStatus;
-        const auto pick = [&device, &deviceStatus](const QString &d, const QString &s) {
-            if (device.isEmpty() && !s.isEmpty() && s != QLatin1String("offline")) {
-                device = d;
-                deviceStatus = s;
-            }
-        };
-        pick(QStringLiteral("desktop"), p->desktop);
-        pick(QStringLiteral("mobile"), p->mobile);
-        pick(QStringLiteral("web"), p->web);
-        QVariantMap map;
-        map["status"] = p->status;
-        map["device"] = device;
-        map["deviceStatus"] = deviceStatus.isEmpty() ? p->status : deviceStatus;
-        return map;
+        return it.value();
     }
     case GroupNameRole:
         return item->type == Core::MemberListItem::Type::Group
@@ -160,6 +170,7 @@ QVariant MemberListModel::data(const QModelIndex &index, int role) const
 void MemberListModel::setPresenceProvider(PresenceProvider provider)
 {
     m_presenceProvider = std::move(provider);
+    rebuildPresenceCache();
     if (manager)
         emit dataChanged(index(0, 0), index(rowCount() - 1, 0), { PresenceRole });
 }
@@ -171,10 +182,38 @@ void MemberListModel::setRoleColorProvider(RoleColorProvider provider)
         emit dataChanged(index(0, 0), index(rowCount() - 1, 0), { RoleBadgeColorRole });
 }
 
+void MemberListModel::cachePresence(Core::Snowflake userId)
+{
+    if (!m_presenceProvider)
+        return;
+    const auto p = m_presenceProvider(userId);
+    if (!p) {
+        m_presenceCache.remove(userId);
+        return;
+    }
+    m_presenceCache.insert(userId, buildPresenceMap(*p));
+}
+
+void MemberListModel::rebuildPresenceCache()
+{
+    m_presenceCache.clear();
+    if (!manager || !m_presenceProvider)
+        return;
+    const int total = manager->totalItemCount();
+    for (int row = 0; row < total; ++row) {
+        const auto *item = manager->itemAt(row);
+        if (item && item->type == Core::MemberListItem::Type::Member)
+            cachePresence(item->userId);
+    }
+}
+
 void MemberListModel::notifyPresenceChanged(Core::Snowflake userId)
 {
     if (!manager)
         return;
+    // Refresh the cached payload once per change; data(PresenceRole) reads it
+    // in O(1) instead of rebuilding the map on every paint.
+    cachePresence(userId);
     for (int row = 0; row < manager->totalItemCount(); ++row) {
         const auto *item = manager->itemAt(row);
         if (item && item->type == Core::MemberListItem::Type::Member && item->userId == userId) {
@@ -193,6 +232,7 @@ void MemberListModel::onListReset()
 {
     avatarTracker.clear();
     roleIconTracker.clear();
+    rebuildPresenceCache();
     endResetModel();
 }
 
@@ -202,8 +242,12 @@ void MemberListModel::onListRowsChanged(const QList<int> &rows)
         return;
     const int total = manager->totalItemCount();
     for (int row : rows) {
-        if (row >= 0 && row < total)
-            emit dataChanged(index(row, 0), index(row, 0));
+        if (row < 0 || row >= total)
+            continue;
+        const auto *item = manager->itemAt(row);
+        if (item && item->type == Core::MemberListItem::Type::Member)
+            cachePresence(item->userId);
+        emit dataChanged(index(row, 0), index(row, 0));
     }
 }
 

@@ -449,6 +449,23 @@ if(BUILD_TESTS)
     )
     target_link_libraries(TestMemberList PRIVATE Qt::Core Qt::Gui Qt::Sql Qt::Test)
     target_include_directories(TestMemberList PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    if(USE_PCH)
+        # Same shared PCH the app uses (src/pch.h), so the 10 TUs of this
+        # target stop recompiling the Qt-heavy headers. These test targets do
+        # not link every Qt module pch.h includes, so add the missing module
+        # include dirs explicitly (headers only, no link change) — the same
+        # pattern TestLinkification uses above.
+        target_include_directories(TestMemberList PRIVATE
+            ${Qt6Widgets_INCLUDE_DIRS}
+            ${Qt6Network_INCLUDE_DIRS}
+            ${Qt6Concurrent_INCLUDE_DIRS}
+            ${Qt6Multimedia_INCLUDE_DIRS}
+            ${Qt6MultimediaWidgets_INCLUDE_DIRS}
+            ${Qt6Svg_INCLUDE_DIRS}
+            ${CURL_INCLUDE_DIRS}
+        )
+        target_precompile_headers(TestMemberList PRIVATE src/pch.h)
+    endif()
     add_test(NAME MemberListTests COMMAND TestMemberList)
 
     qt_add_executable(TestAppearanceConfig
@@ -487,6 +504,23 @@ if(BUILD_TESTS)
     )
     target_link_libraries(TestReadState PRIVATE Qt::Core Qt::Gui Qt::Sql Qt::Test)
     target_include_directories(TestReadState PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    if(USE_PCH)
+        # Same shared PCH the app uses (src/pch.h), so the 14 TUs of this
+        # target stop recompiling the Qt-heavy headers. These test targets do
+        # not link every Qt module pch.h includes, so add the missing module
+        # include dirs explicitly (headers only, no link change) — the same
+        # pattern TestLinkification uses above.
+        target_include_directories(TestReadState PRIVATE
+            ${Qt6Widgets_INCLUDE_DIRS}
+            ${Qt6Network_INCLUDE_DIRS}
+            ${Qt6Concurrent_INCLUDE_DIRS}
+            ${Qt6Multimedia_INCLUDE_DIRS}
+            ${Qt6MultimediaWidgets_INCLUDE_DIRS}
+            ${Qt6Svg_INCLUDE_DIRS}
+            ${CURL_INCLUDE_DIRS}
+        )
+        target_precompile_headers(TestReadState PRIVATE src/pch.h)
+    endif()
     add_test(NAME ReadStateTests COMMAND TestReadState)
 
     # The CTest smoke test runs the build-tree executable, which on Windows

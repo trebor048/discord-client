@@ -227,7 +227,7 @@ function Invoke-Action([string]$DevCmd, [string]$qt6Dir) {
     $vcpkgToolchain = "$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
     $configure = "cmake --preset $Preset -DQt6_DIR=`"$qt6Dir`" -DCURL_INCLUDE_DIR=`"$CurlIncludeDir`" -DCURL_LIBRARY=`"$CurlLibrary`" -DCMAKE_TOOLCHAIN_FILE=`"$vcpkgToolchain`""
     $build = "cmake --build --preset $Preset --config $Configuration --parallel"
-    $test = "ctest --preset $Preset -C $Configuration --output-on-failure"
+    $test = "ctest --preset $Preset -C $Configuration --output-on-failure -j 0"
 
     # Qt bin directory (full DLL set) for runtime copying.
     $kitRoot = (Resolve-Path -LiteralPath (Join-Path $qt6Dir '..\..\..')).Path

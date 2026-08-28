@@ -386,9 +386,12 @@ MessageInput::MessageInput(QWidget *parent) : QWidget(parent)
     });
 
     connect(textEdit->document(), &QTextDocument::contentsChanged, this, [this]() {
-        updateEmojiPopup();
-        updateSlashPopup();
-        updateMentionPopup();
+        // One text snapshot per keystroke shared by all popup updates — the
+        // prefix helpers would otherwise each re-copy the whole document.
+        const QString text = textEdit->toPlainText();
+        updateEmojiPopup(text);
+        updateSlashPopup(text);
+        updateMentionPopup(text);
         updateMarkdownPreview();
         adjustHeight();
     });
@@ -403,6 +406,14 @@ MessageInput::MessageInput(QWidget *parent) : QWidget(parent)
     });
     connect(emojiPopup, &EmojiAutocompletePopup::emojiSelected, this, [this](const Core::EmojiCatalogItem &item) {
         insertEmojiCompletion(item);
+    });
+    // Debounced emoji query applied: reflect the outcome in show/hide state
+    // (this replaces the old per-keystroke hasResults() show/hide).
+    connect(emojiPopup, &EmojiAutocompletePopup::queryApplied, this, [this]() {
+        if (emojiPopup->hasResults())
+            showEmojiPopup();
+        else
+            hideEmojiPopup();
     });
     connect(slashPopup, &SlashCommandPopup::commandSelected, this, [this](const Discord::ApplicationCommand &command) {
         insertSlashCompletion(command);
@@ -779,9 +790,13 @@ void MessageInput::insertText(const QString &text)
 
 QString MessageInput::currentEmojiPrefix(int *startPosition) const
 {
+    return currentEmojiPrefix(textEdit->toPlainText(), startPosition);
+}
+
+QString MessageInput::currentEmojiPrefix(const QString &text, int *startPosition) const
+{
     QTextCursor cursor = textEdit->textCursor();
     const int position = cursor.position();
-    const QString text = textEdit->toPlainText();
     const int colonPosition = text.lastIndexOf(':', position - 1);
     if (colonPosition < 0)
         return {};
@@ -804,7 +819,7 @@ QString MessageInput::currentEmojiPrefix(int *startPosition) const
 
 void MessageInput::updateEmojiCompleter()
 {
-    updateEmojiPopup();
+    updateEmojiPopup(textEdit->toPlainText());
 }
 
 void MessageInput::refreshEmojiPopup()
@@ -848,14 +863,18 @@ void MessageInput::showEmojiPopup()
 
 void MessageInput::hideEmojiPopup()
 {
-    if (emojiPopup)
+    if (emojiPopup) {
+        // Drop any debounced-but-not-yet-applied query so a stale timer can't
+        // show the popup again after the emoji context was removed.
+        emojiPopup->cancelPendingQuery();
         emojiPopup->hide();
+    }
 }
 
-void MessageInput::updateEmojiPopup()
+void MessageInput::updateEmojiPopup(const QString &text)
 {
     int startPosition = -1;
-    const QString prefix = currentEmojiPrefix(&startPosition);
+    const QString prefix = currentEmojiPrefix(text, &startPosition);
     if (prefix.isEmpty()) {
         hideEmojiPopup();
         return;
@@ -864,13 +883,9 @@ void MessageInput::updateEmojiPopup()
     if (!emojiPopup)
         return;
 
+    // The popup debounces burst typing internally; show/hide is driven by its
+    // queryApplied() signal instead of reacting to every keystroke.
     emojiPopup->setQuery(prefix);
-
-    if (emojiPopup->hasResults()) {
-        showEmojiPopup();
-    } else {
-        hideEmojiPopup();
-    }
 }
 
 void MessageInput::insertEmojiCompletion(const Core::EmojiCatalogItem &item)
@@ -1041,7 +1056,7 @@ void computeSlashSuggestions(const Discord::ApplicationCommand &cmd, const QStri
 
 } // namespace
 
-void MessageInput::updateSlashPopup()
+void MessageInput::updateSlashPopup(const QString &text)
 {
     if (!slashPopup)
         return;
@@ -1056,7 +1071,6 @@ void MessageInput::updateSlashPopup()
         return;
     }
 
-    const QString text = textEdit->toPlainText();
     if (!text.startsWith(QLatin1Char('/'))) {
         hideSlashPopup();
         if (slashQueryDebounce)
@@ -1183,7 +1197,7 @@ void MessageInput::setAvailableCommands(const QList<Discord::ApplicationCommand>
     if (slashPopup)
         slashPopup->setCommands(commands);
     // Refresh the popup immediately so fetched results aren't one keystroke late.
-    updateSlashPopup();
+    updateSlashPopup(textEdit->toPlainText());
 }
 
 namespace {
@@ -1486,9 +1500,13 @@ bool MessageInput::tryParseSlashCommand(const QString &text, Discord::Applicatio
 
 QString MessageInput::currentMentionPrefix(int *startPosition, QChar *trigger) const
 {
+    return currentMentionPrefix(textEdit->toPlainText(), startPosition, trigger);
+}
+
+QString MessageInput::currentMentionPrefix(const QString &text, int *startPosition, QChar *trigger) const
+{
     QTextCursor cursor = textEdit->textCursor();
     const int position = cursor.position();
-    const QString text = textEdit->toPlainText();
 
     int triggerPos = -1;
     QChar trig;
@@ -1555,11 +1573,11 @@ void MessageInput::hideMentionPopup()
         mentionPopup->hide();
 }
 
-void MessageInput::updateMentionPopup()
+void MessageInput::updateMentionPopup(const QString &text)
 {
     int startPosition = -1;
     QChar trigger;
-    const QString prefix = currentMentionPrefix(&startPosition, &trigger);
+    const QString prefix = currentMentionPrefix(text, &startPosition, &trigger);
     if (trigger.isNull()) {
         hideMentionPopup();
         return;
@@ -1574,19 +1592,13 @@ void MessageInput::updateMentionPopup()
         return;
     }
 
-    // Filter the available mentionables by the trigger kind: '@' matches
-    // users/roles, '#' matches channels.
-    QList<MentionItem> filtered;
-    for (const auto &item : m_availableMentions) {
-        if (trigger == '#') {
-            if (item.kind == MentionItem::Kind::Channel)
-                filtered.append(item);
-        } else if (item.kind != MentionItem::Kind::Channel) {
-            filtered.append(item);
-        }
-    }
-    mentionPopup->setItems(filtered);
-    mentionPopup->setQuery(prefix);
+    // The popup pre-splits its items by kind in setItems() (called from
+    // setAvailableMentions), so per-keystroke we only re-run the match on the
+    // relevant subset instead of re-filtering + re-copying the whole list.
+    const MentionItem::Kind kind = trigger == QLatin1Char('#')
+                                           ? MentionItem::Kind::Channel
+                                           : MentionItem::Kind::User;
+    mentionPopup->setQuery(prefix, kind);
 
     if (mentionPopup->hasResults()) {
         showMentionPopup();

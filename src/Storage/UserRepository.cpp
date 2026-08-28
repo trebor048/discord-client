@@ -22,9 +22,14 @@ bool UserRepository::saveUser(const Discord::User &user, QSqlDatabase &db)
 {
     QSqlQuery q(db);
     q.prepare(R"(
-        INSERT OR REPLACE INTO users
+        INSERT INTO users
         (id, username, global_name, avatar, bot)
         VALUES (:id, :username, :global_name, :avatar, :bot)
+        ON CONFLICT(id) DO UPDATE SET
+            username = excluded.username,
+            global_name = excluded.global_name,
+            avatar = excluded.avatar,
+            bot = excluded.bot
     )");
 
     q.bindValue(":id", static_cast<qint64>(user.id.get()));

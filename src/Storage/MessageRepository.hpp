@@ -22,6 +22,7 @@ public:
     void saveMessages(const QList<Discord::Message> &messages);
     void saveMessages(const QList<Discord::Message> &messages, QSqlDatabase &db);
     void markMessageDeleted(Core::Snowflake messageId);
+    void markMessagesDeleted(const QList<Core::Snowflake> &messageIds);
     void updateMessageContent(const Discord::Message &message);
     void updateReactionsJson(Core::Snowflake messageId, const QString &reactionsJson);
     QString getReactionsJson(Core::Snowflake messageId);
@@ -35,8 +36,6 @@ private:
     void loadAttachmentsForMessages(QList<Discord::Message> &messages, QSqlDatabase &db);
     void pruneChannel(qint64 channelId, QSqlDatabase &db);
     Discord::Message readMessageFromQuery(const QSqlQuery &q);
-
-    UserRepository userRepository;
 };
 
 } // namespace Storage

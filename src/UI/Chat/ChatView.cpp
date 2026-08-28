@@ -414,12 +414,17 @@ void ChatView::setModel(QAbstractItemModel *model)
     modelConnections.append(connect(model, &QAbstractItemModel::dataChanged, this,
                                     [this](const QModelIndex &topLeft, const QModelIndex &bottomRight,
                                            const QVector<int> &roles) {
-        Q_UNUSED(topLeft); Q_UNUSED(bottomRight);
         // Content may have changed under the cursor — drop the hover cache.
         hoverLayoutRow = -1;
         if (roles.contains(ChatModel::AttachmentsRole) ||
             roles.contains(ChatModel::EmbedsRole)) {
-            viewport()->update();
+            // Repaint only the affected rows (GIF frame ticks, upload progress,
+            // embed settle) instead of the whole viewport.
+            const QRect dirty = visualRect(topLeft).united(visualRect(bottomRight));
+            if (!dirty.isEmpty())
+                viewport()->update(dirty);
+            else
+                viewport()->update();
         }
     }));
 }
@@ -1363,10 +1368,24 @@ void ChatView::copySelectedText()
         QModelIndex idx = model()->index(row, 0);
         QString html = idx.data(ChatModel::HtmlRole).toString();
 
-        QTextDocument doc;
-        doc.setHtml(html);
+        // Reuse the doc the layout layer cached for this row: the selection
+        // indices come from ChatLayout::hitTestCharIndex measured against that
+        // same cached doc, so positions align exactly and we skip re-parsing
+        // the HTML. Fall back to a local bare doc when the row was never laid
+        // out (identical to the previous always-bare behavior).
+        QTextDocument *doc = nullptr;
+        QTextDocument localDoc;
+        auto *chatModel = qobject_cast<ChatModel *>(model());
+        if (chatModel) {
+            const Core::Snowflake msgId(idx.data(ChatModel::MessageIdRole).toULongLong());
+            doc = chatModel->getCachedDocument(bodyDocKey(msgId));
+        }
+        if (!doc) {
+            localDoc.setHtml(html);
+            doc = &localDoc;
+        }
 
-        int docLength = doc.characterCount() - 1;
+        int docLength = doc->characterCount() - 1;
         int startChar = (row == start.row) ? start.index : 0;
         int endChar = (row == end.row) ? end.index : docLength;
 
@@ -1389,8 +1408,10 @@ void ChatView::copySelectedText()
         QString rowText;
         {
             int altIdx = 0;
+            // One cursor reused across the range instead of allocating a fresh
+            // QTextCursor per character.
+            QTextCursor c(doc);
             for (int pos = startChar; pos < endChar; ++pos) {
-                QTextCursor c(&doc);
                 c.setPosition(pos);
                 c.setPosition(pos + 1, QTextCursor::KeepAnchor);
                 QString ch = c.selectedText();

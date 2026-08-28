@@ -19,6 +19,9 @@ struct MentionItem
     Core::Snowflake id;
     QString name;
     Kind kind = Kind::User;
+    // Case-folded name, filled by the popup when the item list is set so the
+    // per-keystroke matching pass never re-folds names.
+    QString foldedName;
 };
 
 // Popup listing user/role/channel suggestions while the user types `@` or `#`.
@@ -31,7 +34,7 @@ public:
     explicit MentionAutocompletePopup(QWidget *parent = nullptr);
 
     void setItems(const QList<MentionItem> &items);
-    void setQuery(const QString &prefix);
+    void setQuery(const QString &prefix, MentionItem::Kind kind);
     void selectFirst();
     void moveSelection(int delta);
     void acceptCurrent();
@@ -53,13 +56,17 @@ private:
     };
 
     static int fuzzyScore(const QString &lowercaseName, const QString &lowercaseNeedle);
-    QList<MatchResult> computeMatches(const QString &prefix) const;
+    QList<MatchResult> computeMatches(const QString &prefix, MentionItem::Kind kind) const;
     void populateList(const QList<MatchResult> &matches);
     static QString kindPrefix(MentionItem::Kind kind);
 
     QListWidget *list_ = nullptr;
     QLabel *headerLabel_ = nullptr;
     QList<MentionItem> items_;
+    // Pre-filtered by trigger kind at setItems() so per-keystroke matching only
+    // walks the relevant subset (users/roles for '@', channels for '#').
+    QList<MentionItem> channelItems_;
+    QList<MentionItem> userRoleItems_;
     QList<MentionItem> currentItems_;
     bool m_accepted = false;
 };

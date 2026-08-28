@@ -52,6 +52,9 @@
       "configuration": "RelWithDebInfo",
       "output": {
         "outputOnFailure": true
+      },
+      "execution": {
+        "jobs": 0
       }
     },
     {
@@ -59,6 +62,9 @@
       "configurePreset": "linux",
       "output": {
         "outputOnFailure": true
+      },
+      "execution": {
+        "jobs": 0
       }
     }
   ]

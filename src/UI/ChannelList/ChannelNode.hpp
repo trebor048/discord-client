@@ -63,6 +63,12 @@ struct ChannelNode
     std::vector<std::unique_ptr<ChannelNode>> children;
     ChannelNode *parent = nullptr;
 
+    // Cached "this thread is the last thread child of its parent" flag, used by
+    // the delegate's branch icon. ChannelTreeModel recomputes it after
+    // structural edits; the delegate lazily (re)computes it when invalid.
+    mutable bool isLastThreadSibling = false;
+    mutable bool isLastThreadSiblingValid = false;
+
     [[nodiscard]] bool opensChat() const
     {
         return type == Type::Channel || type == Type::DMChannel || type == Type::Forum || type == Type::Thread;

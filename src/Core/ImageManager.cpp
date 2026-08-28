@@ -2,6 +2,8 @@
 
 #include <QThreadPool>
 
+#include <optional>
+
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
 #include <QNetworkReply>
@@ -60,6 +62,28 @@ static QByteArray animatedFormatFrom(const QUrl &url, const QString &mime)
         return ext.toUtf8();
     }
     return QByteArray();
+}
+
+// ---------------------------------------------------------------------------
+// GIF autoplay preference cache
+// ---------------------------------------------------------------------------
+
+// The "ui/gifAutoplay" setting is read on every repaint / movie frame from
+// views that re-invoke play(). Constructing a QSettings and hitting the
+// registry each time is measurable for a screen full of playing GIFs, so the
+// bool is cached and only re-read at the points where the value can actually
+// change playback: a freshly finished load, and a stopped movie being asked to
+// play (the enable-to-resume path). The setting therefore applies on the next
+// such re-read instead of on the very next repaint.
+static std::optional<bool> &gifAutoplayCache()
+{
+    static std::optional<bool> cached;
+    return cached;
+}
+
+void ImageManager::invalidateGifAutoplayCache()
+{
+    gifAutoplayCache().reset();
 }
 
 // ---------------------------------------------------------------------------
@@ -187,7 +211,11 @@ void GifAnimation::load(const QUrl &url, int containerWidth)
 
         // If we were asked to play before data arrived, start now — unless the
         // user disabled GIF/webp autoplay ("ui/gifAutoplay"), in which case the
-        // first frame is shown statically until playback is enabled.
+        // first frame is shown statically until playback is enabled. Re-read
+        // the setting here (fresh load = fresh decision) instead of trusting a
+        // cache that may predate a toggle made while the download was in
+        // flight.
+        ImageManager::invalidateGifAutoplayCache();
         if (m_playing && ImageManager::gifAutoplayEnabled())
             m_movie->start();
     });
@@ -279,8 +307,16 @@ void GifAnimation::play()
     // Honor the autoplay setting: with "ui/gifAutoplay" off the movie stays on
     // its first frame until the setting is re-enabled (play() is re-invoked by
     // views on every repaint, so flipping the setting back on resumes it).
-    if (m_movie && ImageManager::gifAutoplayEnabled())
-        m_movie->start();
+    if (m_movie) {
+        // The cached value serves the steady-state repaint path (a running
+        // movie; start() is a no-op there). Whenever the movie is not running
+        // the autoplay decision can actually change playback, so re-read the
+        // setting instead of trusting the cache.
+        if (m_movie->state() != QMovie::Running)
+            ImageManager::invalidateGifAutoplayCache();
+        if (ImageManager::gifAutoplayEnabled())
+            m_movie->start();
+    }
 }
 
 void GifAnimation::pause()
@@ -346,7 +382,10 @@ bool ImageManager::isSupportedAnimatedImage(const QUrl &url, const QString &mime
 
 bool ImageManager::gifAutoplayEnabled()
 {
-    return QSettings().value(QStringLiteral("ui/gifAutoplay"), true).toBool();
+    std::optional<bool> &cached = gifAutoplayCache();
+    if (!cached.has_value())
+        cached = QSettings().value(QStringLiteral("ui/gifAutoplay"), true).toBool();
+    return *cached;
 }
 
 GifAnimation *ImageManager::createGifAnimation(const QUrl &url, int containerWidth)

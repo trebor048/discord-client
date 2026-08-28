@@ -4,6 +4,7 @@
 #include <QPixmap>
 #include <QUrl>
 #include <QPointF>
+#include <QRectF>
 
 class QNetworkAccessManager;
 class QNetworkReply;
@@ -31,6 +32,9 @@ protected:
 
 private:
     void fetchFullImage(const QUrl &proxyUrl);
+    void applyFullImage(const QPixmap &pixmap);
+    void updateDisplayPixmap();
+    const QPixmap &displayPixmapFor(const QRectF &destRect) const;
     void resetView();
     void updateGeometryToParent();
     QPointF imageToWidget(const QPointF &imagePoint) const;
@@ -38,6 +42,10 @@ private:
 
     QPixmap currentImage;
     QPixmap fullImage;
+    // currentImage pre-scaled once to the current viewport resolution so
+    // paintEvent stops re-smoothing the full-resolution source on every
+    // repaint; regenerated on resize / when a new full image arrives.
+    QPixmap displayPixmap;
     QUrl currentUrl;
     bool isLoadingFull = false;
 

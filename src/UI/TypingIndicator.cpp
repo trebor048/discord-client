@@ -43,10 +43,12 @@ TypingIndicator::TypingIndicator(QWidget *parent) : QWidget(parent)
 
     // Smooth bounce animation for the typing dots
     dotBounceTimer = new QTimer(this);
-    dotBounceTimer->setInterval(30);
+    dotBounceTimer->setInterval(45);
     dotBouncePhase = 0.0f;
     connect(dotBounceTimer, &QTimer::timeout, this, [this]() {
-        dotBouncePhase += 0.15f;
+        // 0.225f = 0.15f * (45/30): keeps the angular speed identical while
+        // halving the per-tick phase cost of the timer callback.
+        dotBouncePhase += 0.225f;
         if (dotBouncePhase > 6.2832f)
             dotBouncePhase -= 6.2832f;
         update();

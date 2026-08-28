@@ -1,5 +1,6 @@
 #include "AttachmentGallery.hpp"
 
+#include <QCache>
 #include <QClipboard>
 #include <QColor>
 #include <QDir>
@@ -31,6 +32,25 @@
 namespace Acheron {
 namespace UI {
 namespace {
+
+// Bounded session cache of decoded full-resolution images, keyed by the fetch
+// URL (proxy URL + format/quality query) plus the device pixel ratio the
+// pixmap was decoded at. Navigating back and forth between attachments no
+// longer re-downloads / re-decodes an image already shown this session.
+constexpr qsizetype kImageCacheMaxBytes = 160 * 1024 * 1024; // ~32 full-res images
+
+QCache<QString, QPixmap> &fullImageCache()
+{
+    static QCache<QString, QPixmap> cache(static_cast<int>(kImageCacheMaxBytes / 1024));
+    return cache;
+}
+
+void cacheFullImage(const QString &key, const QPixmap &pixmap)
+{
+    const qsizetype cost = qMax<qsizetype>(1, pixmap.sizeInBytes() / 1024);
+    if (cost <= kImageCacheMaxBytes / 1024)
+        fullImageCache().insert(key, new QPixmap(pixmap), static_cast<int>(cost));
+}
 
 /// QGraphicsView that routes navigation/zoom keys and the mouse wheel to the
 /// gallery so keyboard/wheel interaction works even when the view has focus.
@@ -268,9 +288,18 @@ void AttachmentGallery::fetchFullImage(const QUrl &proxyUrl)
     query.addQueryItem(QStringLiteral("quality"), QStringLiteral("lossless"));
     fetchUrl.setQuery(query);
 
+    const qreal dpr = devicePixelRatioF();
+    const QString cacheKey = fetchUrl.toString() + QLatin1Char('@') + QString::number(dpr);
+
+    if (const QPixmap *cached = fullImageCache().object(cacheKey)) {
+        imageItem->setPixmap(*cached);
+        fitToWindow();
+        return;
+    }
+
     QNetworkReply *reply = networkManager->get(QNetworkRequest(fetchUrl));
     activeReply = reply;
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, cacheKey]() {
         if (activeReply == reply)
             activeReply = nullptr;
         reply->deleteLater();
@@ -284,6 +313,7 @@ void AttachmentGallery::fetchFullImage(const QUrl &proxyUrl)
             return;
 
         pixmap.setDevicePixelRatio(devicePixelRatioF());
+        cacheFullImage(cacheKey, pixmap);
         imageItem->setPixmap(pixmap);
         fitToWindow();
     });

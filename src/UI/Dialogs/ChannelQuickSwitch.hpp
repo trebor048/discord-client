@@ -2,6 +2,7 @@
 
 #include <QDialog>
 #include <QGraphicsOpacityEffect>
+#include <QHash>
 #include <QList>
 #include <QModelIndex>
 #include <QPropertyAnimation>
@@ -74,6 +75,18 @@ private:
         QIcon icon;
     };
 
+    // Snapshot of a channel's read state in the source model. Precomputed once
+    // per rebuild (instead of per sort comparison / per rendered item) and keyed
+    // by channelKey() so both the ByUnread comparator and appendChannelItem()
+    // resolve it with O(1) hash lookups.
+    struct ReadStateInfo
+    {
+        bool known = false; // item exists in the source model with a valid index
+        bool isUnread = false;
+        bool isMuted = false;
+        int mentionCount = 0;
+    };
+
     struct GuildSection
     {
         Core::Snowflake accountId;
@@ -105,8 +118,11 @@ private:
     void rebuildFlatTree(QTreeWidget *tree, const QList<ChannelEntry> &channels,
                          const QString &filterText, const QString &emptyText);
     void appendChannelItem(QTreeWidgetItem *parent, const ChannelEntry &entry,
-                           bool showSecondaryText);
-    void sortChannels(QList<ChannelEntry> &channels) const;
+                           bool showSecondaryText,
+                           const QHash<QString, ReadStateInfo> &readStates);
+    ReadStateInfo readStateFor(const ChannelEntry &entry) const;
+    void sortChannels(QList<ChannelEntry> &channels,
+                      const QHash<QString, ReadStateInfo> &readStates) const;
     void cycleSortMode();
     bool itemMatchesFilter(const ChannelEntry &entry, const QString &filterText) const;
     void setFirstSelectableItemCurrent();
@@ -147,8 +163,10 @@ private:
     Acheron::Discord::Client *discordClient = nullptr;
     Core::Snowflake apiAccountId;
     QTimer *dmSearchTimer = nullptr;
+    QTimer *rebuildDebounceTimer = nullptr;
     QList<Acheron::Discord::Channel> apiDMs;
     QString pendingFilterText;
+    QString pendingQueryText;
     bool dmInitialFetchTriggered = false;
     bool initialTreeBuilt = false;
 };

@@ -319,6 +319,18 @@ public:
     void invalidateDocCacheForMessage(Core::Snowflake messageId);
     void invalidateLayout();
 
+    /// Exposes the session image manager to the layout layer so docs built
+    /// during layout can register emoji resources before being cached.
+    Core::ImageManager *imageManagerPtr() const { return imageManager; }
+
+    /// Cached URL match ranges (start, end) in the body document's plain text
+    /// for a message. Returns false when not yet computed (the caller fills and
+    /// stores them via setTextUrlSpansFor); cleared together with the doc cache
+    /// so spans always match the current body HTML.
+    [[nodiscard]] bool textUrlSpansFor(Core::Snowflake messageId,
+                                       QVector<QPair<int, int>> *out) const;
+    void setTextUrlSpansFor(Core::Snowflake messageId, QVector<QPair<int, int>> spans) const;
+
     /// Returns the GifAnimation for the given attachment URL, creating it if necessary.
     /// The delegate calls this during paint() to get the current GIF frame.
     Core::GifAnimation *ensureGifAnimation(const QUrl &url, int row) const;
@@ -398,6 +410,14 @@ private:
     void ensureMessageRowIndex() const;
     void trimOldestMessagesIfNeeded();
 
+    /// Local (wall-clock) date serial per message id, memoized so
+    /// ShowHeaderRole/DateSeparatorRole don't re-run toLocalTime() per query.
+    /// Invalidated wherever sizeCache is invalidated for a message.
+    [[nodiscard]] int localDateSerial(const Discord::Message &msg) const;
+
+    /// Rebuild the nonce->row index from scratch (channel loads/resets only).
+    void rebuildNonceIndex();
+
     /// Cap on messages kept loaded per channel; oldest are trimmed from the top.
     static constexpr int MaxLoadedMessages = 500;
 
@@ -428,6 +448,9 @@ private:
     QHash<Snowflake, QSet<QString>> emojiUrlsByMessage; // message id -> indexed URLs (for eviction)
     mutable QHash<Snowflake, int> messageRowById; // message id -> current row (lazily rebuilt)
     mutable bool messageRowIndexDirty = true;
+    mutable QHash<QString, int> nonceToRow; // message nonce -> current row (incrementally maintained)
+    mutable QHash<Snowflake, int> localDateCache; // message id -> local date serial (see localDateSerial)
+    mutable QHash<Snowflake, QVector<QPair<int, int>>> textUrlSpans; // message id -> URL ranges in body text
     QNetworkAccessManager *stickerNetworkManager = nullptr; // shared NAM for animated stickers
     mutable QHash<Snowflake, QPixmap> previewPixmapCache; // pasted bitmap previews by attachment id
     mutable QSet<Snowflake> revealedSpoilers;

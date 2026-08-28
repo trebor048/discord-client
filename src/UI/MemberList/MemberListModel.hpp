@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QAbstractListModel>
+#include <QHash>
+#include <QVariantMap>
 
 #include <functional>
 #include <optional>
@@ -59,6 +61,12 @@ private:
     void connectManager();
     void disconnectManager();
 
+    // Rebuilds/stores the PresenceRole payload for one user (or clears it when
+    // the provider reports no presence). data(PresenceRole) reads this cache so
+    // the map is built once per presence change, not once per paint.
+    void cachePresence(Core::Snowflake userId);
+    void rebuildPresenceCache();
+
     Core::MemberListManager *manager = nullptr;
     Core::ImageManager *imageManager;
 
@@ -66,6 +74,8 @@ private:
     RoleColorProvider m_roleColorProvider;
     mutable AvatarRequestTracker<QPersistentModelIndex> avatarTracker;
     mutable AvatarRequestTracker<QPersistentModelIndex> roleIconTracker;
+
+    QHash<Core::Snowflake, QVariantMap> m_presenceCache;
 };
 
 } // namespace UI

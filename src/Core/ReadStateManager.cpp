@@ -354,11 +354,26 @@ bool ReadStateManager::isMuteActive(bool muted, const Discord::MuteConfig *muteC
     if (!muteConfig->endTime.hasValue())
         return true;
 
-    QString endTimeStr = muteConfig->endTime.get();
+    const QString &endTimeStr = muteConfig->endTime.get();
     if (endTimeStr.isEmpty())
         return true;
 
-    QDateTime endTime = QDateTime::fromString(endTimeStr, Qt::ISODate);
+    // Mute end times are typically one of a handful of distinct ISO strings
+    // (reused across channels muted in the same session), and re-parsing them
+    // on every read-state computation / per-message mute check is pure waste.
+    // Cache parse results keyed by the raw string: the parse is a pure function
+    // of the string, so the cache can never go stale. thread_local keeps it
+    // safe if this ever runs off the UI thread; the cap bounds growth.
+    static thread_local QHash<QString, QDateTime> parsedEndTimes;
+    auto it = parsedEndTimes.constFind(endTimeStr);
+    if (it == parsedEndTimes.constEnd()) {
+        const QDateTime parsed = QDateTime::fromString(endTimeStr, Qt::ISODate);
+        if (parsedEndTimes.size() >= 256)
+            parsedEndTimes.clear();
+        it = parsedEndTimes.insert(endTimeStr, parsed);
+    }
+
+    const QDateTime &endTime = it.value();
     if (!endTime.isValid())
         return true;
 

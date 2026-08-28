@@ -43,7 +43,13 @@ QVector<QByteArray> OpusDecoder::decode(const QByteArray &opusData)
     // 120ms * 48khz
     static constexpr int MAX_OPUS_SAMPLES = 5760;
     int pcmSize = MAX_OPUS_SAMPLES * frameChannels * static_cast<int>(sizeof(opus_int16));
-    QByteArray pcm(pcmSize, '\0');
+
+    // Reuse a persistent scratch buffer instead of allocating + zero-filling up
+    // to 23 KB per packet. The voice thread decodes one packet at a time and
+    // splitFrames() copies out the frames, so the buffer is never aliased into
+    // the result. resize() is a no-op once the (constant) size is reached.
+    static QByteArray pcm;
+    pcm.resize(pcmSize);
 
     int samples = opus_decode(decoder,
                               reinterpret_cast<const unsigned char *>(opusData.constData()),

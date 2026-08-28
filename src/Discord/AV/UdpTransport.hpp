@@ -40,6 +40,10 @@ private:
     quint32 ssrc = 0;
     bool discoveryPending = false;
 
+    // Reused per-datagram read buffer so onReadyRead doesn't allocate a fresh
+    // QByteArray per packet at 50-100 pps; resize() reuses capacity.
+    QByteArray m_readBuffer;
+
     static constexpr int DISCOVERY_TIMEOUT_MS = 5000;
 };
 

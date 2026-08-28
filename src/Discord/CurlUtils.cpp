@@ -7,8 +7,10 @@
 #include <atomic>
 #include <QDir>
 #include <QFile>
+#include <QHash>
 #include <QJsonDocument>
 #include <QLocale>
+#include <QMutex>
 #include <QRegularExpression>
 #include <QTimeZone>
 
@@ -125,6 +127,28 @@ void applyCommonOptions(CURL *curl)
     curl_easy_setopt(curl, CURLOPT_USERAGENT, getUserAgent().toUtf8().constData());
 }
 
+namespace {
+
+// The X-Super-Properties blob is byte-identical across REST requests: the only
+// dynamic inputs are the per-identity clientHeartbeatSessionId (regenerated on
+// reconnect) and the process-global build number. Rebuilding the 20-field JSON
+// + base64 on every request (as before) was pure waste; instead cache it
+// keyed per-identity so multiple accounts never share a blob, and validate on
+// use against the two dynamic inputs. Validate-on-use also covers identity
+// address reuse: a fresh ClientIdentity always carries a new random session id,
+// which forces a rebuild.
+struct SuperPropertiesCacheEntry
+{
+    QString sessionId;
+    int buildNumber = 0;
+    QByteArray base64;
+};
+
+QMutex g_superPropertiesMutex;
+QHash<const ClientIdentity *, SuperPropertiesCacheEntry> g_superPropertiesCache;
+
+} // namespace
+
 void appendDiscordHeaders(curl_slist **headers, const ClientIdentity &identity, const QString &referer)
 {
     static const QString tz = QString::fromUtf8(QTimeZone::systemTimeZoneId());
@@ -133,9 +157,22 @@ void appendDiscordHeaders(curl_slist **headers, const ClientIdentity &identity, 
     ClientPropertiesBuildParams params;
     params.clientAppState = "focused";
     params.includeClientHeartbeatSessionId = true;
-    QString superProperties = QJsonDocument(identity.buildClientProperties(params).toJson())
-                                      .toJson(QJsonDocument::Compact)
-                                      .toBase64();
+    ClientProperties properties = identity.buildClientProperties(params);
+
+    QByteArray superProperties;
+    {
+        QMutexLocker locker(&g_superPropertiesMutex);
+        SuperPropertiesCacheEntry &entry = g_superPropertiesCache[&identity];
+        if (entry.sessionId != properties.clientHeartbeatSessionId.get()
+            || entry.buildNumber != getBuildNumber()) {
+            entry.sessionId = properties.clientHeartbeatSessionId.get();
+            entry.buildNumber = getBuildNumber();
+            entry.base64 = QJsonDocument(properties.toJson())
+                                   .toJson(QJsonDocument::Compact)
+                                   .toBase64();
+        }
+        superProperties = entry.base64;
+    }
 
     std::vector<std::string> formattedHeaders;
     formattedHeaders.push_back(("X-Discord-Timezone: " + tz).toUtf8().toStdString());

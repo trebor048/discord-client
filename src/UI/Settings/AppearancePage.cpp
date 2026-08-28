@@ -106,6 +106,17 @@ AppearancePage::AppearancePage(QWidget *parent)
     layoutGroupLayout->addWidget(channelListCombo, 1);
     outer->addWidget(layoutGroup);
 
+    auto *windowGroup = new QGroupBox(tr("Window"), this);
+    auto *windowLayout = new QHBoxLayout(windowGroup);
+    auto *customTitleBarToggle = new QCheckBox(tr("Custom title bar (macOS-style buttons)"), windowGroup);
+    customTitleBarToggle->setChecked(Core::Appearance::AppearanceConfig::instance().customTitleBar());
+    windowLayout->addWidget(customTitleBarToggle);
+    windowLayout->addStretch(1);
+    outer->addWidget(windowGroup);
+    connect(customTitleBarToggle, &QCheckBox::toggled, this, [](bool on) {
+        Core::Appearance::AppearanceConfig::instance().setCustomTitleBar(on);
+    });
+
     connect(channelListCombo, qOverload<int>(&QComboBox::currentIndexChanged), this,
             [this](int index) {
                 bool classic = index == 1;

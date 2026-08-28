@@ -301,6 +301,7 @@ void ChannelTreeModel::addAccount(const Acheron::Core::AccountInfo &account)
     accNode->addChild(std::move(dmNode));
 
     accountNodes[account.id] = root->addChild(std::move(accNode));
+    registerSubtree(accountNodes[account.id]);
 
     endInsertRows();
 }
@@ -315,6 +316,7 @@ void ChannelTreeModel::removeAccount(Snowflake accountId)
 
     if (idx.isValid()) {
         beginRemoveRows(QModelIndex(), idx.row(), idx.row());
+        unregisterSubtree(nodeToRemove);
         root->children.erase(root->children.begin() + idx.row());
         accountNodes.remove(accountId);
         endRemoveRows();
@@ -418,7 +420,7 @@ void ChannelTreeModel::populateFromReady(const Discord::Ready &ready)
 
     beginInsertRows(accIndex, startRow, endRow);
     for (auto &node : topLevelNodes)
-        accNode->addChild(std::move(node));
+        registerSubtree(accNode->addChild(std::move(node)));
     endInsertRows();
 
     if (ready.privateChannels.hasValue() && !ready.privateChannels->isEmpty()) {
@@ -491,6 +493,7 @@ void ChannelTreeModel::populateFromReady(const Discord::Ready &ready)
             }
 
             dmHeader->addChild(std::move(dmNode));
+            registerSubtree(dmHeader->children.back().get());
         }
         endInsertRows();
     }
@@ -738,8 +741,10 @@ bool ChannelTreeModel::removeChildRow(ChannelNode *parent, ChannelNode *node)
             continue;
         int row = static_cast<int>(i);
         beginRemoveRows(indexForNode(parent), row, row);
+        unregisterSubtree(node);
         parent->children.erase(parent->children.begin() + row);
         endRemoveRows();
+        recomputeThreadSiblingFlags(parent);
         return true;
     }
     return false;
@@ -780,6 +785,7 @@ void ChannelTreeModel::resortThread(ChannelNode *node)
     kids.erase(kids.begin() + row);
     kids.insert(kids.begin() + (dest > row ? dest - 1 : dest), std::move(moved));
     endMoveRows();
+    recomputeThreadSiblingFlags(parent);
 }
 
 void ChannelTreeModel::syncThreads(Snowflake guildId, const QList<Snowflake> &parentIds,
@@ -929,11 +935,23 @@ QModelIndex ChannelTreeModel::indexForNode(ChannelNode *node) const
 
 ChannelNode *ChannelTreeModel::findChannelTreeNode(Snowflake channelId)
 {
+    // O(1) mirror lookup first; the recursive walk is only a fallback (e.g. for
+    // invalid ids, which are deliberately not registered).
+    auto it = nodesById_.constFind(channelId);
+    if (it != nodesById_.constEnd() && it.value() && it.value()->id == channelId)
+        return it.value();
     return findChannelTreeNode(channelId, root.get());
 }
 
 ChannelNode *ChannelTreeModel::findChannelTreeNode(Snowflake channelId, Snowflake accountId)
 {
+    // Node ids are globally unique across the account tree, so the mirror
+    // lookup is already account-scoped; fall back to the scoped walk only when
+    // the id is absent (unregistered invalid ids).
+    auto it = nodesById_.constFind(channelId);
+    if (it != nodesById_.constEnd() && it.value() && it.value()->id == channelId)
+        return it.value();
+
     ChannelNode *accNode = accountNodes.value(accountId, nullptr);
     if (!accNode)
         return nullptr;
@@ -954,6 +972,52 @@ ChannelNode *ChannelTreeModel::findChannelTreeNode(Snowflake channelId, ChannelN
     }
 
     return nullptr;
+}
+
+void ChannelTreeModel::registerSubtree(ChannelNode *node)
+{
+    if (!node)
+        return;
+    // Mirror the finder's semantics: Server nodes are never matched by id, and
+    // invalid ids are not registered (several nodes could share id 0, so a hash
+    // entry would be ambiguous). Insert-if-absent keeps re-parented nodes
+    // pointing at their (unchanged) storage.
+    if (node->type != ChannelNode::Type::Server && node->id.isValid()) {
+        auto it = nodesById_.constFind(node->id);
+        if (it == nodesById_.constEnd())
+            nodesById_.insert(node->id, node);
+    }
+    for (const auto &child : node->children)
+        registerSubtree(child.get());
+}
+
+void ChannelTreeModel::unregisterSubtree(ChannelNode *node)
+{
+    if (!node)
+        return;
+    if (node->type != ChannelNode::Type::Server && node->id.isValid()) {
+        auto it = nodesById_.constFind(node->id);
+        if (it != nodesById_.constEnd() && it.value() == node)
+            nodesById_.erase(it);
+    }
+    for (const auto &child : node->children)
+        unregisterSubtree(child.get());
+}
+
+void ChannelTreeModel::recomputeThreadSiblingFlags(ChannelNode *parent)
+{
+    if (!parent)
+        return;
+    const ChannelNode *lastThread = nullptr;
+    for (const auto &child : parent->children)
+        if (child->type == ChannelNode::Type::Thread)
+            lastThread = child.get();
+    for (const auto &child : parent->children) {
+        if (child->type == ChannelNode::Type::Thread) {
+            child->isLastThreadSibling = (child.get() == lastThread);
+            child->isLastThreadSiblingValid = true;
+        }
+    }
 }
 
 ChannelNode *ChannelTreeModel::findGuildNode(ChannelNode *node)
@@ -1059,6 +1123,7 @@ bool ChannelTreeModel::moveNodeWithinParent(const QModelIndex &sourceIndex, int 
     parentNode->children.erase(parentNode->children.begin() + sourceRow);
     parentNode->children.insert(parentNode->children.begin() + targetRow, std::move(moved));
     endMoveRows();
+    recomputeThreadSiblingFlags(parentNode);
 
     refreshChildPositions(parentNode);
     persistChildOrder(parentNode);
@@ -1106,6 +1171,8 @@ void ChannelTreeModel::insertChildAt(ChannelNode *parent, int row, std::unique_p
     node->parent = parent;
     parent->children.insert(parent->children.begin() + row, std::move(node));
     endInsertRows();
+    registerSubtree(parent->children[row].get());
+    recomputeThreadSiblingFlags(parent);
 }
 
 QString ChannelTreeModel::channelOrderSettingsKey(ChannelNode *parent) const
@@ -1728,6 +1795,8 @@ void ChannelTreeModel::updateForumThreads(Snowflake forumId, Snowflake accountId
 
     if (!forumNode->children.empty()) {
         beginRemoveRows(forumIdx, 0, static_cast<int>(forumNode->children.size()) - 1);
+        for (const auto &child : forumNode->children)
+            unregisterSubtree(child.get());
         forumNode->children.clear();
         endRemoveRows();
     }
@@ -1745,9 +1814,11 @@ void ChannelTreeModel::updateForumThreads(Snowflake forumId, Snowflake accountId
             node->parentId = forumId;
             node->lastMessageId = post.effectiveLastMessageId();
             ChannelNode *added = forumNode->addChild(std::move(node));
+            registerSubtree(added);
             applyChannelReadState(added, forumPostReadState(instance->readState(), added, guildId));
         }
         endInsertRows();
+        recomputeThreadSiblingFlags(forumNode);
     }
 
     if (refreshForumNode(forumNode, instance, guildId) && forumNode->parent)
@@ -2104,11 +2175,13 @@ void ChannelTreeModel::updateVoiceParticipant(Snowflake channelId, Snowflake use
         beginInsertRows(channelIndex, insertRow, insertRow);
         channelNode->children.insert(channelNode->children.begin() + insertRow,
                                      std::move(participantNode));
+        registerSubtree(channelNode->children[insertRow].get());
         endInsertRows();
     } else {
         if (existingRow == -1)
             return;
         beginRemoveRows(channelIndex, existingRow, existingRow);
+        unregisterSubtree(channelNode->children[existingRow].get());
         channelNode->children.erase(channelNode->children.begin() + existingRow);
         endRemoveRows();
     }

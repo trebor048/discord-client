@@ -2,6 +2,9 @@
 
 #include <QDialog>
 #include <QHash>
+#include <QSet>
+#include <QTimer>
+
 #include "Core/Snowflake.hpp"
 #include "Discord/Entities.hpp"
 
@@ -43,7 +46,19 @@ private slots:
     void onItemClicked(QListWidgetItem *item);
 
 private:
+    enum class Tab {
+        Online = 0,
+        All = 1,
+        Pending = 2,
+        Blocked = 3,
+    };
+
     void rebuildList();
+    void scheduleRebuild();
+    void applyPendingRelationshipChanges();
+    bool updateRowInPlace(QListWidget *list, Tab tab, Core::Snowflake userId);
+    bool relationshipMatchesTab(Tab tab, Discord::RelationshipType type) const;
+    QString labelFor(const Discord::Relationship &rel) const;
     QString statusText(const Discord::Relationship &rel) const;
     void addFriendRow(QVBoxLayout *layout, const Discord::Relationship &rel);
     void openConversation(Core::Snowflake userId);
@@ -58,12 +73,11 @@ private:
     QLineEdit *usernameEdit;
     QLineEdit *discriminatorEdit;
 
-    enum class Tab {
-        Online = 0,
-        All = 1,
-        Pending = 2,
-        Blocked = 3,
-    };
+    // Coalesces bursts of relationship changes into at most one rebuild per
+    // event-loop pass; the pending user ids drive cheap in-place row updates
+    // when the change is visible in the current tab.
+    QTimer *rebuildTimer = nullptr;
+    QSet<Core::Snowflake> changedUserIds;
 };
 
 } // namespace UI

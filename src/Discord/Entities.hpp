@@ -899,10 +899,23 @@ struct Message : Core::JsonUtils::JsonObject
 
     static Message fromJson(const QJsonObject &obj)
     {
+        return fromJson(obj, true);
+    }
+
+    // buildPresentKeys=false skips materializing the key set for messages whose
+    // presentKeys are never consumed (MESSAGE_CREATE and REST batch/display
+    // parses). presentKeys is read only by applyUpdate() (above) and
+    // MessageManager::onMessageUpdated, i.e. only for MESSAGE_UPDATE messages,
+    // which must keep the default (true). The 1-arg overload above preserves
+    // today's behavior for any call site that isn't flipped explicitly.
+    static Message fromJson(const QJsonObject &obj, bool buildPresentKeys)
+    {
         Message message;
 
-        const QStringList keys = obj.keys();
-        message.presentKeys = QSet<QString>(keys.cbegin(), keys.cend());
+        if (buildPresentKeys) {
+            const QStringList keys = obj.keys();
+            message.presentKeys = QSet<QString>(keys.cbegin(), keys.cend());
+        }
 
         get(obj, "id", message.id);
         get(obj, "nonce", message.nonce);
@@ -931,7 +944,7 @@ struct Message : Core::JsonUtils::JsonObject
                 message.referencedMessageNull = true;
             } else {
                 message.referencedMessage =
-                        std::make_shared<Message>(fromJson(refIt.value().toObject()));
+                        std::make_shared<Message>(fromJson(refIt.value().toObject(), buildPresentKeys));
             }
         }
 

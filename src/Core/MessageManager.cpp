@@ -4,6 +4,7 @@
 #include <QImageReader>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QSet>
 #include <QUrl>
 
 #include <algorithm>
@@ -457,21 +458,27 @@ void MessageManager::onMessagesDeletedBulk(const Discord::MessageDeleteBulk &eve
         return;
 
     Snowflake channelId = event.channelId.get();
+    const QList<Snowflake> ids = event.ids.get();
 
-    for (Snowflake messageId : event.ids.get()) {
+    // Prune the per-channel order list in ONE pass instead of a std::find +
+    // erase per id (O(n·k) -> O(n + k)). erase/remove_if preserves the
+    // relative order of the survivors, exactly like erasing each id in turn.
+    const QSet<Snowflake> deletedIds(ids.cbegin(), ids.cend());
+    if (channelMessages.contains(channelId)) {
+        auto &order = channelMessages[channelId];
+        order.erase(std::remove_if(order.begin(), order.end(),
+                                   [&deletedIds](Snowflake id) { return deletedIds.contains(id); }),
+                    order.end());
+    }
+
+    // Per-id cache removal and emits are part of the UI contract (each message
+    // row reacts independently); only the repository write is batched.
+    for (Snowflake messageId : ids) {
         messageCache.remove(messageId);
-
-        if (channelMessages.contains(channelId)) {
-            auto &order = channelMessages[channelId];
-            auto it = std::find(order.begin(), order.end(), messageId);
-            if (it != order.end())
-                order.erase(it);
-        }
-
-        repo.markMessageDeleted(messageId);
-
         emit messageDeleted(channelId, messageId);
     }
+
+    repo.markMessagesDeleted(ids);
 }
 
 void MessageManager::onMessageSendFailed(const QString &nonce, const QString &error)

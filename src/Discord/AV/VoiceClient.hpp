@@ -131,6 +131,13 @@ private:
     std::set<std::string> connectedUserIds;
     QHash<quint32, uint64_t> ssrcToUserIdMap;
 
+    // Reusable per-packet scratch buffers. All packet processing (sendAudio,
+    // onDatagram, keepalive) runs on the single voice thread, so each scratch
+    // is touched by exactly one path and capacity can be safely reused.
+    QByteArray m_decryptScratch;                 // decrypt out + final audio payload
+    std::vector<uint8_t> m_daveEncryptScratch;   // DAVE ciphertext (send path)
+    std::vector<uint8_t> m_daveDecryptScratch;   // DAVE plaintext (receive path)
+
     static constexpr int KEEPALIVE_INTERVAL_MS = 10000;
 };
 

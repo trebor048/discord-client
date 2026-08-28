@@ -83,6 +83,10 @@ private slots:
     void onMixTick();
 
 private:
+    // Drains capture frames from the backend's ring buffer (mix tick) and
+    // runs the shared per-frame capture pipeline (denoise/VAD/encode).
+    void drainCapturedAudio();
+    void processCapturedFrame(const QByteArray &pcmData);
     bool detectVoiceActivity(const QByteArray &pcmFrame, float &outRms) const;
     void sendTrailingSilence();
     void initializeEncoder();

@@ -44,31 +44,6 @@ QPixmap ChatDelegate::blurredCached(const QPixmap &source, int radius) const
     return blurred;
 }
 
-static const QRegularExpression &emojiImgRegex()
-{
-    static const QRegularExpression re(
-            R"lol(<img src="(https://cdn\.discordapp\.com/emojis/\d+\.(?:webp|png|gif)\?size=\d+)"[^>]*width="(\d+)")lol");
-    return re;
-}
-
-static const QString emojiCdnPrefix = QStringLiteral("https://cdn.discordapp.com/emojis/");
-
-static void registerEmojiResources(QTextDocument &doc, const QString &html,
-                                   Core::ImageManager *imageManager)
-{
-    if (!imageManager || !html.contains(emojiCdnPrefix))
-        return;
-
-    auto it = emojiImgRegex().globalMatch(html);
-    while (it.hasNext()) {
-        auto match = it.next();
-        QUrl url(match.captured(1));
-        int size = match.captured(2).toInt();
-        QPixmap px = imageManager->get(url, QSize(size, size));
-        doc.addResource(QTextDocument::ImageResource, url, px);
-    }
-}
-
 static void drawImageErrorBox(QPainter *painter, const QRect &rect,
                               const QStyleOptionViewItem &option, const QString &text)
 {
@@ -549,7 +524,7 @@ void ChatDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
     if (!doc) {
         doc = new QTextDocument;
         ChatLayout::setupDocument(*doc, ctx.htmlContent, bodyFont, layout.textRect.width());
-        registerEmojiResources(*doc, ctx.htmlContent, imageManager);
+        ChatLayout::registerEmojiResources(*doc, ctx.htmlContent, imageManager);
         chatModel->cacheDocument(bodyKey, doc);
     } else if (int(doc->textWidth()) != layout.textRect.width()) {
         doc->setTextWidth(layout.textRect.width());
@@ -958,9 +933,10 @@ void ChatDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
             if (gifAnim && gifAnim->isReady() && !imgRect.isNull()) {
                 QPixmap frame = gifAnim->currentFrame();
                 if (!frame.isNull()) {
-                    QPixmap scaledFrame = frame.scaled(imgRect.size(), Qt::KeepAspectRatio,
-                                                       Qt::SmoothTransformation);
-                    painter->drawPixmap(imgRect.topLeft(), scaledFrame);
+                    // No per-frame scaled() allocation: imagesRect is sized from
+                    // the thumbnail's aspect ratio, so a direct draw matches the
+                    // attachment GIF path (and the painter has no smooth hint).
+                    painter->drawPixmap(imgRect, frame);
                 }
             } else if (gifAnim && gifAnim->isLoading() && !imgRect.isNull() &&
                        embed.thumbnail.isNull()) {
@@ -1066,7 +1042,7 @@ void ChatDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
                 titleDoc = new QTextDocument;
                 titleDoc->setDefaultFont(titleFont);
                 titleDoc->setTextWidth(embedLayout.titleRect.width());
-                registerEmojiResources(*titleDoc, titleHtml, imageManager);
+                ChatLayout::registerEmojiResources(*titleDoc, titleHtml, imageManager);
                 titleDoc->setHtml(titleHtml);
                 chatModel->cacheDocument(titleKey, titleDoc);
             } else if (int(titleDoc->textWidth()) != embedLayout.titleRect.width()) {
@@ -1094,7 +1070,7 @@ void ChatDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
                 descDoc = new QTextDocument;
                 descDoc->setDefaultFont(descFont);
                 descDoc->setTextWidth(embedLayout.descriptionRect.width());
-                registerEmojiResources(*descDoc, descHtml, imageManager);
+                ChatLayout::registerEmojiResources(*descDoc, descHtml, imageManager);
                 descDoc->setHtml(descHtml);
                 chatModel->cacheDocument(descKey, descDoc);
             } else if (int(descDoc->textWidth()) != embedLayout.descriptionRect.width()) {
@@ -1127,7 +1103,7 @@ void ChatDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
                 nameDoc = new QTextDocument;
                 nameDoc->setDefaultFont(fieldNameFont);
                 nameDoc->setTextWidth(fieldLayout.nameRect.width());
-                registerEmojiResources(*nameDoc, nameHtml, imageManager);
+                ChatLayout::registerEmojiResources(*nameDoc, nameHtml, imageManager);
                 nameDoc->setHtml(nameHtml);
                 chatModel->cacheDocument(nameKey, nameDoc);
             } else if (int(nameDoc->textWidth()) != fieldLayout.nameRect.width()) {
@@ -1148,7 +1124,7 @@ void ChatDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
                 valueDoc = new QTextDocument;
                 valueDoc->setDefaultFont(option.font);
                 valueDoc->setTextWidth(fieldLayout.valueRect.width());
-                registerEmojiResources(*valueDoc, valueHtml, imageManager);
+                ChatLayout::registerEmojiResources(*valueDoc, valueHtml, imageManager);
                 valueDoc->setHtml(valueHtml);
                 chatModel->cacheDocument(valueKey, valueDoc);
             } else if (int(valueDoc->textWidth()) != fieldLayout.valueRect.width()) {

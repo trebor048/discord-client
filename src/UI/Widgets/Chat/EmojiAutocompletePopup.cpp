@@ -43,6 +43,62 @@ QIcon renderUnicodeIcon(const QString &emojiText, int size)
     return QIcon(pix);
 }
 
+// One-time folded-name index over EmojiCatalog::items(), bucketed by the
+// distinct characters of each folded name. computeMatches only ever needs the
+// bucket for the needle's first character (the existing pre-filter is
+// "name contains firstNeedleChar"), so per-keystroke work drops from a full
+// catalog scan + per-item toCaseFolded to one bucket walk.
+struct EmojiIndexEntry
+{
+    Core::EmojiCatalogItem item;
+    QString foldedName;
+};
+
+struct EmojiSearchIndex
+{
+    QVector<EmojiIndexEntry> entries;
+    // folded char -> entry indices whose folded name contains it (distinct
+    // chars per name, mirroring the contains() pre-filter semantics).
+    QHash<QChar, QVector<int>> byChar;
+    int catalogSize = -1;
+};
+
+const EmojiSearchIndex &emojiSearchIndex()
+{
+    static EmojiSearchIndex index;
+    const auto &items = Core::EmojiCatalog::items();
+    // EmojiCatalog::items() is a lazily rebuilt combined list (built-in +
+    // runtime-registered custom emoji); a size change means a rebuild here.
+    if (index.catalogSize == items.size() && !index.entries.isEmpty())
+        return index;
+
+    index.entries.clear();
+    index.byChar.clear();
+    index.entries.reserve(items.size());
+    for (const auto &item : items) {
+        if (item.name.isEmpty())
+            continue;
+        EmojiIndexEntry entry;
+        entry.item = item;
+        entry.foldedName = item.name.toCaseFolded();
+        index.entries.append(std::move(entry));
+    }
+    QSet<QChar> seen;
+    for (int i = 0; i < index.entries.size(); ++i) {
+        seen.clear();
+        const QString &folded = index.entries[i].foldedName;
+        for (int c = 0; c < folded.size(); ++c) {
+            const QChar ch = folded.at(c);
+            if (seen.contains(ch))
+                continue;
+            seen.insert(ch);
+            index.byChar[ch].append(i);
+        }
+    }
+    index.catalogSize = items.size();
+    return index;
+}
+
 } // namespace
 
 EmojiAutocompletePopup::EmojiAutocompletePopup(QWidget *parent)
@@ -86,6 +142,13 @@ EmojiAutocompletePopup::EmojiAutocompletePopup(QWidget *parent)
 
     list_->installEventFilter(this);
 
+    // Debounce burst typing: every setQuery() only records the latest prefix;
+    // the single-shot timer coalesces a burst into one compute+populate pass.
+    debounceTimer_ = new QTimer(this);
+    debounceTimer_->setSingleShot(true);
+    debounceTimer_->setInterval(100);
+    connect(debounceTimer_, &QTimer::timeout, this, [this]() { applyPendingQuery(); });
+
     hide();
 }
 
@@ -106,6 +169,15 @@ void EmojiAutocompletePopup::showEvent(QShowEvent *event)
 {
     m_accepted = false;
     QFrame::showEvent(event);
+}
+
+void EmojiAutocompletePopup::hideEvent(QHideEvent *event)
+{
+    // Any hide — including Qt::Popup auto-hide on outside clicks — must drop a
+    // debounced-but-unapplied query, otherwise the pending timer could fire
+    // later and resurrect the popup without a valid emoji context.
+    cancelPendingQuery();
+    QFrame::hideEvent(event);
 }
 
 void EmojiAutocompletePopup::setNetworkAccessManager(QNetworkAccessManager *nam)
@@ -169,32 +241,37 @@ EmojiAutocompletePopup::computeMatches(const QString &prefix) const
 {
     const QString needle = prefix.trimmed().toCaseFolded();
     QList<MatchResult> results;
-    results.reserve(32);
+    results.reserve(kMaxResults);
 
-    const auto &allItems = Core::EmojiCatalog::items();
-
-    // A subsequence (fuzzy) match requires the needle's first character to
-    // appear in the name, so names lacking it can never match.  Cheap pre-filter
-    // that skips the expensive subsequence scan for the common non-match case.
     const QChar firstNeedleChar = needle.isEmpty() ? QChar() : needle.front();
 
-    for (const auto &item : allItems) {
-        if (item.name.isEmpty())
-            continue;
-
-        const QString name = item.name.toCaseFolded();
-        if (!firstNeedleChar.isNull() && !name.contains(firstNeedleChar))
-            continue;
-
-        const int score = fuzzyScore(name, needle);
-        if (score >= 0)
-            results.append({item, score});
+    // A subsequence (fuzzy) match requires the needle's first character to
+    // appear in the name, so names lacking it can never match. The index
+    // buckets names by their distinct chars, turning the full-catalog
+    // contains() pre-filter into an O(bucket) walk.
+    const auto &index = emojiSearchIndex();
+    if (needle.isEmpty()) {
+        for (const auto &entry : index.entries) {
+            const int score = fuzzyScore(entry.foldedName, needle);
+            if (score >= 0)
+                results.append({ entry.item, entry.foldedName, score });
+        }
+    } else {
+        const auto bucketIt = index.byChar.constFind(firstNeedleChar);
+        if (bucketIt == index.byChar.constEnd())
+            return results;
+        for (int idx : bucketIt.value()) {
+            const EmojiIndexEntry &entry = index.entries[idx];
+            const int score = fuzzyScore(entry.foldedName, needle);
+            if (score >= 0)
+                results.append({ entry.item, entry.foldedName, score });
+        }
     }
 
     std::sort(results.begin(), results.end(), [](const MatchResult &a, const MatchResult &b) {
         if (a.score != b.score)
             return a.score > b.score;
-        return a.item.name.toCaseFolded() < b.item.name.toCaseFolded();
+        return a.foldedName < b.foldedName;
     });
 
     if (results.size() > kMaxResults)
@@ -213,30 +290,43 @@ void EmojiAutocompletePopup::loadIconForItem(QListWidgetItem *row, const Core::E
     if (!nam_ || item.customId.isEmpty())
         return;
 
-    // Store the selection value so the lambda can look up the item by stable identifier
-    const QString selValue = item.selectionValue();
-    QNetworkReply *reply = nam_->get(QNetworkRequest(QUrl(item.cdnUrl(32))));
+    // Deduplicate by URL: repeatedly typed shortcodes reuse the in-memory
+    // pixmap cache, and concurrent duplicates share a single in-flight reply.
+    const QString url = item.cdnUrl(32);
+    const auto cached = iconCache_.constFind(url);
+    if (cached != iconCache_.constEnd()) {
+        row->setIcon(QIcon(cached.value()));
+        return;
+    }
+    if (iconFetching_.contains(url))
+        return; // in flight; the shared finished() handler refreshes live rows
+
+    iconFetching_.insert(url);
+    QNetworkReply *reply = nam_->get(QNetworkRequest(QUrl(url)));
     pendingIconReplies_.insert(reply);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, selValue]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, url]() {
         pendingIconReplies_.remove(reply);
+        iconFetching_.remove(url);
         reply->deleteLater();
         if (!list_)
             return;
-        // Look up by stable identifier instead of raw pointer (which may have been deleted)
-        QListWidgetItem *found = nullptr;
+        QPixmap pix;
+        const bool ok = reply->error() == QNetworkReply::NoError && pix.loadFromData(reply->readAll());
+        if (ok) {
+            if (iconCache_.size() >= 512)
+                iconCache_.clear();
+            iconCache_.insert(url, pix);
+        }
+        // Refresh any live row for this emoji (rows created while the fetch
+        // was in flight were skipped above). Failure leaves rows iconless,
+        // like the pre-cache behavior; the next query retries.
         for (int i = 0; i < list_->count(); ++i) {
-            if (list_->item(i)->data(Qt::UserRole).toString() == selValue) {
-                found = list_->item(i);
-                break;
+            QListWidgetItem *liveRow = list_->item(i);
+            if (liveRow->data(Qt::UserRole + 1).toString() == url) {
+                if (ok)
+                    liveRow->setIcon(QIcon(pix));
             }
         }
-        if (!found)
-            return;
-        if (reply->error() != QNetworkReply::NoError)
-            return;
-        QPixmap pix;
-        if (pix.loadFromData(reply->readAll()))
-            found->setIcon(QIcon(pix));
     });
 }
 
@@ -252,21 +342,17 @@ void EmojiAutocompletePopup::presentItem(QListWidgetItem *row, const Core::Emoji
     }
     row->setText(text);
     row->setData(Qt::UserRole, item.selectionValue());
+    // Stable URL for the icon-finish refresh path (see loadIconForItem).
+    if (item.isCustom())
+        row->setData(Qt::UserRole + 1, item.cdnUrl(32));
     row->setToolTip(QStringLiteral(":%1:").arg(item.name));
 }
 
 void EmojiAutocompletePopup::populateList(const QList<MatchResult> &matches)
 {
-    // Abort all pending icon replies before clearing — iterate over a COPY
-    // of the set because abort() fires finished() synchronously, which calls
-    // pendingIconReplies_.remove() and would invalidate the range-for iterator.
-    const auto pending = pendingIconReplies_;
-    for (auto *reply : pending) {
-        reply->abort();
-        reply->deleteLater();
-    }
-    pendingIconReplies_.clear();
-
+    // In-flight icon replies are NOT aborted here: their shared finished()
+    // handler fills the URL cache and refreshes rows that are still live, so
+    // rapid retyping never re-downloads the same icon.
     m_accepted = false;
     currentItems_.clear();
     list_->clear();
@@ -287,8 +373,35 @@ void EmojiAutocompletePopup::populateList(const QList<MatchResult> &matches)
 void EmojiAutocompletePopup::setQuery(const QString &prefix)
 {
     if (prefix.length() < kMinPrefixLength) {
+        // Not a valid emoji context: drop any pending query immediately so a
+        // stale timer can't resurrect the popup.
+        pendingPrefix_.clear();
+        debounceTimer_->stop();
         populateList({});
         hide();
+        emit queryApplied();
+        return;
+    }
+
+    // Debounce: each keystroke only records the latest prefix; the timer
+    // coalesces a burst into one compute+populate pass.
+    pendingPrefix_ = prefix;
+    debounceTimer_->start();
+}
+
+void EmojiAutocompletePopup::cancelPendingQuery()
+{
+    pendingPrefix_.clear();
+    debounceTimer_->stop();
+}
+
+void EmojiAutocompletePopup::applyPendingQuery()
+{
+    const QString prefix = pendingPrefix_;
+    pendingPrefix_.clear();
+    if (prefix.length() < kMinPrefixLength) {
+        hide();
+        emit queryApplied();
         return;
     }
 
@@ -296,6 +409,7 @@ void EmojiAutocompletePopup::setQuery(const QString &prefix)
     if (matches.isEmpty()) {
         populateList({});
         hide();
+        emit queryApplied();
         return;
     }
 
@@ -305,6 +419,7 @@ void EmojiAutocompletePopup::setQuery(const QString &prefix)
 
     if (!isVisible())
         show();
+    emit queryApplied();
 }
 
 void EmojiAutocompletePopup::selectFirst()

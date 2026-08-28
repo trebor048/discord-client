@@ -28,12 +28,16 @@ public:
     /// Numbered unread badges on channels and tabs; off keeps the plain
     /// (non-numbered) unread indicator.
     bool numberedUnread() const { return numberedUnread_; }
+    /// Custom macOS-style title bar (frameless window with traffic-light
+    /// buttons). Defaults on for Windows, off elsewhere.
+    bool customTitleBar() const { return customTitleBar_; }
 
     void setMemberListMode(MemberListMode mode);
     void setMemberCardScale(float scale);
     void setGuildIconScale(float scale);
     void setChannelScale(float scale);
     void setNumberedUnread(bool on);
+    void setCustomTitleBar(bool on);
 
     static constexpr float kMinScale = 0.80f;
     static constexpr float kMaxScale = 1.50f;
@@ -60,6 +64,7 @@ public:
     static constexpr const char *kGuildIconScaleKey = "ui/guildIconScale";
     static constexpr const char *kChannelScaleKey = "ui/channelScale";
     static constexpr const char *kNumberedUnreadKey = "ui/numberedUnread";
+    static constexpr const char *kCustomTitleBarKey = "ui/customTitleBar";
 
     // Public so tests can construct independent instances; app code uses instance().
     AppearanceConfig();
@@ -77,6 +82,7 @@ private:
     float guildIconScale_ = kDefaultScale;
     float channelScale_ = kDefaultScale;
     bool numberedUnread_ = true;
+    bool customTitleBar_ = false;
 };
 
 } // namespace Appearance

@@ -245,7 +245,19 @@ ChannelQuickSwitch::ChannelQuickSwitch(ChannelTreeModel *model, ServerRailModel 
 
     outer->addWidget(panel, 1);
 
-    connect(searchEdit, &QLineEdit::textChanged, this, &ChannelQuickSwitch::rebuildList);
+    // Rebuild the tree on a short debounce instead of on every keystroke: a
+    // fast typist otherwise triggers a full channel-list rebuild (collect +
+    // sort + widget construction) per character.
+    rebuildDebounceTimer = new QTimer(this);
+    rebuildDebounceTimer->setSingleShot(true);
+    rebuildDebounceTimer->setInterval(120);
+    connect(rebuildDebounceTimer, &QTimer::timeout, this, [this]() {
+        rebuildList(pendingQueryText);
+    });
+    connect(searchEdit, &QLineEdit::textChanged, this, [this](const QString &text) {
+        pendingQueryText = text;
+        rebuildDebounceTimer->start();
+    });
     searchEdit->installEventFilter(this);
 
     if (discordClient) {
@@ -1022,7 +1034,8 @@ void ChannelQuickSwitch::rebuildCurrentSection()
 }
 
 void ChannelQuickSwitch::appendChannelItem(QTreeWidgetItem *parent, const ChannelEntry &entry,
-                                            bool showSecondaryText)
+                                            bool showSecondaryText,
+                                            const QHash<QString, ReadStateInfo> &readStates)
 {
     auto *item = new QTreeWidgetItem(parent);
     item->setText(0, showSecondaryText && !entry.secondaryText.isEmpty()
@@ -1038,39 +1051,58 @@ void ChannelQuickSwitch::appendChannelItem(QTreeWidgetItem *parent, const Channe
     item->setToolTip(0, entry.secondaryText);
     item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
 
-    // Read state indicators
+    // Read state indicators — resolved from the per-rebuild snapshot instead of
+    // walking the source model again (the map was built once for this rebuild).
     if (model && entry.tab.channelId.isValid()) {
-        ChannelNode *node = model->findChannelTreeNode(entry.tab.channelId, entry.tab.accountId);
-        if (node) {
-            QModelIndex idx = model->indexForNode(node);
-            if (idx.isValid()) {
-                const bool isUnread = idx.data(ChannelTreeModel::IsUnreadRole).toBool();
-                const int mentionCount = idx.data(ChannelTreeModel::MentionCountRole).toInt();
-                const bool isMuted = idx.data(ChannelTreeModel::IsMutedRole).toBool();
+        const ReadStateInfo info = readStates.value(channelKey(entry.tab));
+        if (info.known) {
+            const bool isUnread = info.isUnread;
+            const int mentionCount = info.mentionCount;
+            const bool isMuted = info.isMuted;
 
-                item->setData(0, UnreadRole, isUnread);
-                item->setData(0, MentionCountRole, mentionCount);
-                item->setData(0, MutedRole, isMuted);
+            item->setData(0, UnreadRole, isUnread);
+            item->setData(0, MentionCountRole, mentionCount);
+            item->setData(0, MutedRole, isMuted);
 
-                if (!isMuted) {
-                    if (isUnread) {
-                        QFont f = item->font(0);
-                        f.setBold(true);
-                        item->setFont(0, f);
-                    }
-                    if (mentionCount > 0) {
-                        QString txt = item->text(0);
-                        item->setText(0, QStringLiteral("%1  (%2)").arg(txt).arg(mentionCount));
-                    }
-                } else {
-                    item->setForeground(0, palette().brush(QPalette::Disabled, QPalette::Text));
+            if (!isMuted) {
+                if (isUnread) {
+                    QFont f = item->font(0);
+                    f.setBold(true);
+                    item->setFont(0, f);
                 }
+                if (mentionCount > 0) {
+                    QString txt = item->text(0);
+                    item->setText(0, QStringLiteral("%1  (%2)").arg(txt).arg(mentionCount));
+                }
+            } else {
+                item->setForeground(0, palette().brush(QPalette::Disabled, QPalette::Text));
             }
         }
     }
 }
 
-void ChannelQuickSwitch::sortChannels(QList<ChannelEntry> &channels) const
+ChannelQuickSwitch::ReadStateInfo ChannelQuickSwitch::readStateFor(const ChannelEntry &entry) const
+{
+    ReadStateInfo info;
+    if (!model || !entry.tab.channelId.isValid())
+        return info;
+
+    ChannelNode *node = model->findChannelTreeNode(entry.tab.channelId, entry.tab.accountId);
+    if (!node)
+        return info;
+    QModelIndex idx = model->indexForNode(node);
+    if (!idx.isValid())
+        return info;
+
+    info.known = true;
+    info.isUnread = idx.data(ChannelTreeModel::IsUnreadRole).toBool();
+    info.mentionCount = idx.data(ChannelTreeModel::MentionCountRole).toInt();
+    info.isMuted = idx.data(ChannelTreeModel::IsMutedRole).toBool();
+    return info;
+}
+
+void ChannelQuickSwitch::sortChannels(QList<ChannelEntry> &channels,
+                                      const QHash<QString, ReadStateInfo> &readStates) const
 {
     switch (sortMode) {
     case SortMode::ByName:
@@ -1078,35 +1110,41 @@ void ChannelQuickSwitch::sortChannels(QList<ChannelEntry> &channels) const
             return a.displayText.toCaseFolded().localeAwareCompare(b.displayText.toCaseFolded()) < 0;
         });
         break;
-    case SortMode::ByUnread:
-        std::sort(channels.begin(), channels.end(), [this](const ChannelEntry &a, const ChannelEntry &b) {
-            bool aUnread = false;
-            int aMentions = 0;
-            if (model && a.tab.channelId.isValid()) {
-                ChannelNode *node = model->findChannelTreeNode(a.tab.channelId, a.tab.accountId);
-                QModelIndex idx = node ? model->indexForNode(node) : QModelIndex();
-                if (idx.isValid()) {
-                    aUnread = idx.data(ChannelTreeModel::IsUnreadRole).toBool();
-                    aMentions = idx.data(ChannelTreeModel::MentionCountRole).toInt();
-                }
-            }
-            bool bUnread = false;
-            int bMentions = 0;
-            if (model && b.tab.channelId.isValid()) {
-                ChannelNode *node = model->findChannelTreeNode(b.tab.channelId, b.tab.accountId);
-                QModelIndex idx = node ? model->indexForNode(node) : QModelIndex();
-                if (idx.isValid()) {
-                    bUnread = idx.data(ChannelTreeModel::IsUnreadRole).toBool();
-                    bMentions = idx.data(ChannelTreeModel::MentionCountRole).toInt();
-                }
-            }
-            if (aMentions != bMentions)
-                return aMentions > bMentions;
-            if (aUnread != bUnread)
-                return aUnread;
-            return a.displayText.toCaseFolded().localeAwareCompare(b.displayText.toCaseFolded()) < 0;
+    case SortMode::ByUnread: {
+        // Resolve every channel's read-state once (O(n)) and sort the snapshots;
+        // the previous comparator walked the source model on every comparison
+        // (O(n log n) findChannelTreeNode calls + QVariant round-trips).
+        struct SortKey
+        {
+            ChannelEntry *entry = nullptr;
+            QString foldedName;
+            ReadStateInfo readState;
+        };
+        QList<SortKey> keys;
+        keys.reserve(channels.size());
+        for (ChannelEntry &entry : channels) {
+            SortKey key;
+            key.entry = &entry;
+            key.foldedName = entry.displayText.toCaseFolded();
+            key.readState = entry.tab.channelId.isValid()
+                    ? readStates.value(channelKey(entry.tab))
+                    : ReadStateInfo();
+            keys.append(std::move(key));
+        }
+        std::sort(keys.begin(), keys.end(), [](const SortKey &a, const SortKey &b) {
+            if (a.readState.mentionCount != b.readState.mentionCount)
+                return a.readState.mentionCount > b.readState.mentionCount;
+            if (a.readState.isUnread != b.readState.isUnread)
+                return a.readState.isUnread;
+            return a.foldedName.localeAwareCompare(b.foldedName) < 0;
         });
+        QList<ChannelEntry> sorted;
+        sorted.reserve(keys.size());
+        for (const SortKey &key : keys)
+            sorted.append(*key.entry);
+        channels = std::move(sorted);
         break;
+    }
     case SortMode::ServerOrder:
         break;
     }
@@ -1154,13 +1192,22 @@ void ChannelQuickSwitch::rebuildFlatTree(QTreeWidget *tree, const QList<ChannelE
     const QString filter = filterText.trimmed().toCaseFolded();
 
     QList<ChannelEntry> sorted = channels;
-    sortChannels(sorted);
+
+    // Snapshot read-state once per rebuild; shared by the ByUnread sort
+    // comparator and appendChannelItem().
+    QHash<QString, ReadStateInfo> readStates;
+    for (const auto &channel : sorted) {
+        if (channel.tab.channelId.isValid())
+            readStates.insert(channelKey(channel.tab), readStateFor(channel));
+    }
+
+    sortChannels(sorted, readStates);
 
     bool hasMatches = false;
     for (const auto &channel : sorted) {
         if (!itemMatchesFilter(channel, filter))
             continue;
-        appendChannelItem(tree->invisibleRootItem(), channel, false);
+        appendChannelItem(tree->invisibleRootItem(), channel, false, readStates);
         hasMatches = true;
     }
 
@@ -1219,11 +1266,18 @@ void ChannelQuickSwitch::rebuildAllTree(const QString &filterText)
             QList<ChannelEntry> channels = collectChannels(guildIndex, guildIndex.data(Qt::DisplayRole).toString(),
                                                            currentEntry.accountId, currentEntry.guildId,
                                                            accountName);
-            sortChannels(channels);
+            // Snapshot read-state once per rebuild; shared by the ByUnread
+            // sort comparator and appendChannelItem().
+            QHash<QString, ReadStateInfo> readStates;
+            for (const auto &channel : channels) {
+                if (channel.tab.channelId.isValid())
+                    readStates.insert(channelKey(channel.tab), readStateFor(channel));
+            }
+            sortChannels(channels, readStates);
             for (const auto &channel : channels) {
                 if (!itemMatchesFilter(channel, filter))
                     continue;
-                appendChannelItem(item, channel, false);
+                appendChannelItem(item, channel, false, readStates);
             }
             if (item->childCount() == 0 && !filter.isEmpty()) {
                 delete item;
@@ -1257,11 +1311,18 @@ void ChannelQuickSwitch::rebuildAllTree(const QString &filterText)
 
         bool hasMatches = false;
         QList<ChannelEntry> sectionChannels = section.channels;
-        sortChannels(sectionChannels);
+        // Snapshot read-state once per rebuild; shared by the ByUnread sort
+        // comparator and appendChannelItem().
+        QHash<QString, ReadStateInfo> readStates;
+        for (const auto &channel : sectionChannels) {
+            if (channel.tab.channelId.isValid())
+                readStates.insert(channelKey(channel.tab), readStateFor(channel));
+        }
+        sortChannels(sectionChannels, readStates);
         for (const auto &channel : sectionChannels) {
             if (!itemMatchesFilter(channel, filter))
                 continue;
-            appendChannelItem(item, channel, false);
+            appendChannelItem(item, channel, false, readStates);
             hasMatches = true;
         }
         if (!hasMatches && !filter.isEmpty()) {

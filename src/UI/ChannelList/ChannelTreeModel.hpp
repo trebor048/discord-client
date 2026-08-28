@@ -152,6 +152,17 @@ private:
     ChannelNode *findFolderNodeById(ChannelNode *accountNode, Snowflake folderId);
     ChannelNode *findCategoryNode(Snowflake categoryId, ChannelNode *guildNode);
     void insertChildAt(ChannelNode *parent, int row, std::unique_ptr<ChannelNode> node);
+
+    /// Registers `node` (and its descendants, excluding Server nodes which the
+    /// recursive finder never matches) in nodesById_. Insert-if-absent so
+    /// re-parenting an already-registered node is a no-op.
+    void registerSubtree(ChannelNode *node);
+    /// Removes `node` and its descendants from nodesById_.
+    void unregisterSubtree(ChannelNode *node);
+
+    /// Recomputes the cached is-last-thread-sibling flags for all thread
+    /// children of `parent` after structural edits (single scan).
+    void recomputeThreadSiblingFlags(ChannelNode *parent);
     void emitDataChangedRecursive(const QModelIndex &index);
     QString channelOrderSettingsKey(ChannelNode *parent) const;
     void applyStoredChildOrder(ChannelNode *parent);
@@ -163,6 +174,9 @@ private:
 
     std::unique_ptr<ChannelNode> root;
     QHash<Snowflake, ChannelNode *> accountNodes;
+    // id -> node lookup mirror of the live tree (kept in sync at every attach/
+    // detach point); Server nodes and invalid ids are intentionally absent.
+    QHash<Snowflake, ChannelNode *> nodesById_;
     mutable AvatarRequestTracker<QPersistentModelIndex> avatarTracker;
 
     Snowflake temporaryThreadId;

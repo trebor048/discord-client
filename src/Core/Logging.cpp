@@ -155,7 +155,11 @@ void Logger::messageHandler(QtMsgType type, const QMessageLogContext &context, c
     QString formatted =
             QString("[%1] [T:%2] [%3] [%4] %5").arg(time, threadId, level, context.category, msg);
 
-    std::cout << formatted.toStdString() << std::endl;
+    // Console output: write UTF-8 bytes directly with '\n' instead of
+    // toStdString() + std::endl — the latter allocates a std::string and flushes
+    // stdout on every log line. The QByteArray temporary outlives the full
+    // expression, so the pointer stays valid for the writes.
+    std::cout << formatted.toUtf8().constData() << '\n';
 
     if (type == QtFatalMsg) {
         {

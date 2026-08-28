@@ -23,6 +23,9 @@ struct RtpHeader
     static constexpr int FIXED_SIZE = 12;
 
     QByteArray serialize() const;
+    // Writes the FIXED_SIZE-byte header into dst (which must point to at least
+    // FIXED_SIZE bytes); byte-identical to the QByteArray-returning overload.
+    void serialize(char *dst) const;
     static RtpHeader parse(const QByteArray &data);
 };
 

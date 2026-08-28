@@ -1,5 +1,6 @@
 #include "ImageViewer.hpp"
 
+#include <QCache>
 #include <QPainter>
 #include <QMouseEvent>
 #include <QWheelEvent>
@@ -12,6 +13,27 @@
 
 namespace Acheron {
 namespace UI {
+
+namespace {
+// Bounded session cache of decoded full-resolution images, keyed by the fetch
+// URL (proxy URL + format/quality query) plus the device pixel ratio the
+// pixmap was decoded at. Opening the same image twice (or navigating back to
+// it in a gallery) no longer re-downloads or re-decodes it.
+constexpr qsizetype kImageCacheMaxBytes = 160 * 1024 * 1024; // ~32 full-res images
+
+QCache<QString, QPixmap> &fullImageCache()
+{
+    static QCache<QString, QPixmap> cache(static_cast<int>(kImageCacheMaxBytes / 1024));
+    return cache;
+}
+
+void cacheFullImage(const QString &key, const QPixmap &pixmap)
+{
+    const qsizetype cost = qMax<qsizetype>(1, pixmap.sizeInBytes() / 1024);
+    if (cost <= kImageCacheMaxBytes / 1024)
+        fullImageCache().insert(key, new QPixmap(pixmap), static_cast<int>(cost));
+}
+} // namespace
 
 ImageViewer::ImageViewer(QWidget *parent) : QWidget(parent)
 {
@@ -30,6 +52,7 @@ void ImageViewer::showImage(const QUrl &proxyUrl, const QPixmap &preview)
     currentUrl = proxyUrl;
     currentImage = preview;
     fullImage = QPixmap();
+    displayPixmap = QPixmap(); // stale pre-scale from a previous image must not be painted
     isLoadingFull = true;
 
     if (parentWidget()) {
@@ -64,10 +87,18 @@ void ImageViewer::fetchFullImage(const QUrl &proxyUrl)
     query.addQueryItem("quality", "lossless");
     fetchUrl.setQuery(query);
 
+    const qreal dpr = qApp->devicePixelRatio();
+    const QString cacheKey = fetchUrl.toString() + QLatin1Char('@') + QString::number(dpr);
+
+    if (const QPixmap *cached = fullImageCache().object(cacheKey)) {
+        applyFullImage(*cached);
+        return;
+    }
+
     QNetworkRequest request(fetchUrl);
     QNetworkReply *reply = networkManager->get(request);
 
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, cacheKey]() {
         reply->deleteLater();
 
         if (reply->error() != QNetworkReply::NoError) {
@@ -79,24 +110,69 @@ void ImageViewer::fetchFullImage(const QUrl &proxyUrl)
         QByteArray data = reply->readAll();
         QPixmap pixmap;
         if (pixmap.loadFromData(data)) {
-            qreal dpr = qApp->devicePixelRatio();
+            const qreal dpr = qApp->devicePixelRatio();
             pixmap.setDevicePixelRatio(dpr);
-
-            if (!currentImage.isNull()) {
-                QSizeF oldLogicalSize = currentImage.size() / currentImage.devicePixelRatio();
-                QSizeF newLogicalSize = pixmap.size() / dpr;
-
-                qreal scaleRatio = oldLogicalSize.width() / newLogicalSize.width();
-                zoomLevel *= scaleRatio;
-            }
-
-            fullImage = pixmap;
-            currentImage = fullImage;
+            cacheFullImage(cacheKey, pixmap);
+            applyFullImage(pixmap);
+            return;
         }
 
         isLoadingFull = false;
         update();
     });
+}
+
+void ImageViewer::applyFullImage(const QPixmap &pixmap)
+{
+    if (!currentImage.isNull()) {
+        QSizeF oldLogicalSize = currentImage.size() / currentImage.devicePixelRatio();
+        QSizeF newLogicalSize = pixmap.size() / pixmap.devicePixelRatio();
+
+        qreal scaleRatio = oldLogicalSize.width() / newLogicalSize.width();
+        zoomLevel *= scaleRatio;
+    }
+
+    fullImage = pixmap;
+    currentImage = fullImage;
+    isLoadingFull = false;
+    updateDisplayPixmap();
+    update();
+}
+
+void ImageViewer::updateDisplayPixmap()
+{
+    if (currentImage.isNull()) {
+        displayPixmap = QPixmap();
+        return;
+    }
+
+    const qreal dpr = currentImage.devicePixelRatio();
+    const QSize target(qMax(1, qRound(size().width() * dpr)),
+                       qMax(1, qRound(size().height() * dpr)));
+    const QSize sourceSize = currentImage.size();
+
+    // Only pre-scale when it is a real downscale; upscaling the source into
+    // the cache would soften detail without saving any per-repaint work.
+    if (target.width() >= sourceSize.width() && target.height() >= sourceSize.height()) {
+        displayPixmap = QPixmap();
+        return;
+    }
+
+    displayPixmap = currentImage.scaled(target, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    displayPixmap.setDevicePixelRatio(dpr);
+}
+
+const QPixmap &ImageViewer::displayPixmapFor(const QRectF &destRect) const
+{
+    if (!displayPixmap.isNull()) {
+        const QSizeF displayLogical =
+                QSizeF(displayPixmap.size()) / displayPixmap.devicePixelRatio();
+        // Use the pre-scaled copy only when it already covers the target
+        // resolution, so zooming in past it falls back to the full source.
+        if (destRect.width() <= displayLogical.width() && destRect.height() <= displayLogical.height())
+            return displayPixmap;
+    }
+    return currentImage;
 }
 
 void ImageViewer::resetView()
@@ -133,7 +209,12 @@ void ImageViewer::paintEvent(QPaintEvent *event)
     QRectF destRect(center.x() - scaledSize.width() / 2.0, center.y() - scaledSize.height() / 2.0,
                     scaledSize.width(), scaledSize.height());
 
-    painter.drawPixmap(destRect, currentImage, QRectF(QPointF(0, 0), currentImage.size()));
+    // Draw the pre-scaled display pixmap when it covers the target resolution
+    // (avoids re-smoothing the full-resolution source on every pan/zoom
+    // repaint); fall back to the full-resolution source when zoomed in past
+    // the cached resolution to keep detail sharp.
+    const QPixmap &source = displayPixmapFor(destRect);
+    painter.drawPixmap(destRect, source, QRectF(QPointF(0, 0), source.size()));
 
     if (isLoadingFull) {
         painter.setPen(Qt::white);
@@ -235,6 +316,9 @@ void ImageViewer::keyPressEvent(QKeyEvent *event)
 void ImageViewer::resizeEvent(QResizeEvent *event)
 {
     Q_UNUSED(event);
+    // The pre-scaled display pixmap is sized for the current viewport;
+    // regenerate it when the viewport changes.
+    updateDisplayPixmap();
 }
 
 bool ImageViewer::eventFilter(QObject *watched, QEvent *event)

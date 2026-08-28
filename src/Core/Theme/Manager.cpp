@@ -20,6 +20,23 @@ namespace Acheron {
 namespace Core {
 namespace Theme {
 
+namespace Icons {
+// Defined in Icons.cpp; clears the themed icon pixmap cache so a re-applied
+// theme takes effect immediately. Icons.hpp has no invalidation entry point,
+// so the declaration lives here.
+void clearPixmapCache();
+} // namespace Icons
+
+namespace {
+
+int &roundnessCache()
+{
+    static int cached = -1; // -1 = not read from QSettings yet
+    return cached;
+}
+
+} // namespace
+
 Manager &Manager::instance()
 {
     static Manager inst;
@@ -44,8 +61,17 @@ QFont Manager::font(FontRole role) const
 
 int Manager::roundness() const
 {
-    const int px = QSettings().value(QStringLiteral("appearance/roundness"), kDefaultRoundness).toInt();
-    return std::clamp(px, 0, 48);
+    // Cache the value: roundness() is read on every hover/paint and
+    // constructing a QSettings + registry read per call is measurable. The
+    // only writer is setRoundness(), which updates the cache in lockstep.
+    int &cached = roundnessCache();
+    if (cached < 0) {
+        const int px = QSettings().value(QStringLiteral("appearance/roundness"),
+                                         kDefaultRoundness)
+                               .toInt();
+        cached = std::clamp(px, 0, 48);
+    }
+    return cached;
 }
 
 void Manager::setRoundness(int px)
@@ -54,6 +80,7 @@ void Manager::setRoundness(int px)
     if (clamped == roundness())
         return;
     QSettings().setValue(QStringLiteral("appearance/roundness"), clamped);
+    roundnessCache() = clamped;
     scheduleApply(true, false);
 }
 
@@ -146,6 +173,10 @@ QPalette Manager::buildPalette() const
 
 void Manager::apply()
 {
+    // Clear themed icon pixmaps before the change is announced: cached pixmaps
+    // are keyed by color and would otherwise keep serving the old theme's
+    // colors (and keep accumulating entries) until eviction.
+    Icons::clearPixmapCache();
     qApp->setPalette(buildPalette());
     qApp->setStyleSheet(buildStyleSheet());
     emit themeChanged();

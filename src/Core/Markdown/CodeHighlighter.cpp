@@ -1,7 +1,7 @@
 #include "CodeHighlighter.hpp"
 
 #include <QChar>
-#include <QSet>
+#include <QHash>
 #include <QStringList>
 
 namespace Acheron {
@@ -44,17 +44,24 @@ Lang parseLanguage(const QString &raw)
     return Lang::Unknown;
 }
 
-QSet<QString> makeWordSet(const char *spaceSeparated)
+QHash<QString, bool> makeWordSet(const char *spaceSeparated)
 {
     const QStringList words = QString::fromLatin1(spaceSeparated).split(QLatin1Char(' '));
-    return QSet<QString>(words.cbegin(), words.cend());
+    QHash<QString, bool> set;
+    set.reserve(words.size());
+    for (const QString &word : words)
+        set.insert(word, true);
+    return set;
 }
 
-bool isKeyword(Lang lang, const QString &word)
+// QStringView argument: the caller passes a view into the line, avoiding a
+// substring allocation per identifier. QHash<QString, ...> supports
+// heterogeneous QStringView lookup in Qt 6.
+bool isKeyword(Lang lang, QStringView word)
 {
     switch (lang) {
     case Lang::Cpp: {
-        static const QSet<QString> keywords = makeWordSet(
+        static const QHash<QString, bool> keywords = makeWordSet(
             "for while if else return int float double char bool void class struct enum "
             "namespace const auto new delete public private protected static virtual "
             "template using typedef include define pragma true false nullptr break "
@@ -62,21 +69,21 @@ bool isKeyword(Lang lang, const QString &word)
         return keywords.contains(word);
     }
     case Lang::Python: {
-        static const QSet<QString> keywords = makeWordSet(
+        static const QHash<QString, bool> keywords = makeWordSet(
             "def class return if elif else for while import from as with try except "
             "finally pass break continue lambda yield global nonlocal True False None "
             "and or not in is raise assert");
         return keywords.contains(word);
     }
     case Lang::Js: {
-        static const QSet<QString> keywords = makeWordSet(
+        static const QHash<QString, bool> keywords = makeWordSet(
             "function const let var return if else for while class new extends "
             "import export from default async await try catch finally throw typeof "
             "instanceof this null undefined true false switch case break continue");
         return keywords.contains(word);
     }
     case Lang::Json: {
-        static const QSet<QString> keywords = makeWordSet("true false null");
+        static const QHash<QString, bool> keywords = makeWordSet("true false null");
         return keywords.contains(word);
     }
     default:
@@ -122,10 +129,12 @@ bool isHighlightableLanguage(const QString &language)
     return parseLanguage(language) != Lang::Unknown;
 }
 
-std::vector<HighlightSpan> highlightLine(const QString &language, const QString &line,
-                                         HighlightState &state)
+// Highlight a single line with a pre-parsed language. The public
+// highlightLine() entry point parses the language string once per call; block
+// renderers hoist the parse and call this directly per line.
+static std::vector<HighlightSpan> highlightLineForLang(Lang lang, const QString &line,
+                                                       HighlightState &state)
 {
-    const Lang lang = parseLanguage(language);
     std::vector<HighlightSpan> spans;
 
     const int n = line.size();
@@ -273,7 +282,7 @@ std::vector<HighlightSpan> highlightLine(const QString &language, const QString 
             int end = i + 1;
             while (end < n && isIdentifierPart(line.at(end)))
                 ++end;
-            if (isKeyword(lang, line.mid(i, end - i)))
+            if (isKeyword(lang, QStringView(line).mid(i, end - i)))
                 pushSpan(i, end - i, HighlightKind::Keyword);
             i = end;
             continue;
@@ -286,9 +295,17 @@ std::vector<HighlightSpan> highlightLine(const QString &language, const QString 
     return spans;
 }
 
+std::vector<HighlightSpan> highlightLine(const QString &language, const QString &line,
+                                         HighlightState &state)
+{
+    return highlightLineForLang(parseLanguage(language), line, state);
+}
+
 QString highlightCodeHtml(const QString &language, const QString &code)
 {
-    if (!isHighlightableLanguage(language))
+    // Parse the language once per block instead of once per line.
+    const Lang lang = parseLanguage(language);
+    if (lang == Lang::Unknown)
         return code.toHtmlEscaped();
 
     const QStringList lines = code.split(QLatin1Char('\n'));
@@ -299,7 +316,7 @@ QString highlightCodeHtml(const QString &language, const QString &code)
         if (li > 0)
             result += QStringLiteral("<br>");
         const QString &line = lines.at(li);
-        const std::vector<HighlightSpan> spans = highlightLine(language, line, state);
+        const std::vector<HighlightSpan> spans = highlightLineForLang(lang, line, state);
 
         int pos = 0;
         for (const HighlightSpan &s : spans) {

@@ -98,14 +98,16 @@ quint16 UdpTransport::localPort() const
 void UdpTransport::onReadyRead()
 {
     while (socket && socket->hasPendingDatagrams()) {
-        QByteArray datagram;
-        datagram.resize(socket->pendingDatagramSize());
-        socket->readDatagram(datagram.data(), datagram.size());
+        // Reuse the member buffer; resize() reuses capacity across datagrams.
+        // Implicit sharing keeps the emitted copies cheap, and resize() on the
+        // shared buffer detaches safely if a slot kept a reference.
+        m_readBuffer.resize(socket->pendingDatagramSize());
+        socket->readDatagram(m_readBuffer.data(), m_readBuffer.size());
 
-        if (discoveryPending && datagram.size() >= IP_DISCOVERY_PACKET_SIZE) {
-            parseIpDiscoveryResponse(datagram);
+        if (discoveryPending && m_readBuffer.size() >= IP_DISCOVERY_PACKET_SIZE) {
+            parseIpDiscoveryResponse(m_readBuffer);
         } else {
-            emit datagramReceived(datagram);
+            emit datagramReceived(m_readBuffer);
         }
     }
 }

@@ -69,6 +69,7 @@ class ConnectionBanner;
 class PinnedMessagesPanel;
 class ChannelSearchPopup;
 class MePanel;
+class CustomTitleBar;
 #ifndef ACHERON_NO_VOICE
 class VoiceStatusBar;
 #endif
@@ -87,6 +88,10 @@ public:
 protected:
     void closeEvent(QCloseEvent *event) override;
     bool eventFilter(QObject *obj, QEvent *event) override;
+    void changeEvent(QEvent *event) override;
+#if defined(Q_OS_WIN)
+    bool nativeEvent(const QByteArray &eventType, void *message, qintptr *result) override;
+#endif
 
 private slots:
     void onChannelSelectionChanged(const QModelIndex &current, const QModelIndex &previous);
@@ -155,6 +160,14 @@ private:
 private:
     void setupUi();
     void setupMenu();
+    /// Applies or removes the frameless custom-chrome window treatment and
+    /// syncs the titlebar visibility with the appearance setting.
+    void applyCustomChrome();
+#if defined(Q_OS_WIN)
+    /// Requests rounded window corners from DWM (Windows 11), square when
+    /// maximized.
+    void applyWindowCorners() const;
+#endif
     void openDetachedWindow(bool tileToSide);
     void openChannelInNewWindow(const TabEntry &entry, bool tileToSide,
                                 Core::Snowflake jumpMessageId = Core::Snowflake::Invalid);
@@ -187,6 +200,9 @@ private:
 
     ChatView *chatView;
     ChatModel *chatModel;
+
+    CustomTitleBar *titleBar = nullptr;
+    QWidget *contentHost = nullptr;
 
     // forum/split state
     QSplitter *centerSplitter = nullptr;

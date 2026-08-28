@@ -9,6 +9,11 @@
 
 using Acheron::Core::countUnicodeEmojisSegmented;
 
+// Nesting depth of parse() for the current thread. The top-level call (depth 0)
+// owns \r\n normalization + tab expansion; nested parses receive captured
+// substrings of the already-normalized source and skip re-normalization.
+static thread_local int sParseDepth = 0;
+
 namespace Acheron {
 namespace Core {
 namespace Markdown {
@@ -22,9 +27,19 @@ Parser::Parser()
 QList<AstNode> Parser::parse(QString source, ParseState state)
 {
     QList<AstNode> result;
+    result.reserve(source.size() / 8 + 1);
 
-    source.replace(QRegularExpression(R"(\r\n?)"), "\n");
-    source.replace("\t", "    ");
+    // Normalize once at the top-level entry: nested parses always operate on
+    // captured substrings of the already-normalized source (no \r or \t can
+    // survive into them), so re-running the two replaces per nesting level is
+    // pure waste. parse() has a single exit point, so the depth bookkeeping is
+    // trivially balanced.
+    const bool nested = sParseDepth > 0;
+    ++sParseDepth;
+    if (!nested) {
+        source.replace(QRegularExpression(R"(\r\n?)"), "\n");
+        source.replace("\t", "    ");
+    }
 
     if (!state.isInline) {
         source += "\n\n";
@@ -117,6 +132,7 @@ QList<AstNode> Parser::parse(QString source, ParseState state)
         pos += capturedStr.length();
     }
 
+    --sParseDepth;
     return result;
 }
 
@@ -155,6 +171,7 @@ bool Parser::isEmojiOnly(const QList<AstNode> &nodes, int maxEmojis)
 QString Parser::toHtmlInternal(const QList<AstNode> &nodes, bool jumboEmoji)
 {
     QString result;
+    result.reserve(nodes.size() * 48);
     for (const auto &node : nodes) {
         if (node.type == "user") {
             QString displayName;
@@ -207,11 +224,12 @@ QString Parser::toHtmlInternal(const QList<AstNode> &nodes, bool jumboEmoji)
             continue;
         }
 
-        if (ruleMap.contains(node.type) && ruleMap[node.type]->html) {
+        auto ruleIt = ruleMap.constFind(node.type);
+        if (ruleIt != ruleMap.constEnd() && ruleIt.value()->html) {
             auto renderChildren = [this, jumboEmoji](const QList<AstNode> &children) {
                 return this->toHtmlInternal(children, jumboEmoji);
             };
-            result += ruleMap[node.type]->html(node, renderChildren);
+            result += ruleIt.value()->html(node, renderChildren);
         } else {
             result += node.content.toHtmlEscaped();
         }

@@ -74,11 +74,17 @@ static bool isLastThreadSibling(const ChannelNode *node)
 {
     if (!node || !node->parent)
         return true;
-    const ChannelNode *last = nullptr;
-    for (const auto &sibling : node->parent->children)
-        if (sibling->type == ChannelNode::Type::Thread)
-            last = sibling.get();
-    return last == node;
+    // ChannelTreeModel keeps this flag fresh after structural edits; the lazy
+    // recompute here is the fallback for nodes it never touched.
+    if (!node->isLastThreadSiblingValid) {
+        const ChannelNode *last = nullptr;
+        for (const auto &sibling : node->parent->children)
+            if (sibling->type == ChannelNode::Type::Thread)
+                last = sibling.get();
+        node->isLastThreadSibling = (last == node);
+        node->isLastThreadSiblingValid = true;
+    }
+    return node->isLastThreadSibling;
 }
 
 static void drawThreadBranchIcon(QPainter *painter, const QRect &contentRect, const QColor &color, bool lastSibling)

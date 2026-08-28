@@ -52,7 +52,9 @@ struct ListData
 struct GuildListState
 {
     QHash<QString, ListData> lists; // listId -> items + groups
-    QHash<QString, Discord::Role> roleCache;
+    // Keyed by the role snowflake itself; every member-role lookup previously
+    // formatted a QString::number() per (member, role) pair.
+    QHash<Snowflake, Discord::Role> roleCache;
     int memberCount = 0;
     int onlineCount = 0;
 };

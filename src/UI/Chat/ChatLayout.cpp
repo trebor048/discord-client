@@ -1,5 +1,6 @@
 #include "ChatLayout.hpp"
 
+#include "Core/ImageManager.hpp"
 #include "Core/Theme/Fonts.hpp"
 #include "Core/Theme/Icons.hpp"
 #include "Core/Theme/Manager.hpp"
@@ -23,7 +24,9 @@ QRect dateSeparatorRectForRow(const QRect &rowRect)
     return QRect(rowRect.left(), rowRect.top(), rowRect.width(), separatorHeight());
 }
 
-QString richTextStyleSheet()
+namespace {
+
+QString buildRichTextStyleSheet()
 {
     using Core::Theme::Manager;
     using Core::Theme::Token;
@@ -72,6 +75,34 @@ QString richTextStyleSheet()
            code + codeBlock + spoiler;
 }
 
+} // namespace
+
+QString richTextStyleSheet()
+{
+    // The stylesheet is theme/font derived and identical for every document;
+    // build it once and invalidate on theme or font-metric changes.
+    static QString cached;
+    static bool valid = false;
+    if (!valid) {
+        cached = buildRichTextStyleSheet();
+        valid = true;
+        // One-time wiring: any theme/font change rebuilds on next use. The
+        // context object lives for the process; Qt disconnects it if the
+        // Manager is destroyed first.
+        static QObject *context = new QObject;
+        static const bool connected = [] {
+            auto &mgr = Core::Theme::Manager::instance();
+            QObject::connect(&mgr, &Core::Theme::Manager::themeChanged, context,
+                             []() { valid = false; }, Qt::DirectConnection);
+            QObject::connect(&mgr, &Core::Theme::Manager::metricsChanged, context,
+                             []() { valid = false; }, Qt::DirectConnection);
+            return true;
+        }();
+        Q_UNUSED(connected);
+    }
+    return cached;
+}
+
 static QString editedMarkerText()
 {
     return QCoreApplication::translate("Acheron::UI::ChatLayout", "(edited)");
@@ -104,6 +135,34 @@ void setupDocument(QTextDocument &doc, const QString &htmlContent, const QFont &
     QTextOption opt = doc.defaultTextOption();
     opt.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
     doc.setDefaultTextOption(opt);
+}
+
+namespace {
+
+const QRegularExpression &emojiImgRegex()
+{
+    static const QRegularExpression re(
+            R"lol(<img src="(https://cdn\.discordapp\.com/emojis/\d+\.(?:webp|png|gif)\?size=\d+)"[^>]*width="(\d+)")lol");
+    return re;
+}
+
+const QString emojiCdnPrefix = QStringLiteral("https://cdn.discordapp.com/emojis/");
+
+} // namespace
+
+void registerEmojiResources(QTextDocument &doc, const QString &html, Core::ImageManager *imageManager)
+{
+    if (!imageManager || !html.contains(emojiCdnPrefix))
+        return;
+
+    auto it = emojiImgRegex().globalMatch(html);
+    while (it.hasNext()) {
+        auto match = it.next();
+        QUrl url(match.captured(1));
+        int size = match.captured(2).toInt();
+        QPixmap px = imageManager->get(url, QSize(size, size));
+        doc.addResource(QTextDocument::ImageResource, url, px);
+    }
 }
 
 AttachmentGridLayout calculateAttachmentGrid(int count, int maxWidth)
@@ -611,9 +670,21 @@ MessageLayout calculateMessageLayout(const LayoutContext &ctx)
             QFont docFont = ctx.font;
             if (ctx.isSystemMessage)
                 docFont.setItalic(true);
-            QTextDocument doc;
-            setupDocument(doc, ctx.htmlContent, docFont, textWidth);
-            layout.textHeight = int(std::ceil(doc.size().height()));
+            // Build the doc once and store it so the paint pass reuses it
+            // instead of parsing the HTML a second time. The delegate adjusts
+            // textWidth lazily on cache hits; emoji resources are registered
+            // here exactly as the paint path does (suppressImageFetch only
+            // gates image-bearing role caches, not doc caching).
+            auto *doc = new QTextDocument;
+            setupDocument(*doc, ctx.htmlContent, docFont, textWidth);
+            if (ctx.model) {
+                if (ctx.model->imageManagerPtr())
+                    registerEmojiResources(*doc, ctx.htmlContent, ctx.model->imageManagerPtr());
+                ctx.model->cacheDocument(bodyDocKey(ctx.messageId), doc);
+            }
+            layout.textHeight = int(std::ceil(doc->size().height()));
+            if (!ctx.model)
+                delete doc;
         }
     }
 
@@ -1114,7 +1185,9 @@ std::optional<HitRegion> hitTest(const ResolvedLayout &resolved, const QPoint &m
         if (!link.isEmpty())
             return HitRegion{ HitRegion::Kind::TextLink, layout.textRect, -1, -1, link };
 
-        // Fallback: detect non-anchored URLs in rendered text
+        // Fallback: detect non-anchored URLs in rendered text. URL span
+        // positions are memoized per message (invalidated together with the doc
+        // cache), so mouse-move events don't re-copy + re-match the document.
         QTextDocument *doc = ctx.model->getCachedDocument(bodyDocKey(ctx.messageId));
         QTextDocument localDoc;
         if (!doc) {
@@ -1124,14 +1197,31 @@ std::optional<HitRegion> hitTest(const ResolvedLayout &resolved, const QPoint &m
         QPointF localPos = mousePos - layout.textRect.topLeft();
         int charPos = doc->documentLayout()->hitTest(localPos, Qt::ExactHit);
         if (charPos >= 0) {
-            QString renderedText = doc->toPlainText();
-            static const QRegularExpression urlRe(
-                QStringLiteral(R"(https?://[^\s<>"']+[^\s<>"',.;:!?)})"));
-            QRegularExpressionMatchIterator it = urlRe.globalMatch(renderedText);
-            while (it.hasNext()) {
-                QRegularExpressionMatch m = it.next();
-                if (charPos >= m.capturedStart() && charPos < m.capturedEnd())
-                    return HitRegion{ HitRegion::Kind::TextLink, layout.textRect, -1, -1, m.captured() };
+            QVector<QPair<int, int>> spans;
+            if (!ctx.model->textUrlSpansFor(ctx.messageId, &spans)) {
+                static const QRegularExpression urlRe(
+                        QStringLiteral(R"(https?://[^\s<>"']+[^\s<>"',.;:!?)})"));
+                const QString renderedText = doc->toPlainText();
+                QRegularExpressionMatchIterator it = urlRe.globalMatch(renderedText);
+                while (it.hasNext()) {
+                    QRegularExpressionMatch m = it.next();
+                    spans.append({ m.capturedStart(), m.capturedEnd() });
+                }
+                ctx.model->setTextUrlSpansFor(ctx.messageId, spans);
+            }
+            // Spans are sorted ascending; binary search for the one covering
+            // charPos (the last span whose start is <= charPos).
+            auto spanIt = std::upper_bound(spans.cbegin(), spans.cend(), charPos,
+                                           [](int pos, const QPair<int, int> &span) {
+                                               return pos < span.first;
+                                           });
+            if (spanIt != spans.cbegin()) {
+                --spanIt;
+                if (charPos >= spanIt->first && charPos < spanIt->second) {
+                    const QString url =
+                            doc->toPlainText().mid(spanIt->first, spanIt->second - spanIt->first);
+                    return HitRegion{ HitRegion::Kind::TextLink, layout.textRect, -1, -1, url };
+                }
             }
             return HitRegion{ HitRegion::Kind::TextCursor, layout.textRect, -1, -1, {} };
         }

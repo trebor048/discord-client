@@ -50,7 +50,9 @@ QByteArray OpusEncoder::encode(const QByteArray &pcmFrame)
         return {};
     }
 
-    QByteArray encoded(OPUS_MAX_PACKET_SIZE, '\0');
+    // Qt::Uninitialized skips the 4 KB zero-fill on every encode frame; opus
+    // overwrites the buffer up to the returned byte count anyway.
+    QByteArray encoded(OPUS_MAX_PACKET_SIZE, Qt::Uninitialized);
 
     int bytes = opus_encode(encoder,
                             reinterpret_cast<const opus_int16 *>(pcmFrame.constData()),

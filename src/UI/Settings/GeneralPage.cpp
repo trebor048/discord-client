@@ -10,6 +10,7 @@
 #include <QVBoxLayout>
 
 #include "UI/Widgets/CustomStatusEdit.hpp"
+#include "Core/ImageManager.hpp"
 #include "Core/Settings.hpp"
 
 namespace Acheron {
@@ -105,6 +106,9 @@ GeneralPage::GeneralPage(QWidget *parent)
     });
     connect(autoplayGifsCheckbox, &QCheckBox::toggled, this, [](bool checked) {
         QSettings().setValue("ui/gifAutoplay", checked);
+        // The running ImageManager caches this flag; invalidate so the toggle
+        // applies immediately (new loads + resume-from-pause pick it up).
+        Core::ImageManager::invalidateGifAutoplayCache();
     });
     connect(autoplayVideosCheckbox, &QCheckBox::toggled, this, [](bool checked) {
         QSettings().setValue("ui/videoAutoplay", checked);

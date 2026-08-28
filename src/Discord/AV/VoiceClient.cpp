@@ -11,6 +11,7 @@
 
 #include <QPointer>
 #include <array>
+#include <cstring>
 
 namespace Acheron {
 namespace Discord {
@@ -313,7 +314,9 @@ void VoiceClient::sendAudio(const QByteArray &opusData)
     if (isDaveEnabled()) {
         auto *enc = daveSession->encryptor();
         auto maxSize = enc->GetMaxCiphertextByteSize(discord::dave::MediaType::Audio, payloadForTransport.size());
-        std::vector<uint8_t> daveEncrypted(maxSize);
+        // Reuse the member scratch's capacity across packets (send path is
+        // single-threaded on the voice thread).
+        m_daveEncryptScratch.resize(maxSize);
         size_t bytesWritten = 0;
         auto result = enc->Encrypt(
                 discord::dave::MediaType::Audio,
@@ -321,23 +324,34 @@ void VoiceClient::sendAudio(const QByteArray &opusData)
                 discord::dave::ArrayView<const uint8_t>(
                         reinterpret_cast<const uint8_t *>(payloadForTransport.constData()),
                         payloadForTransport.size()),
-                discord::dave::ArrayView<uint8_t>(daveEncrypted.data(), daveEncrypted.size()),
+                discord::dave::ArrayView<uint8_t>(m_daveEncryptScratch.data(), m_daveEncryptScratch.size()),
                 &bytesWritten);
 
         if (result == discord::dave::IEncryptor::Success) {
-            payloadForTransport = QByteArray(reinterpret_cast<const char *>(daveEncrypted.data()), bytesWritten);
+            payloadForTransport = QByteArray(reinterpret_cast<const char *>(m_daveEncryptScratch.data()), bytesWritten);
         } else {
             qCWarning(LogVoice) << "DAVE encrypt failed: result =" << static_cast<int>(result);
             return;
         }
     }
 
-    QByteArray headerBytes = header.serialize();
-    QByteArray encryptedSection = encryption->encrypt(headerBytes, payloadForTransport);
+    // Assemble the datagram in a single buffer: serialize the 12-byte RTP
+    // header in place and copy the encrypted section once, avoiding the
+    // intermediate headerBytes / headerBytes+encryptedSection allocations on
+    // the per-packet send path. fromRawData is a zero-copy view valid only
+    // during the encrypt() call below.
+    char headerBytes[RtpHeader::FIXED_SIZE];
+    header.serialize(headerBytes);
+    QByteArray headerAad = QByteArray::fromRawData(headerBytes, RtpHeader::FIXED_SIZE);
+    QByteArray encryptedSection = encryption->encrypt(headerAad, payloadForTransport);
     if (encryptedSection.isEmpty())
         return;
 
-    QByteArray packet = headerBytes + encryptedSection;
+    QByteArray packet;
+    packet.resize(RtpHeader::FIXED_SIZE + encryptedSection.size());
+    std::memcpy(packet.data(), headerBytes, RtpHeader::FIXED_SIZE);
+    std::memcpy(packet.data() + RtpHeader::FIXED_SIZE, encryptedSection.constData(),
+                encryptedSection.size());
     udpTransport->send(packet);
 
     lastAudioSendTime = now;
@@ -407,23 +421,28 @@ void VoiceClient::onDatagram(const QByteArray &data)
     if (header.ssrc == localSsrc)
         return;
 
-    QByteArray rtpHeaderBytes = data.left(headerSize);
-    QByteArray encryptedSection = data.mid(headerSize);
-
     if (!encryption) {
         qCDebug(LogVoice) << "Received RTP but no encryption context, SSRC =" << header.ssrc;
         return;
     }
 
-    QByteArray decrypted = encryption->decrypt(rtpHeaderBytes, encryptedSection);
-    if (decrypted.isEmpty()) {
+    // Decrypt straight from the datagram buffer (no left()/mid() slicing
+    // copies): libsodium reads the AAD from the header prefix and the
+    // ciphertext from the tail. m_decryptScratch's capacity is reused across
+    // packets.
+    const int payloadLen = data.size() - headerSize;
+    // isEmpty() keeps the old semantics: an empty decrypted payload (which the
+    // old API reported as a failure) is dropped exactly as before.
+    if (!encryption->decrypt(data, headerSize, payloadLen, m_decryptScratch)
+        || m_decryptScratch.isEmpty()) {
         qCDebug(LogVoice) << "Decrypt failed: SSRC =" << header.ssrc
                           << "seq =" << header.sequence
                           << "pktSize =" << data.size()
                           << "hdrSize =" << headerSize
-                          << "encSize =" << encryptedSection.size();
+                          << "encSize =" << payloadLen;
         return;
     }
+    const QByteArray &decrypted = m_decryptScratch;
 
     if (daveSession) {
         // https://daveprotocol.com/#silence-packets
@@ -436,18 +455,22 @@ void VoiceClient::onDatagram(const QByteArray &data)
             uint64_t ssrcUid = ssrcToUserIdMap.value(header.ssrc, 0);
             auto *dec = daveSession->getOrCreateDecryptor(header.ssrc, ssrcUid);
             auto maxSize = dec->GetMaxPlaintextByteSize(discord::dave::MediaType::Audio, decrypted.size());
-            std::vector<uint8_t> davePlaintext(maxSize);
+            // Reuse the member scratch's capacity across packets.
+            m_daveDecryptScratch.resize(maxSize);
             size_t bytesWritten = 0;
             auto result = dec->Decrypt(
                     discord::dave::MediaType::Audio,
                     discord::dave::ArrayView<const uint8_t>(
                             reinterpret_cast<const uint8_t *>(decrypted.constData()),
                             decrypted.size()),
-                    discord::dave::ArrayView<uint8_t>(davePlaintext.data(), davePlaintext.size()),
+                    discord::dave::ArrayView<uint8_t>(m_daveDecryptScratch.data(), m_daveDecryptScratch.size()),
                     &bytesWritten);
 
             if (result == discord::dave::IDecryptor::Success) {
-                decrypted = QByteArray(reinterpret_cast<const char *>(davePlaintext.data()), bytesWritten);
+                // The DAVE plaintext must outlive the vector, so copy it into
+                // the decrypted buffer (single copy; capacity reused).
+                m_decryptScratch.resize(static_cast<int>(bytesWritten));
+                std::memcpy(m_decryptScratch.data(), m_daveDecryptScratch.data(), bytesWritten);
             } else {
                 static constexpr const char *kResultNames[] = {
                     "Success",
@@ -472,7 +495,7 @@ void VoiceClient::onDatagram(const QByteArray &data)
         }
     }
 
-    emit audioReceived(header.ssrc, header.sequence, header.timestamp, decrypted);
+    emit audioReceived(header.ssrc, header.sequence, header.timestamp, m_decryptScratch);
 }
 
 bool VoiceClient::isDaveEnabled() const

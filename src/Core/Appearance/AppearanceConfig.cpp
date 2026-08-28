@@ -32,6 +32,11 @@ void AppearanceConfig::load()
     channelScale_ = clampChannelScale(
             settings.value(kChannelScaleKey, kChannelDefaultScale).toFloat());
     numberedUnread_ = settings.value(kNumberedUnreadKey, true).toBool();
+#if defined(Q_OS_WIN)
+    customTitleBar_ = settings.value(kCustomTitleBarKey, true).toBool();
+#else
+    customTitleBar_ = settings.value(kCustomTitleBarKey, false).toBool();
+#endif
 }
 
 void AppearanceConfig::save() const
@@ -44,6 +49,7 @@ void AppearanceConfig::save() const
     settings.setValue(kGuildIconScaleKey, guildIconScale_);
     settings.setValue(kChannelScaleKey, channelScale_);
     settings.setValue(kNumberedUnreadKey, numberedUnread_);
+    settings.setValue(kCustomTitleBarKey, customTitleBar_);
     settings.sync();
 }
 
@@ -125,6 +131,15 @@ void AppearanceConfig::setNumberedUnread(bool on)
     if (on == numberedUnread_)
         return;
     numberedUnread_ = on;
+    save();
+    emit configChanged();
+}
+
+void AppearanceConfig::setCustomTitleBar(bool on)
+{
+    if (on == customTitleBar_)
+        return;
+    customTitleBar_ = on;
     save();
     emit configChanged();
 }

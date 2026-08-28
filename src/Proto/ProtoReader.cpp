@@ -145,8 +145,23 @@ bool ProtoReader::skipField(WireType wireType)
         return readFixed64(value);
     }
     case WireType::LENGTH_DELIMITED: {
-        QByteArray value;
-        return readLengthDelimited(value);
+        // Skip without materializing the payload: read the varint length,
+        // apply the same bounds checks as readLengthDelimited(), then just
+        // advance the cursor.
+        uint64_t length;
+        if (!readVarint(length))
+            return false;
+
+        if (length > static_cast<uint64_t>(remaining())) {
+            qCWarning(LogProto) << "Length-delimited field exceeds remaining data";
+            return false;
+        }
+
+        if (length > static_cast<uint64_t>(std::numeric_limits<int>::max()))
+            return false;
+
+        pos += static_cast<size_t>(length);
+        return true;
     }
     case WireType::FIXED32: {
         uint32_t value;

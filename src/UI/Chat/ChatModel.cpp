@@ -313,7 +313,7 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
         if (prevMsg.author->id != msg.author->id)
             return true;
 
-        if (prevMsg.timestamp->toLocalTime().date() != msg.timestamp->toLocalTime().date())
+        if (localDateSerial(prevMsg) != localDateSerial(msg))
             return true;
 
         return false;
@@ -324,7 +324,7 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
 
         const auto &prevMsg = messages[index.row() - 1];
 
-        if (prevMsg.timestamp->toLocalTime().date() != msg.timestamp->toLocalTime().date())
+        if (localDateSerial(prevMsg) != localDateSerial(msg))
             return true;
 
         return false;
@@ -1077,6 +1077,8 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
         reactionCache.clear();
         pollCache.clear();
         docCache.clear();
+        textUrlSpans.clear();
+        localDateCache.clear();
         pendingNonces.clear();
         erroredNonces.clear();
         uploadProgress.clear();
@@ -1085,6 +1087,7 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
         emojiUrlIndex.clear();
         emojiUrlsByMessage.clear();
         messageRowIndexDirty = true;
+        nonceToRow.clear();
 
         // Clean up animated sticker movies from previous message set
         qDeleteAll(stickerMovies);
@@ -1110,6 +1113,7 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
         messages = incomingMessages;
         for (const auto &msg : messages)
             indexMessageEmojiUrls(msg);
+        rebuildNonceIndex();
         endResetModel();
         trimOldestMessagesIfNeeded();
         break;
@@ -1125,6 +1129,7 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
             for (const auto &msg : messages)
                 indexMessageEmojiUrls(msg);
             messageRowIndexDirty = true;
+            rebuildNonceIndex();
             endInsertRows();
             break;
         }
@@ -1154,10 +1159,18 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
         for (const auto &msg : trulyNew)
             indexMessageEmojiUrls(msg);
         messageRowIndexDirty = true;
+        // Existing rows shift down by numNew; the new messages occupy 0..numNew-1.
+        for (auto it = nonceToRow.begin(); it != nonceToRow.end(); ++it)
+            it.value() += numNew;
+        for (int i = 0; i < trulyNew.size(); ++i) {
+            if (trulyNew[i].nonce.hasValue())
+                nonceToRow.insert(trulyNew[i].nonce.get(), i);
+        }
         endInsertRows();
 
         // invalidate cached size cuz header and/or separator might have moved
         sizeCache.remove(oldAnchorId);
+        localDateCache.remove(oldAnchorId);
         QModelIndex oldAnchorIdx = index(numNew, 0);
         emit dataChanged(oldAnchorIdx, oldAnchorIdx,
                          { CachedSizeRole, ShowHeaderRole, DateSeparatorRole });
@@ -1188,26 +1201,66 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
         int firstAffected = static_cast<int>(messages.size());
         int lastAffected = -1;
 
-        for (const auto &msg : trulyNew) {
-            const Snowflake targetId = msg.id.get();
-            auto it = std::lower_bound(messages.begin(), messages.end(), targetId,
-                                       [](const Discord::Message &m, const Snowflake &id) {
-                                           return m.id.get() < id;
-                                       });
-            const int row = static_cast<int>(std::distance(messages.begin(), it));
-            beginInsertRows({}, row, row);
-            messages.insert(it, msg);
-            indexMessageEmojiUrls(msg);
+        const auto firstIt = std::lower_bound(
+                messages.begin(), messages.end(), trulyNew.first().id,
+                [](const Discord::Message &m, const Snowflake &id) { return m.id.get() < id; });
+        const int insertRow = static_cast<int>(std::distance(messages.begin(), firstIt));
+
+        // When the fetched block is contiguous, insert it with one begin/end
+        // pair and a single vector splice instead of one insert per message.
+        const bool contiguous = insertRow == static_cast<int>(messages.size()) ||
+                                trulyNew.last().id.get() < messages[insertRow].id.get();
+
+        if (contiguous) {
+            const int numNew = trulyNew.size();
+            beginInsertRows({}, insertRow, insertRow + numNew - 1);
+            messages.insert(firstIt, trulyNew.cbegin(), trulyNew.cend());
+            for (const auto &msg : trulyNew)
+                indexMessageEmojiUrls(msg);
             messageRowIndexDirty = true;
+            // Existing rows at/after the block shift down by numNew.
+            for (auto it = nonceToRow.begin(); it != nonceToRow.end(); ++it) {
+                if (it.value() >= insertRow)
+                    it.value() += numNew;
+            }
+            for (int i = 0; i < numNew; ++i) {
+                if (trulyNew[i].nonce.hasValue())
+                    nonceToRow.insert(trulyNew[i].nonce.get(), insertRow + i);
+            }
             endInsertRows();
 
-            firstAffected = qMin(firstAffected, row);
-            lastAffected = qMax(lastAffected, qMin(row + 1, static_cast<int>(messages.size()) - 1));
+            firstAffected = insertRow;
+            lastAffected = qMin(insertRow + numNew, static_cast<int>(messages.size()) - 1);
+        } else {
+            for (const auto &msg : trulyNew) {
+                const Snowflake targetId = msg.id.get();
+                auto it = std::lower_bound(messages.begin(), messages.end(), targetId,
+                                           [](const Discord::Message &m, const Snowflake &id) {
+                                               return m.id.get() < id;
+                                           });
+                const int row = static_cast<int>(std::distance(messages.begin(), it));
+                beginInsertRows({}, row, row);
+                messages.insert(it, msg);
+                indexMessageEmojiUrls(msg);
+                messageRowIndexDirty = true;
+                for (auto nit = nonceToRow.begin(); nit != nonceToRow.end(); ++nit) {
+                    if (nit.value() >= row)
+                        ++nit.value();
+                }
+                if (msg.nonce.hasValue())
+                    nonceToRow.insert(msg.nonce.get(), row);
+                endInsertRows();
+
+                firstAffected = qMin(firstAffected, row);
+                lastAffected = qMax(lastAffected, qMin(row + 1, static_cast<int>(messages.size()) - 1));
+            }
         }
 
         if (firstAffected <= lastAffected) {
-            for (int row = firstAffected; row <= lastAffected; ++row)
+            for (int row = firstAffected; row <= lastAffected; ++row) {
                 sizeCache.remove(messages[row].id);
+                localDateCache.remove(messages[row].id);
+            }
 
             emit dataChanged(index(firstAffected, 0), index(lastAffected, 0),
                              { CachedSizeRole, ShowHeaderRole, DateSeparatorRole });
@@ -1226,10 +1279,25 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
                 continue;
 
             unindexMessageEmojiUrls(messages[row].id);
+            const QString oldNonce = messages[row].nonce.hasValue()
+                                             ? messages[row].nonce.get()
+                                             : QString();
+            const QString newNonce = incomingMsg.nonce.hasValue()
+                                             ? incomingMsg.nonce.get()
+                                             : QString();
             messages[row] = incomingMsg;
             indexMessageEmojiUrls(messages[row]);
 
+            if (!oldNonce.isEmpty() && oldNonce != newNonce) {
+                const auto nonceIt = nonceToRow.constFind(oldNonce);
+                if (nonceIt != nonceToRow.constEnd() && nonceIt.value() == row)
+                    nonceToRow.remove(oldNonce);
+            }
+            if (!newNonce.isEmpty())
+                nonceToRow.insert(newNonce, row);
+
             sizeCache.remove(incomingMsg.id);
+            localDateCache.remove(incomingMsg.id);
             attachmentCache.remove(incomingMsg.id);
             embedCache.remove(incomingMsg.id);
             reactionCache.remove(incomingMsg.id);
@@ -1258,10 +1326,25 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
                 continue;
 
             unindexMessageEmojiUrls(messages[row].id);
+            const QString oldNonce = messages[row].nonce.hasValue()
+                                             ? messages[row].nonce.get()
+                                             : QString();
+            const QString newNonce = incomingMsg.nonce.hasValue()
+                                             ? incomingMsg.nonce.get()
+                                             : QString();
             messages[row] = incomingMsg;
             indexMessageEmojiUrls(messages[row]);
 
+            if (!oldNonce.isEmpty() && oldNonce != newNonce) {
+                const auto nonceIt = nonceToRow.constFind(oldNonce);
+                if (nonceIt != nonceToRow.constEnd() && nonceIt.value() == row)
+                    nonceToRow.remove(oldNonce);
+            }
+            if (!newNonce.isEmpty())
+                nonceToRow.insert(newNonce, row);
+
             sizeCache.remove(incomingMsg.id);
+            localDateCache.remove(incomingMsg.id);
             attachmentCache.remove(incomingMsg.id);
             embedCache.remove(incomingMsg.id);
             reactionCache.remove(incomingMsg.id);
@@ -1273,14 +1356,9 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
             handled[j] = true;
         }
 
-        // Phase 2 — replace sent messages by nonce (skip ones already handled)
-        QHash<QString, int> nonceToRow;
-        nonceToRow.reserve(messages.size());
-        for (int i = 0; i < messages.size(); ++i) {
-            if (messages[i].nonce.hasValue())
-                nonceToRow.insert(messages[i].nonce.get(), i);
-        }
-
+        // Phase 2 — replace sent messages by nonce (skip ones already handled).
+        // nonceToRow is maintained incrementally at every message mutation, so
+        // no O(N) rebuild is needed per incoming batch.
         for (int j = 0; j < incomingMessages.size(); j++) {
             if (handled[j])
                 continue;
@@ -1302,9 +1380,13 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
             indexMessageEmojiUrls(messages[row]);
             pendingNonces.remove(nonce);
             uploadProgress.remove(nonce);
+            // The confirmed message is no longer replaceable by nonce; a later
+            // duplicate nonce in the same batch must not re-match this row.
+            nonceToRow.remove(nonce);
             // Drop caches keyed by the old placeholder id — they can never be
             // hit again after the ID changes and would leak for the session.
             sizeCache.remove(oldId);
+            localDateCache.remove(oldId);
             attachmentCache.remove(oldId);
             embedCache.remove(oldId);
             reactionCache.remove(oldId);
@@ -1332,12 +1414,17 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
         }
 
         if (!newMessages.isEmpty()) {
-            beginInsertRows({}, messages.size(), messages.size() + newMessages.size() - 1);
+            const int firstNewRow = messages.size();
+            beginInsertRows({}, firstNewRow, firstNewRow + newMessages.size() - 1);
 
             messages = messages + newMessages;
             for (const auto &msg : newMessages)
                 indexMessageEmojiUrls(msg);
             messageRowIndexDirty = true;
+            for (int i = 0; i < newMessages.size(); ++i) {
+                if (newMessages[i].nonce.hasValue())
+                    nonceToRow.insert(newMessages[i].nonce.get(), firstNewRow + i);
+            }
             endInsertRows();
             trimOldestMessagesIfNeeded();
 
@@ -1376,13 +1463,17 @@ void ChatModel::handleMessageDeleted(Snowflake channelId, Snowflake messageId)
 
     for (int i = 0; i < messages.size(); i++) {
         if (messages[i].id == messageId) {
-            if (messages[i].nonce.hasValue()) {
-                pendingNonces.remove(messages[i].nonce.get());
-                uploadProgress.remove(messages[i].nonce.get());
+            const QString deletedNonce = messages[i].nonce.hasValue()
+                                                 ? messages[i].nonce.get()
+                                                 : QString();
+            if (!deletedNonce.isEmpty()) {
+                pendingNonces.remove(deletedNonce);
+                uploadProgress.remove(deletedNonce);
             }
             prunePreviewCaches(messages[i]); // cancelled/deleted preview won't render again
             beginRemoveRows({}, i, i);
             sizeCache.remove(messageId);
+            localDateCache.remove(messageId);
             attachmentCache.remove(messageId);
             embedCache.remove(messageId);
             reactionCache.remove(messageId);
@@ -1391,6 +1482,16 @@ void ChatModel::handleMessageDeleted(Snowflake channelId, Snowflake messageId)
             unindexMessageEmojiUrls(messageId);
             messages.remove(i);
             messageRowIndexDirty = true;
+            if (!deletedNonce.isEmpty()) {
+                const auto nonceIt = nonceToRow.constFind(deletedNonce);
+                if (nonceIt != nonceToRow.constEnd() && nonceIt.value() == i)
+                    nonceToRow.remove(deletedNonce);
+            }
+            // Rows after the deleted one shift up by one.
+            for (auto it = nonceToRow.begin(); it != nonceToRow.end(); ++it) {
+                if (it.value() > i)
+                    --it.value();
+            }
             endRemoveRows();
 
             // invalidate what came afterwards
@@ -1398,6 +1499,7 @@ void ChatModel::handleMessageDeleted(Snowflake channelId, Snowflake messageId)
                 const auto &nextMessage = messages[i];
 
                 sizeCache.remove(nextMessage.id);
+                localDateCache.remove(nextMessage.id);
                 attachmentCache.remove(nextMessage.id);
                 embedCache.remove(nextMessage.id);
                 invalidateDocCacheForMessage(nextMessage.id);
@@ -1439,13 +1541,21 @@ void ChatModel::handleUploadProgress(const QString &nonce, int fileIndex, qint64
         progress.append({ -1, -1 });
     progress[fileIndex] = { sent, total };
 
-    for (int i = 0; i < messages.size(); i++) {
-        if (messages[i].nonce.hasValue() && messages[i].nonce.get() == nonce) {
-            QModelIndex idx = index(i, 0);
-            emit dataChanged(idx, idx, { AttachmentsRole });
-            break;
-        }
-    }
+    // O(1) row lookup via the incrementally maintained nonce index (defensive
+    // re-check keeps the old linear-scan semantics).
+    const auto it = nonceToRow.constFind(nonce);
+    if (it == nonceToRow.constEnd())
+        return;
+    const int row = it.value();
+    if (row < 0 || row >= messages.size() || !messages[row].nonce.hasValue() ||
+        messages[row].nonce.get() != nonce)
+        return;
+
+    // Drop the cached attachment payload so the delegate re-renders with the
+    // fresh progress values instead of the stale snapshot.
+    attachmentCache.remove(messages[row].id);
+    QModelIndex idx = index(row, 0);
+    emit dataChanged(idx, idx, { AttachmentsRole });
 }
 
 QPixmap ChatModel::localPixmap(const QUrl &url, const QSize &displaySize) const
@@ -1681,6 +1791,41 @@ void ChatModel::ensureMessageRowIndex() const
     messageRowIndexDirty = false;
 }
 
+void ChatModel::rebuildNonceIndex()
+{
+    nonceToRow.clear();
+    nonceToRow.reserve(messages.size());
+    for (int i = 0; i < messages.size(); ++i) {
+        if (messages[i].nonce.hasValue())
+            nonceToRow.insert(messages[i].nonce.get(), i);
+    }
+}
+
+int ChatModel::localDateSerial(const Discord::Message &msg) const
+{
+    auto it = localDateCache.constFind(msg.id);
+    if (it != localDateCache.constEnd())
+        return it.value();
+    const int serial = msg.timestamp->toLocalTime().date().toJulianDay();
+    localDateCache.insert(msg.id, serial);
+    return serial;
+}
+
+bool ChatModel::textUrlSpansFor(Core::Snowflake messageId, QVector<QPair<int, int>> *out) const
+{
+    auto it = textUrlSpans.constFind(messageId);
+    if (it == textUrlSpans.constEnd())
+        return false;
+    if (out)
+        *out = it.value();
+    return true;
+}
+
+void ChatModel::setTextUrlSpansFor(Core::Snowflake messageId, QVector<QPair<int, int>> spans) const
+{
+    textUrlSpans.insert(messageId, std::move(spans));
+}
+
 void ChatModel::trimOldestMessagesIfNeeded()
 {
     const int excess = messages.size() - MaxLoadedMessages;
@@ -1697,6 +1842,7 @@ void ChatModel::trimOldestMessagesIfNeeded()
         }
         prunePreviewCaches(msg);
         sizeCache.remove(msg.id);
+        localDateCache.remove(msg.id);
         attachmentCache.remove(msg.id);
         embedCache.remove(msg.id);
         reactionCache.remove(msg.id);
@@ -1704,6 +1850,16 @@ void ChatModel::trimOldestMessagesIfNeeded()
         invalidateDocCacheForMessage(msg.id);
         unindexMessageEmojiUrls(msg.id);
         newMessageIds.remove(msg.id.get());
+    }
+    // Trim the nonce index: entries below `excess` vanish with their messages,
+    // entries at/above it shift up by `excess`.
+    for (auto it = nonceToRow.begin(); it != nonceToRow.end();) {
+        if (it.value() < excess)
+            it = nonceToRow.erase(it);
+        else {
+            it.value() -= excess;
+            ++it;
+        }
     }
     messages.remove(0, excess);
     messageRowIndexDirty = true;
@@ -1743,11 +1899,13 @@ void ChatModel::setActiveChannel(Snowflake channelId, Snowflake guildId)
     beginResetModel();
     messages.clear();
     sizeCache.clear();
+    localDateCache.clear();
     attachmentCache.clear();
     embedCache.clear();
     reactionCache.clear();
     pollCache.clear();
     docCache.clear();
+    textUrlSpans.clear();
     pendingNonces.clear();
     erroredNonces.clear();
     uploadProgress.clear();
@@ -1757,12 +1915,18 @@ void ChatModel::setActiveChannel(Snowflake channelId, Snowflake guildId)
     emojiUrlIndex.clear();
     emojiUrlsByMessage.clear();
     messageRowIndexDirty = true;
+    nonceToRow.clear();
     endResetModel();
 }
 
 void ChatModel::refreshUsersInView(const QList<Snowflake> &userIds)
 {
     bool refreshAll = userIds.isEmpty();
+
+    // O(1) membership instead of a linear scan per row (O(N·M) worst case).
+    QSet<Snowflake> userIdSet;
+    if (!refreshAll)
+        userIdSet = QSet<Snowflake>(userIds.cbegin(), userIds.cend());
 
     int firstRow = -1;
     int lastRow = -1;
@@ -1774,7 +1938,7 @@ void ChatModel::refreshUsersInView(const QList<Snowflake> &userIds)
 
         Snowflake authorId = msg.author->id.get();
 
-        if (refreshAll || userIds.contains(authorId)) {
+        if (refreshAll || userIdSet.contains(authorId)) {
             if (firstRow < 0)
                 firstRow = row;
             lastRow = row;
@@ -1828,6 +1992,7 @@ void ChatModel::invalidateDocCache()
 {
     docCache.clear();
     docCacheSubIds.clear();
+    textUrlSpans.clear();
 }
 
 void ChatModel::invalidateLayout()
@@ -1838,6 +2003,10 @@ void ChatModel::invalidateLayout()
 
 void ChatModel::invalidateDocCacheForMessage(Snowflake messageId)
 {
+    // URL spans are derived from the body doc's text, so they must follow the
+    // doc cache invalidation (checked even when no doc sub-ids are registered).
+    textUrlSpans.remove(messageId);
+
     auto it = docCacheSubIds.find(messageId);
     if (it == docCacheSubIds.end())
         return;

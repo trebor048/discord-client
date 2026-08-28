@@ -381,6 +381,12 @@ QRect dateSeparatorRectForRow(const QRect &rowRect);
 QString richTextStyleSheet();
 void setupDocument(QTextDocument &doc, const QString &htmlContent, const QFont &font,
                    int textWidth);
+
+/// Scans HTML for Discord CDN emoji <img> tags and registers the fetched
+/// pixmaps as document image resources (QTextDocument does not fetch them
+/// itself). Required before a doc is cached so cache hits render identically.
+void registerEmojiResources(QTextDocument &doc, const QString &html,
+                            Core::ImageManager *imageManager);
 QRectF charRectInDocument(const QTextDocument &doc, int charIndex);
 
 std::optional<HitRegion> hitTest(const ResolvedLayout &resolved, const QPoint &mousePos);

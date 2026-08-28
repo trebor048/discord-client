@@ -5,6 +5,33 @@
 namespace Acheron {
 namespace Core {
 
+namespace {
+
+// computeBasePermissions() over a prebuilt role map. computeChannelPermissions
+// builds the map once and reuses it here, avoiding a second O(N) copy per
+// permission computation.
+Discord::Permissions computeBasePermissionsWithMap(
+        Snowflake guildOwnerId, Snowflake userId, Snowflake guildId,
+        const QList<Snowflake> &memberRoleIds,
+        const QHash<Snowflake, Discord::Role> &roleMap)
+{
+    Discord::Permissions permissions = Discord::NO_PERMISSIONS;
+    if (auto everyoneRole = roleMap.value(guildId); everyoneRole.id.hasValue())
+        permissions = everyoneRole.permissions.get();
+
+    for (const auto &roleId : memberRoleIds) {
+        if (auto role = roleMap.value(roleId); role.id.hasValue())
+            permissions |= role.permissions.get();
+    }
+
+    if (permissions & Discord::Permission::ADMINISTRATOR)
+        return Discord::ALL_PERMISSIONS;
+
+    return permissions;
+}
+
+} // namespace
+
 QHash<Snowflake, Discord::Role> PermissionComputer::buildRoleMap(const QList<Discord::Role> &roles)
 {
     QHash<Snowflake, Discord::Role> roleMap;
@@ -23,19 +50,7 @@ Discord::Permissions PermissionComputer::computeBasePermissions(
 
     auto roleMap = buildRoleMap(allRoles);
 
-    Discord::Permissions permissions = Discord::NO_PERMISSIONS;
-    if (auto everyoneRole = roleMap.value(guildId); everyoneRole.id.hasValue())
-        permissions = everyoneRole.permissions.get();
-
-    for (const auto &roleId : memberRoleIds) {
-        if (auto role = roleMap.value(roleId); role.id.hasValue())
-            permissions |= role.permissions.get();
-    }
-
-    if (permissions & Discord::Permission::ADMINISTRATOR)
-        return Discord::ALL_PERMISSIONS;
-
-    return permissions;
+    return computeBasePermissionsWithMap(guildOwnerId, userId, guildId, memberRoleIds, roleMap);
 }
 
 Discord::Permissions PermissionComputer::computeOverwrites(
@@ -109,7 +124,13 @@ Discord::Permissions PermissionComputer::computeChannelPermissions(
     if (guildOwnerId == userId)
         return Discord::ALL_PERMISSIONS;
 
-    auto basePerms = computeBasePermissions(guildOwnerId, userId, guildId, memberRoleIds, allRoles);
+    // Build the role map once and reuse it for the base-permission pass and the
+    // position lookup below (the old code rebuilt the map inside
+    // computeBasePermissions and scanned all roles per comparator call).
+    auto roleMap = buildRoleMap(allRoles);
+
+    auto basePerms = computeBasePermissionsWithMap(guildOwnerId, userId, guildId, memberRoleIds,
+                                                   roleMap);
 
     if (basePerms & Discord::Permission::ADMINISTRATOR)
         return Discord::ALL_PERMISSIONS;
@@ -118,17 +139,16 @@ Discord::Permissions PermissionComputer::computeChannelPermissions(
     // highest-position role is applied last and therefore takes precedence.
     // Sort the member's roles so conflicting role overwrites resolve like
     // Discord does instead of in arbitrary array order.
+    QHash<Snowflake, int> rolePositions;
+    rolePositions.reserve(roleMap.size());
+    for (auto it = roleMap.constBegin(); it != roleMap.constEnd(); ++it)
+        rolePositions.insert(it.key(), it.value().position.get());
+
     QList<Snowflake> orderedRoles = memberRoleIds;
     std::sort(orderedRoles.begin(), orderedRoles.end(),
-              [&allRoles](const Snowflake &a, const Snowflake &b) {
-                  int posA = 0;
-                  int posB = 0;
-                  for (const auto &r : allRoles) {
-                      if (r.id.get() == a)
-                          posA = r.position.get();
-                      if (r.id.get() == b)
-                          posB = r.position.get();
-                  }
+              [&rolePositions](const Snowflake &a, const Snowflake &b) {
+                  const int posA = rolePositions.value(a, 0);
+                  const int posB = rolePositions.value(b, 0);
                   if (posA != posB)
                       return posA < posB;
                   return a < b; // stable tie-break

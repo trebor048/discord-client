@@ -19,7 +19,7 @@ constexpr int maxMessagesPerChannel = 500;
 } // namespace
 
 MessageRepository::MessageRepository(Core::Snowflake accountId)
-    : BaseRepository(DatabaseManager::getCacheConnectionName(accountId)), userRepository(accountId)
+    : BaseRepository(DatabaseManager::getCacheConnectionName(accountId))
 {
 }
 
@@ -60,6 +60,20 @@ void MessageRepository::saveMessages(const QList<Discord::Message> &messages, QS
         VALUES (:id, :message_id, :filename, :content_type, :size, :url, :proxy_url, :width, :height)
     )");
 
+    // Prepare the user upsert once and rebind per message instead of
+    // re-preparing an INSERT per author (see UserRepository::saveUser).
+    QSqlQuery qUser(db);
+    qUser.prepare(R"(
+        INSERT INTO users
+        (id, username, global_name, avatar, bot)
+        VALUES (:id, :username, :global_name, :avatar, :bot)
+        ON CONFLICT(id) DO UPDATE SET
+            username = excluded.username,
+            global_name = excluded.global_name,
+            avatar = excluded.avatar,
+            bot = excluded.bot
+    )");
+
     // Collect referenced messages to save as their own rows
     QList<Discord::Message> referencedMessages;
     QSet<qint64> touchedChannels;
@@ -94,7 +108,13 @@ void MessageRepository::saveMessages(const QList<Discord::Message> &messages, QS
 
         touchedChannels.insert(static_cast<qint64>(message.channelId.get()));
 
-        if (!userRepository.saveUser(message.author.get(), db))
+        qUser.bindValue(":id", static_cast<qint64>(message.author->id.get()));
+        qUser.bindValue(":username", message.author->username);
+        bindOptional(qUser, ":global_name", message.author->globalName);
+        bindOptional(qUser, ":avatar", message.author->avatar);
+        bindOptional(qUser, ":bot", message.author->bot);
+
+        if (!execLogged(qUser, "MessageRepository: Save user"))
             goto rollback;
 
         if (message.attachments.hasValue()) {
@@ -139,7 +159,13 @@ void MessageRepository::saveMessages(const QList<Discord::Message> &messages, QS
             if (!execLogged(qRef, "MessageRepository: Save referenced message"))
                 goto rollback;
 
-            if (!userRepository.saveUser(ref.author.get(), db))
+            qUser.bindValue(":id", static_cast<qint64>(ref.author->id.get()));
+            qUser.bindValue(":username", ref.author->username);
+            bindOptional(qUser, ":global_name", ref.author->globalName);
+            bindOptional(qUser, ":avatar", ref.author->avatar);
+            bindOptional(qUser, ":bot", ref.author->bot);
+
+            if (!execLogged(qUser, "MessageRepository: Save user"))
                 goto rollback;
         }
     }
@@ -186,6 +212,36 @@ void MessageRepository::markMessageDeleted(Core::Snowflake messageId)
     q.bindValue(":id", static_cast<qint64>(messageId));
 
     execLogged(q, "MessageRepository: Mark message deleted");
+}
+
+void MessageRepository::markMessagesDeleted(const QList<Core::Snowflake> &messageIds)
+{
+    if (messageIds.isEmpty())
+        return;
+
+    auto db = getDb();
+    QSqlQuery q(db);
+
+    // SQLite limits the number of bind variables per statement, so chunk the
+    // ids and run one parameterised UPDATE per chunk (same dynamic-IN style
+    // as loadAttachmentsForMessages).
+    constexpr int chunkSize = 500;
+    for (int offset = 0; offset < messageIds.size(); offset += chunkSize) {
+        const int count = qMin(chunkSize, static_cast<int>(messageIds.size() - offset));
+
+        QStringList placeholders;
+        placeholders.reserve(count);
+        for (int i = 0; i < count; ++i)
+            placeholders.append(QStringLiteral("?"));
+
+        q.prepare(QStringLiteral("UPDATE messages SET deleted = 1 WHERE id IN (%1)")
+                      .arg(placeholders.join(QStringLiteral(", "))));
+
+        for (int i = 0; i < count; ++i)
+            q.bindValue(i, static_cast<qint64>(messageIds[offset + i].get()));
+
+        execLogged(q, "MessageRepository: Mark messages deleted");
+    }
 }
 
 void MessageRepository::updateMessageContent(const Discord::Message &message)

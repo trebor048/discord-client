@@ -43,6 +43,14 @@
 #include "Discord/Events.hpp"
 #include "Splitter.hpp"
 #include "TypingIndicator.hpp"
+#include "Widgets/CustomTitleBar.hpp"
+
+#if defined(Q_OS_WIN)
+#include <windows.h>
+#include <windowsx.h>
+#include <QLibrary>
+#include <QWindow>
+#endif
 #include "SlowModeIndicator.hpp"
 #include "ConnectionBanner.hpp"
 #include "BrowserCaptchaResolver.hpp"
@@ -138,6 +146,7 @@ MainWindow::MainWindow(Session *session, QWidget *parent) : QMainWindow(parent),
 
     setupUi();
     setupMenu();
+    setWindowTitle(QStringLiteral("Acheron"));
 
     installEventFilter(this);
 
@@ -211,6 +220,142 @@ MainWindow::MainWindow(Session *session, QWidget *parent) : QMainWindow(parent),
     // was only ever applied when the user toggled it in settings, so a
     // previously-enabled slide-out was silently ignored until re-toggled.
     switchMemberListMode(Core::Appearance::AppearanceConfig::instance().memberListMode());
+
+    // The custom frameless chrome is applied before first show; the setting
+    // toggle re-applies it live via the configChanged handler.
+    applyCustomChrome();
+}
+
+void MainWindow::applyCustomChrome()
+{
+    const bool on = Core::Appearance::AppearanceConfig::instance().customTitleBar();
+    if (titleBar)
+        titleBar->setVisible(on);
+
+    const Qt::WindowFlags flags = windowFlags();
+    const Qt::WindowFlags target =
+            on ? (flags | Qt::FramelessWindowHint) : (flags & ~Qt::FramelessWindowHint);
+    if (flags != target) {
+        const bool wasVisible = isVisible();
+        setWindowFlags(target);
+        // Changing flags on a live window requires a re-show; at construction
+        // time (not yet visible) this stays a no-op.
+        if (wasVisible)
+            show();
+    }
+
+#if defined(Q_OS_WIN)
+    applyWindowCorners();
+#endif
+}
+
+#if defined(Q_OS_WIN)
+void MainWindow::applyWindowCorners() const
+{
+    // Win11 DWM rounded corners (DWMWA_WINDOW_CORNER_PREFERENCE). Resolved
+    // dynamically so the build does not need a hard dwmapi link.
+    if (!isVisible() || !windowHandle())
+        return;
+    static auto fn = []() -> HRESULT(WINAPI *)(HWND, DWORD, LPCVOID, DWORD) {
+        QLibrary dwm(QStringLiteral("dwmapi"));
+        return reinterpret_cast<HRESULT(WINAPI *)(HWND, DWORD, LPCVOID, DWORD)>(
+                dwm.resolve("DwmSetWindowAttribute"));
+    }();
+    if (!fn)
+        return;
+
+    const DWORD preference =
+            isMaximized() || isFullScreen() ? 1 /* DWMWCP_DONOTROUND */ : 2 /* DWMWCP_ROUND */;
+    fn(reinterpret_cast<HWND>(windowHandle()->winId()),
+       33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &preference, sizeof(preference));
+}
+
+bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr *result)
+{
+    Q_UNUSED(eventType);
+    if (!titleBar || !titleBar->isVisible())
+        return QMainWindow::nativeEvent(eventType, message, result);
+
+    MSG *msg = static_cast<MSG *>(message);
+    switch (msg->message) {
+    case WM_NCHITTEST: {
+        // lParam carries the screen-space cursor position.
+        const int sx = GET_X_LPARAM(msg->lParam);
+        const int sy = GET_Y_LPARAM(msg->lParam);
+
+        // Edge resize handles (Windows convention: the very edge wins over the
+        // caption, so the top strip of the titlebar still resizes).
+        if (!isMaximized() && !isFullScreen()) {
+            const QRect w = geometry();
+            constexpr int border = 8;
+            int edge = 0;
+            if (sx >= w.left() && sx < w.left() + border)
+                edge |= 1; // left
+            if (sx <= w.right() && sx > w.right() - border)
+                edge |= 2; // right
+            if (sy >= w.top() && sy < w.top() + border)
+                edge |= 4; // top
+            if (sy <= w.bottom() && sy > w.bottom() - border)
+                edge |= 8; // bottom
+            if (edge) {
+                switch (edge) {
+                case 1: *result = HTLEFT; break;
+                case 2: *result = HTRIGHT; break;
+                case 4: *result = HTTOP; break;
+                case 5: *result = HTTOPLEFT; break;
+                case 6: *result = HTTOPRIGHT; break;
+                case 8: *result = HTBOTTOM; break;
+                case 9: *result = HTBOTTOMLEFT; break;
+                case 10: *result = HTBOTTOMRIGHT; break;
+                default: *result = HTCLIENT; break;
+                }
+                return true;
+            }
+        }
+
+        // The titlebar: buttons get normal client events (they handle their
+        // own clicks); anywhere else returns HTCAPTION so the OS drives
+        // dragging, double-click maximize and the system menu.
+        const QPoint titleLocal = titleBar->mapFromGlobal(QPoint(sx, sy));
+        if (titleBar->rect().contains(titleLocal)) {
+            *result = titleBar->buttonAt(titleLocal) == CustomTitleBar::Button::None
+                              ? HTCAPTION
+                              : HTCLIENT;
+            return true;
+        }
+        break;
+    }
+    case WM_GETMINMAXINFO: {
+        // A frameless maximized window would otherwise cover the taskbar;
+        // clamp to the work area of the monitor the window is on.
+        MINMAXINFO *mmi = reinterpret_cast<MINMAXINFO *>(msg->lParam);
+        const HWND hwnd = reinterpret_cast<HWND>(windowHandle()->winId());
+        const HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi;
+        mi.cbSize = sizeof(mi);
+        if (GetMonitorInfoW(monitor, &mi)) {
+            const RECT wa = mi.rcWork;
+            mmi->ptMaxPosition = { wa.left, wa.top };
+            mmi->ptMaxSize = { wa.right - wa.left, wa.bottom - wa.top };
+            mmi->ptMaxTrackSize = { wa.right - wa.left, wa.bottom - wa.top };
+        }
+        return true;
+    }
+    default:
+        break;
+    }
+    return QMainWindow::nativeEvent(eventType, message, result);
+}
+#endif
+
+void MainWindow::changeEvent(QEvent *event)
+{
+    QMainWindow::changeEvent(event);
+    if (event->type() == QEvent::WindowStateChange) {
+#if defined(Q_OS_WIN)
+        applyWindowCorners();
+#endif
+    }
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)
@@ -491,7 +636,7 @@ void MainWindow::switchMemberListMode(Core::Appearance::MemberListMode mode)
         memberListView->setMaximumWidth(QWIDGETSIZE_MAX);
         const bool wasVisible = memberListView->isVisible();
 
-        memberListOverlay = new MemberListOverlay(memberListView, centralWidget());
+        memberListOverlay = new MemberListOverlay(memberListView, contentHost);
         memberListOverlay->setVisible(wasVisible);
         memberListOverlay->raise();
         memberListView->setVisible(true);
@@ -867,7 +1012,23 @@ void MainWindow::setupPermanentConnections(Core::ClientInstance *instance)
 void MainWindow::setupUi()
 {
     auto *central = new QWidget(this);
-    auto *layout = new QHBoxLayout(central);
+    auto *outerLayout = new QVBoxLayout(central);
+    outerLayout->setContentsMargins(0, 0, 0, 0);
+    outerLayout->setSpacing(0);
+
+    // Custom macOS-style title bar (visible only when the appearance setting
+    // enables the frameless window treatment).
+    titleBar = new CustomTitleBar(central);
+    outerLayout->addWidget(titleBar);
+
+    // The overlay member list floats over the content area only, so it is
+    // parented to this host (below the titlebar) rather than the central
+    // widget.
+    contentHost = new QWidget(central);
+    outerLayout->addWidget(contentHost, 1);
+    auto *layout = new QHBoxLayout(contentHost);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
 
     channelTree = new ChannelTreeView(this);
 
@@ -1204,6 +1365,7 @@ void MainWindow::setupUi()
 
     connect(&Core::Appearance::AppearanceConfig::instance(),
             &Core::Appearance::AppearanceConfig::configChanged, this, [this]() {
+                applyCustomChrome();
                 memberListView->doItemsLayout();
                 memberListView->viewport()->update();
                 if (serverRail) {

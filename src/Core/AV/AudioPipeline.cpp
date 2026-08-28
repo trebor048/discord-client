@@ -19,6 +19,12 @@ namespace Acheron {
 namespace Core {
 namespace AV {
 
+// Defined in MiniaudioAudioBackend.cpp. Drains complete capture frames out of
+// the backend's capture ring buffer; the mix tick runs this on the voice
+// thread so the device callback stays allocation-free. Returns an empty list
+// for non-miniaudio backends or when nothing is buffered.
+QList<QByteArray> drainCaptureFrames(IAudioBackend *backend);
+
 AudioPipeline::AudioPipeline(QObject *parent)
     : QObject(parent)
 {
@@ -34,6 +40,10 @@ void AudioPipeline::start(IAudioBackend *backend, bool capturing)
         return;
 
     audioBackend = backend;
+    // Kept for interface compatibility: MiniaudioAudioBackend no longer emits
+    // audioCaptured — capture frames are drained from the mix tick instead
+    // (drainCapturedAudio). If a future backend emits again, the queued
+    // connection still delivers them through onAudioCaptured.
     connect(audioBackend, &IAudioBackend::audioCaptured, this, &AudioPipeline::onAudioCaptured, Qt::QueuedConnection);
 
     initializeEncoder();
@@ -339,6 +349,23 @@ void AudioPipeline::setPushToTalkKeyHeld(bool held)
 
 void AudioPipeline::onAudioCaptured(const QByteArray &pcmData)
 {
+    // Interface-compatibility entry point: MiniaudioAudioBackend no longer
+    // emits, but any backend that does still lands here.
+    processCapturedFrame(pcmData);
+}
+
+void AudioPipeline::drainCapturedAudio()
+{
+    if (!audioBackend)
+        return;
+
+    const QList<QByteArray> frames = drainCaptureFrames(audioBackend);
+    for (const QByteArray &frame : frames)
+        processCapturedFrame(frame);
+}
+
+void AudioPipeline::processCapturedFrame(const QByteArray &pcmData)
+{
     if (!encoder)
         return;
 
@@ -403,6 +430,12 @@ void AudioPipeline::onAudioCaptured(const QByteArray &pcmData)
 
 void AudioPipeline::onMixTick()
 {
+    // Drain captured audio first: the recorder runs independently of the
+    // playback/deafen state (previously, queued audioCaptured events were
+    // processed regardless of it). Draining here keeps the device callback
+    // free of allocations, event posting and mutex traffic.
+    drainCapturedAudio();
+
     if (deafened || !audioBackend)
         return;
 

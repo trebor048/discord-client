@@ -50,7 +50,10 @@ Core::AccountInfo AccountRepository::getAccount(quint64 id)
 
     QSqlQuery query(db);
 
-    query.prepare("SELECT * FROM accounts WHERE id = :id");
+    query.prepare(R"(
+        SELECT id, username, display_name, avatar, gateway_url, rest_url, cdn_url, display_order, auto_connect
+        FROM accounts WHERE id = :id
+    )");
 
     query.bindValue(":id", static_cast<qint64>(id));
 
@@ -66,15 +69,15 @@ Core::AccountInfo AccountRepository::getAccount(quint64 id)
 
     Core::AccountInfo acc;
 
-    acc.id = static_cast<Core::Snowflake>(query.value("id").toLongLong());
-    acc.username = query.value("username").toString();
-    acc.displayName = query.value("display_name").toString();
-    acc.avatar = query.value("avatar").toString();
-    acc.gatewayUrl = query.value("gateway_url").toString();
-    acc.restUrl = query.value("rest_url").toString();
-    acc.cdnUrl = query.value("cdn_url").toString();
-    acc.displayOrder = query.value("display_order").toInt();
-    acc.autoConnect = query.value("auto_connect").toBool();
+    acc.id = static_cast<Core::Snowflake>(query.value(0).toLongLong());
+    acc.username = query.value(1).toString();
+    acc.displayName = query.value(2).toString();
+    acc.avatar = query.value(3).toString();
+    acc.gatewayUrl = query.value(4).toString();
+    acc.restUrl = query.value(5).toString();
+    acc.cdnUrl = query.value(6).toString();
+    acc.displayOrder = query.value(7).toInt();
+    acc.autoConnect = query.value(8).toBool();
 
     return acc;
 }
@@ -87,21 +90,24 @@ QVector<Core::AccountInfo> AccountRepository::getAllAccounts()
     if (!db.isOpen())
         return results;
 
-    QSqlQuery query("SELECT * FROM accounts ORDER BY display_order ASC", db);
+    QSqlQuery query(R"(
+        SELECT id, username, display_name, avatar, gateway_url, rest_url, cdn_url, display_order, auto_connect
+        FROM accounts ORDER BY display_order ASC
+    )", db);
 
     while (query.next()) {
         Core::AccountInfo acc;
 
-        acc.id = static_cast<quint64>(query.value("id").toLongLong());
+        acc.id = static_cast<quint64>(query.value(0).toLongLong());
 
-        acc.username = query.value("username").toString();
-        acc.displayName = query.value("display_name").toString();
-        acc.avatar = query.value("avatar").toString();
-        acc.gatewayUrl = query.value("gateway_url").toString();
-        acc.restUrl = query.value("rest_url").toString();
-        acc.cdnUrl = query.value("cdn_url").toString();
-        acc.displayOrder = query.value("display_order").toInt();
-        acc.autoConnect = query.value("auto_connect").toBool();
+        acc.username = query.value(1).toString();
+        acc.displayName = query.value(2).toString();
+        acc.avatar = query.value(3).toString();
+        acc.gatewayUrl = query.value(4).toString();
+        acc.restUrl = query.value(5).toString();
+        acc.cdnUrl = query.value(6).toString();
+        acc.displayOrder = query.value(7).toInt();
+        acc.autoConnect = query.value(8).toBool();
 
         acc.state = Core::ConnectionState::Disconnected;
 

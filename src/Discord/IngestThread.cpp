@@ -130,25 +130,42 @@ void IngestThread::threadLoop()
         // as it becomes complete, then inflate each complete segment alone.
         pendingInput.append(data);
 
-        const QByteArray delimiter("\x00\x00\xff\xff", 4);
-        int delimIndex = pendingInput.indexOf(delimiter);
+        static const QByteArray delimiter("\x00\x00\xff\xff", 4);
+
+        // Scan with a moving cursor instead of remove(0, k) per payload (which
+        // memmoved the remaining buffer on every payload) and inflate straight
+        // from pendingInput's buffer; the consumed prefix is stripped once per
+        // batch below. The marker lives in the COMPRESSED stream — inflate()
+        // consumes it as an empty stored block without emitting output — so
+        // each segment passed to inflate ends exactly at the marker, exactly
+        // as before.
+        int cursor = 0;
+        int delimIndex = pendingInput.indexOf(delimiter, cursor);
         while (delimIndex != -1) {
             // Everything up to and including the marker is exactly one payload.
-            QByteArray segment = pendingInput.left(delimIndex + delimiter.size());
-            pendingInput.remove(0, delimIndex + delimiter.size());
+            const int segmentEnd = delimIndex + delimiter.size();
+            const char *segmentStart = pendingInput.constData() + cursor;
+            int segmentSize = segmentEnd - cursor;
 
             std::array<char, 32768> out;
             QByteArray decompressed;
+            // Small payloads (the common case) skip most reallocations; large
+            // ones just keep growing past the reservation.
+            decompressed.reserve(qMin(segmentSize, 8192));
 
             int ret = Z_OK;
             do {
-                stream.next_in = reinterpret_cast<Bytef *>(segment.data());
-                stream.avail_in = static_cast<uInt>(segment.size());
+                stream.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(segmentStart));
+                stream.avail_in = static_cast<uInt>(segmentSize);
                 stream.avail_out = sizeof(out);
                 stream.next_out = reinterpret_cast<Bytef *>(out.data());
 
                 ret = inflate(&stream, Z_SYNC_FLUSH);
-                segment.remove(0, segment.size() - stream.avail_in);
+                // Advance past the input consumed this call. zlib never writes
+                // through next_in, so the read-only pendingInput buffer is safe.
+                const int consumed = segmentSize - static_cast<int>(stream.avail_in);
+                segmentStart += consumed;
+                segmentSize = static_cast<int>(stream.avail_in);
 
                 if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR) {
                     qCWarning(LogNetwork) << "inflate failed:" << ret;
@@ -169,7 +186,19 @@ void IngestThread::threadLoop()
             if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR)
                 break; // stream was reset; stop processing this batch
 
-            if (!decompressed.trimmed().isEmpty()) {
+            cursor = segmentEnd;
+
+            // trimmed() would allocate a full copy just to test emptiness —
+            // scan in place instead. Whitespace-only payloads are still
+            // skipped (QChar::isSpace covers the ASCII whitespace set).
+            bool hasContent = false;
+            for (int i = 0; i < decompressed.size(); ++i) {
+                if (!QChar(static_cast<uchar>(decompressed.at(i))).isSpace()) {
+                    hasContent = true;
+                    break;
+                }
+            }
+            if (hasContent) {
                 QJsonParseError error;
                 QJsonDocument doc = QJsonDocument::fromJson(decompressed, &error);
                 if (error.error != QJsonParseError::NoError) {
@@ -181,8 +210,12 @@ void IngestThread::threadLoop()
                 }
             }
 
-            delimIndex = pendingInput.indexOf(delimiter);
+            delimIndex = pendingInput.indexOf(delimiter, cursor);
         }
+
+        // Strip the consumed prefix in one pass instead of per payload.
+        if (cursor > 0)
+            pendingInput.remove(0, cursor);
 
         // Guard against a runaway buffer if the marker never arrives (stream
         // corrupted or connection died mid-payload).

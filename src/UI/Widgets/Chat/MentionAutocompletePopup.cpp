@@ -62,6 +62,22 @@ void MentionAutocompletePopup::showEvent(QShowEvent *event)
 void MentionAutocompletePopup::setItems(const QList<MentionItem> &items)
 {
     items_ = items;
+    // Fold every name once here (the invalidation point) and pre-split by
+    // trigger kind; the per-keystroke matching pass then reuses both.
+    channelItems_.clear();
+    userRoleItems_.clear();
+    channelItems_.reserve(items_.size());
+    userRoleItems_.reserve(items_.size());
+    for (const auto &item : items_) {
+        if (item.name.isEmpty())
+            continue;
+        MentionItem folded = item;
+        folded.foldedName = item.name.toCaseFolded();
+        if (item.kind == MentionItem::Kind::Channel)
+            channelItems_.append(folded);
+        else
+            userRoleItems_.append(folded);
+    }
 }
 
 QString MentionAutocompletePopup::kindPrefix(MentionItem::Kind kind)
@@ -123,7 +139,7 @@ int MentionAutocompletePopup::fuzzyScore(const QString &lowercaseName, const QSt
 }
 
 QList<MentionAutocompletePopup::MatchResult>
-MentionAutocompletePopup::computeMatches(const QString &prefix) const
+MentionAutocompletePopup::computeMatches(const QString &prefix, MentionItem::Kind kind) const
 {
     const QString needle = prefix.trimmed().toCaseFolded();
     QList<MatchResult> results;
@@ -131,13 +147,14 @@ MentionAutocompletePopup::computeMatches(const QString &prefix) const
 
     const QChar firstNeedleChar = needle.isEmpty() ? QChar() : needle.front();
 
-    for (const auto &item : items_) {
-        if (item.name.isEmpty())
+    // Names are pre-folded in setItems(); only the needle is folded per query.
+    const QList<MentionItem> &source =
+            kind == MentionItem::Kind::Channel ? channelItems_ : userRoleItems_;
+
+    for (const auto &item : source) {
+        if (!firstNeedleChar.isNull() && !item.foldedName.contains(firstNeedleChar))
             continue;
-        const QString name = item.name.toCaseFolded();
-        if (!firstNeedleChar.isNull() && !name.contains(firstNeedleChar))
-            continue;
-        const int score = fuzzyScore(name, needle);
+        const int score = fuzzyScore(item.foldedName, needle);
         if (score >= 0)
             results.append({ item, score });
     }
@@ -145,7 +162,7 @@ MentionAutocompletePopup::computeMatches(const QString &prefix) const
     std::sort(results.begin(), results.end(), [](const MatchResult &a, const MatchResult &b) {
         if (a.score != b.score)
             return a.score > b.score;
-        return a.item.name.toCaseFolded() < b.item.name.toCaseFolded();
+        return a.item.foldedName < b.item.foldedName;
     });
 
     if (results.size() > kMaxResults)
@@ -174,10 +191,10 @@ void MentionAutocompletePopup::populateList(const QList<MatchResult> &matches)
                                             .arg(matches.size() == 1 ? QStringLiteral("") : QStringLiteral("es")));
 }
 
-void MentionAutocompletePopup::setQuery(const QString &prefix)
+void MentionAutocompletePopup::setQuery(const QString &prefix, MentionItem::Kind kind)
 {
     // Allow an empty prefix (a bare '@'/'#') so the full mentionable list shows.
-    const auto matches = computeMatches(prefix);
+    const auto matches = computeMatches(prefix, kind);
     if (matches.isEmpty()) {
         populateList({});
         hide();

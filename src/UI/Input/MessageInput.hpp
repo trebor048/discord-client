@@ -174,23 +174,25 @@ private:
 
     void adjustHeight();
     void updateEmojiCompleter();
-    void updateEmojiPopup();
+    void updateEmojiPopup(const QString &text);
     void insertEmojiCompletion(const Core::EmojiCatalogItem &item);
     void showEmojiPopup();
     void hideEmojiPopup();
     [[nodiscard]] QString currentEmojiPrefix(int *startPosition = nullptr) const;
-    void updateSlashPopup();
+    [[nodiscard]] QString currentEmojiPrefix(const QString &text, int *startPosition) const;
+    void updateSlashPopup(const QString &text);
     void insertSlashCompletion(const Discord::ApplicationCommand &command);
     void insertSlashArgument(const QString &text);
     bool tryParseSlashCommand(const QString &text, Discord::ApplicationCommand *command,
                               QList<Discord::InteractionOptionValue> *options) const;
     void showSlashPopup();
     void hideSlashPopup();
-    void updateMentionPopup();
+    void updateMentionPopup(const QString &text);
     void insertMentionCompletion(const MentionItem &item);
     void showMentionPopup();
     void hideMentionPopup();
     [[nodiscard]] QString currentMentionPrefix(int *startPosition = nullptr, QChar *trigger = nullptr) const;
+    [[nodiscard]] QString currentMentionPrefix(const QString &text, int *startPosition, QChar *trigger) const;
     void updateMarkdownPreview();
     void renderMarkdownPreview();
     void setMarkdownPreviewVisible(bool visible);

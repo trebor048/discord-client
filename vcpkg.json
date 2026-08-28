@@ -6,10 +6,10 @@
       "name": "openssl",
       "version>=": "3.0.7"
     },
-    "mlspp",
     {
       "name": "curl",
-      "features": ["websockets"]
+      "features": ["websockets"],
+      "platform": "!windows"
     },
     "libsodium",
     "nlohmann-json",

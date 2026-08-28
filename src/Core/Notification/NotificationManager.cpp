@@ -438,12 +438,15 @@ void NotificationManager::showNotification(const Notification::ToastNotification
     toastData.coloredAccents = m_settings.coloredAccents;
 
     // Play sound (only if notification sounds are enabled)
+    // Read the streamer-mute and sound toggles from a single QSettings instance
+    // instead of constructing one per lookup.
+    const QSettings settings;
     const bool muteDuringStreamerMode =
-            QSettings().value("streamer/mute_sounds", true).toBool()
+            settings.value("streamer/mute_sounds", true).toBool()
             && (m_streamerModeEnabled || m_isStreaming);
     const bool dndMute = isOwnPresenceDnd();
     if (!dndMute && !muteDuringStreamerMode &&
-        QSettings().value("notifications/sounds", true).toBool() &&
+        settings.value("notifications/sounds", true).toBool() &&
         shouldPlaySoundForType(data)) {
         QString soundId = selectSoundForNotification(data);
         if (!soundId.isEmpty()) {
@@ -662,9 +665,6 @@ void NotificationManager::setActiveChannel(Core::Snowflake channelId)
 
 void NotificationManager::onMessageCreated(const Discord::Message &message)
 {
-    qCInfo(LogCore) << "notification: message received" << message.id.get().toString()
-                    << "channel" << message.channelId.get().toString();
-
     if (!m_instance || !m_instance->discord()) return;
 
     if (!message.author.hasValue()) return;
@@ -682,6 +682,11 @@ void NotificationManager::onMessageCreated(const Discord::Message &message)
     // channel DB lookup: the active channel is the most common case, and each
     // lookup otherwise runs two SELECTs on the UI thread per incoming message.
     if (channelId == m_activeChannelId) return;
+
+    // Log only once the per-message early-outs above are passed (the active
+    // channel is the common case), instead of logging every incoming message.
+    qCInfo(LogCore) << "notification: message received" << message.id.get().toString()
+                    << "channel" << channelId.toString();
 
     // Get channel
     auto channel = m_instance->getChannel(channelId);

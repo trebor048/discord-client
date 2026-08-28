@@ -15,6 +15,9 @@ namespace Core {
 namespace AV {
 
 static constexpr ma_uint32 PLAYBACK_RB_FRAMES = AUDIO_FRAME_SAMPLES * 8;
+// 8 frames of slack absorbs event-loop jitter between the device callback
+// (producer) and the mix-tick drain (consumer) without dropping audio.
+static constexpr ma_uint32 CAPTURE_RB_FRAMES = AUDIO_FRAME_SAMPLES * 8;
 
 struct MiniaudioState
 {
@@ -23,12 +26,27 @@ struct MiniaudioState
     ma_device captureDevice = {};
     ma_device playbackDevice = {};
     ma_pcm_rb playbackRB = {};
+    ma_pcm_rb captureRB = {};
     bool logInit = false;
     bool contextInit = false;
     bool captureDeviceInit = false;
     bool playbackDeviceInit = false;
     bool playbackRBInit = false;
+    bool captureRBInit = false;
 };
+
+namespace {
+
+// The capture ring buffer lives in MiniaudioState (private to this TU), but
+// AudioPipeline drains it from the mix tick. MiniaudioAudioBackend.hpp has no
+// pull API, so the pipeline reaches it through the free function below, which
+// reads these file-scope handles. Only one backend instance exists in the app
+// (VoiceManager owns the single IAudioBackend::create() instance); the owner
+// check keeps a stale or foreign backend from being drained.
+MiniaudioAudioBackend *sCaptureOwner = nullptr;
+ma_pcm_rb *sCaptureRB = nullptr;
+
+} // namespace
 
 void OnCapture(ma_device *pDevice, void *, const void *pInput, ma_uint32 frameCount)
 {
@@ -126,12 +144,28 @@ MiniaudioAudioBackend::MiniaudioAudioBackend(QObject *parent)
         qCWarning(LogVoice) << "Failed to init playback ring buffer";
     else
         ma->playbackRBInit = true;
+
+    if (ma_pcm_rb_init(ma_format_s16, AUDIO_CHANNELS, CAPTURE_RB_FRAMES, NULL, NULL, &ma->captureRB) != MA_SUCCESS) {
+        qCWarning(LogVoice) << "Failed to init capture ring buffer";
+    } else {
+        ma->captureRBInit = true;
+        sCaptureRB = &ma->captureRB;
+        sCaptureOwner = this;
+    }
 }
 
 MiniaudioAudioBackend::~MiniaudioAudioBackend()
 {
     stopCapture();
     stopPlayback();
+
+    if (sCaptureOwner == this) {
+        sCaptureOwner = nullptr;
+        sCaptureRB = nullptr;
+    }
+
+    if (ma->captureRBInit)
+        ma_pcm_rb_uninit(&ma->captureRB);
 
     if (ma->playbackRBInit)
         ma_pcm_rb_uninit(&ma->playbackRB);
@@ -211,7 +245,8 @@ bool MiniaudioAudioBackend::startCapture()
         return false;
     }
 
-    captureBuffer.clear();
+    if (ma->captureRBInit)
+        ma_pcm_rb_reset(&ma->captureRB);
 
     if (ma_device_start(&ma->captureDevice) != MA_SUCCESS) {
         qCWarning(LogVoice) << "Failed to start miniaudio capture device";
@@ -233,7 +268,10 @@ void MiniaudioAudioBackend::stopCapture()
     // ma_device_uninit stops the device and waits for callbacks to finish
     ma_device_uninit(&ma->captureDevice);
     ma->captureDeviceInit = false;
-    captureBuffer.clear();
+    // Discard anything the callback left in the ring buffer so a later
+    // startCapture() session begins from silence.
+    if (ma->captureRBInit)
+        ma_pcm_rb_reset(&ma->captureRB);
 
     qCInfo(LogVoice) << "Miniaudio capture stopped";
 }
@@ -340,36 +378,40 @@ bool MiniaudioAudioBackend::pushPlaybackFrame(const int16_t *frame)
 
 void MiniaudioAudioBackend::handleCapturedFrames(const void *input, unsigned int frameCount)
 {
-    if (!input)
+    if (!input || !ma->captureRBInit)
         return;
 
-    int bytes = static_cast<int>(frameCount) * AUDIO_CHANNELS * AUDIO_SAMPLE_BYTES;
-    captureBuffer.append(static_cast<const char *>(input), bytes);
-
-    // Drop excess data to prevent falling behind
-    if (captureBuffer.size() > AUDIO_FRAME_SIZE * 2) {
-        int keep = captureBuffer.size() % AUDIO_FRAME_SIZE + AUDIO_FRAME_SIZE;
-        captureBuffer.remove(0, captureBuffer.size() - keep);
-    }
-
-    float gain = inputGain.load(std::memory_order_relaxed);
-
-    while (captureBuffer.size() >= AUDIO_FRAME_SIZE) {
-        QByteArray frame = captureBuffer.left(AUDIO_FRAME_SIZE);
-        captureBuffer.remove(0, AUDIO_FRAME_SIZE);
-
-        if (gain != 1.0f) {
-            auto *samples = reinterpret_cast<int16_t *>(frame.data());
-            int count = frame.size() / static_cast<int>(sizeof(int16_t));
-            for (int i = 0; i < count; i++) {
-                int32_t val = static_cast<int32_t>(std::lround(samples[i] * gain));
-                samples[i] = static_cast<int16_t>(std::clamp(val,
-                                                             static_cast<int32_t>(INT16_MIN),
-                                                             static_cast<int32_t>(INT16_MAX)));
+    // Write the device callback's samples straight into the capture ring
+    // buffer: no heap allocation, no memmove, no queued-signal emit on the
+    // audio thread. AudioPipeline's mix tick drains complete frames on the
+    // voice thread. Gain is applied here so the drain is a plain copy.
+    const float gain = inputGain.load(std::memory_order_relaxed);
+    const auto *src = static_cast<const int16_t *>(input);
+    ma_uint32 written = 0;
+    while (written < frameCount) {
+        ma_uint32 toWrite = frameCount - written;
+        void *writePtr = nullptr;
+        if (ma_pcm_rb_acquire_write(&ma->captureRB, &toWrite, &writePtr) != MA_SUCCESS || toWrite == 0) {
+            // Ring buffer full: the consumer fell behind and will discard the
+            // stale tail at the next drain; drop the rest of this callback.
+            return;
+        }
+        auto *dst = static_cast<int16_t *>(writePtr);
+        const ma_uint32 sampleCount = toWrite * AUDIO_CHANNELS;
+        if (gain == 1.0f) {
+            std::memcpy(dst, src + written * AUDIO_CHANNELS,
+                        sampleCount * static_cast<ma_uint32>(sizeof(int16_t)));
+        } else {
+            for (ma_uint32 i = 0; i < sampleCount; i++) {
+                const int32_t val = static_cast<int32_t>(
+                        std::lround(src[written * AUDIO_CHANNELS + i] * gain));
+                dst[i] = static_cast<int16_t>(std::clamp(val,
+                                                         static_cast<int32_t>(INT16_MIN),
+                                                         static_cast<int32_t>(INT16_MAX)));
             }
         }
-
-        emit audioCaptured(frame);
+        ma_pcm_rb_commit_write(&ma->captureRB, toWrite);
+        written += toWrite;
     }
 }
 
@@ -402,6 +444,47 @@ void MiniaudioAudioBackend::handlePlaybackFrames(void *output, unsigned int fram
                                                          static_cast<int32_t>(INT16_MAX)));
         }
     }
+}
+
+// Drains complete capture frames (AUDIO_FRAME_SAMPLES each) out of the
+// backend's capture ring buffer. Called from AudioPipeline::onMixTick on the
+// voice/main thread; the device callback only writes, so this is the consumer
+// half of a lock-free single-producer/single-consumer hand-off (same model as
+// the playback ring buffer, in the opposite direction). Declared in
+// AudioPipeline.cpp; defined here because only this TU knows MiniaudioState.
+QList<QByteArray> drainCaptureFrames(IAudioBackend *backend)
+{
+    QList<QByteArray> frames;
+    if (!sCaptureRB || sCaptureOwner != backend)
+        return frames;
+
+    ma_pcm_rb *rb = sCaptureRB;
+
+    // If the consumer fell behind the device, keep only the newest frames
+    // (drop the oldest), mirroring the old captureBuffer "drop excess" policy
+    // which also kept the freshest 1-2 frames under overload.
+    const ma_uint32 maxQueued = 2 * static_cast<ma_uint32>(AUDIO_FRAME_SAMPLES);
+    if (ma_pcm_rb_available_read(rb) > maxQueued)
+        ma_pcm_rb_seek_read(rb, ma_pcm_rb_available_read(rb) - maxQueued);
+
+    while (ma_pcm_rb_available_read(rb) >= static_cast<ma_uint32>(AUDIO_FRAME_SAMPLES)) {
+        QByteArray frame(AUDIO_FRAME_SIZE, Qt::Uninitialized);
+        int written = 0;
+        while (written < AUDIO_FRAME_SAMPLES) {
+            ma_uint32 toRead = AUDIO_FRAME_SAMPLES - written;
+            void *readPtr = nullptr;
+            if (ma_pcm_rb_acquire_read(rb, &toRead, &readPtr) != MA_SUCCESS || toRead == 0)
+                break;
+            std::memcpy(frame.data() + written * AUDIO_CHANNELS * static_cast<int>(sizeof(int16_t)),
+                        readPtr, toRead * AUDIO_CHANNELS * static_cast<int>(sizeof(int16_t)));
+            ma_pcm_rb_commit_read(rb, toRead);
+            written += static_cast<int>(toRead);
+        }
+        if (written < AUDIO_FRAME_SAMPLES)
+            break; // safety: partial frame at the wrap; leave it for next drain
+        frames.append(frame);
+    }
+    return frames;
 }
 
 } // namespace AV

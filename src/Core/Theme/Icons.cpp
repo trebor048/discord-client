@@ -20,6 +20,17 @@ namespace Icons {
 
 namespace {
 
+// Cap on the themed-pixmap cache. It is keyed by color + dpr, so a changing
+// theme (or many colors at once) would otherwise grow it without bound; the
+// cap bounds it and Manager::apply() clears it entirely on theme changes.
+constexpr int kPixmapCacheMaxEntries = 256;
+
+QHash<QString, QPixmap> &pixmapCache()
+{
+    static QHash<QString, QPixmap> cache;
+    return cache;
+}
+
 QByteArray svgSource(const QString &name)
 {
     static QHash<QString, QByteArray> cache;
@@ -132,7 +143,7 @@ private:
 
 QPixmap pixmap(const QString &name, int px, const QColor &color, qreal dpr)
 {
-    static QHash<QString, QPixmap> cache;
+    QHash<QString, QPixmap> &cache = pixmapCache();
     const QString key = QStringLiteral("%1|%2|%3|%4")
                                 .arg(name, QString::number(px), color.name(QColor::HexArgb),
                                      QString::number(dpr, 'g', 4));
@@ -141,8 +152,19 @@ QPixmap pixmap(const QString &name, int px, const QColor &color, qreal dpr)
         return it.value();
 
     QPixmap pm = render(name, px, color, dpr);
+    if (cache.size() >= kPixmapCacheMaxEntries)
+        cache.clear(); // bounded growth; repopulates lazily
     cache.insert(key, pm);
     return pm;
+}
+
+// Clears the themed-pixmap cache. Called by Theme::Manager::apply() so a
+// theme change takes effect immediately instead of serving stale colors until
+// the cache is evicted. Declared locally in Manager.cpp (Icons.hpp has no
+// invalidation entry point).
+void clearPixmapCache()
+{
+    pixmapCache().clear();
 }
 
 QPixmap pixmap(const QString &name, int px, Token token, qreal dpr)

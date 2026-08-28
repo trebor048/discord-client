@@ -14,6 +14,7 @@
 #include <QEvent>
 #include <QGraphicsOpacityEffect>
 #include <QGridLayout>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <limits>
@@ -74,8 +75,28 @@ void pruneGifCache(QHash<QString, QByteArray> &cache, const QString &newKey)
     }
 }
 
+// Glyph rendering is deterministic, so rendered Unicode emoji pixmaps are
+// cached (keyed by emoji text + size + device pixel ratio) and reused across
+// rebuilds/scroll recycling instead of re-drawing ~200-264 pixmaps per
+// search-rebuild. Custom emoji keep their own fetch caches below.
+constexpr int kUnicodeGlyphCacheMaxEntries = 512;
+
+QHash<QString, QIcon> &unicodeGlyphCache()
+{
+    static QHash<QString, QIcon> cache;
+    return cache;
+}
+
 QIcon renderUnicodeEmojiIcon(const QString &emojiText, int size)
 {
+    const qreal dpr = QGuiApplication::devicePixelRatio();
+    const QString key = QStringLiteral("%1|%2|%3").arg(emojiText).arg(size).arg(dpr);
+
+    QHash<QString, QIcon> &cache = unicodeGlyphCache();
+    const auto it = cache.constFind(key);
+    if (it != cache.constEnd())
+        return it.value();
+
     QPixmap pix(size, size);
     pix.fill(Qt::transparent);
     QPainter p(&pix);
@@ -85,7 +106,12 @@ QIcon renderUnicodeEmojiIcon(const QString &emojiText, int size)
     p.setFont(f);
     p.drawText(QRect(0, 0, size, size), Qt::AlignCenter, emojiText);
     p.end();
-    return QIcon(pix);
+    QIcon icon(pix);
+
+    if (cache.size() >= kUnicodeGlyphCacheMaxEntries && !cache.contains(key))
+        cache.erase(cache.begin());
+    cache.insert(key, icon);
+    return icon;
 }
 
 } // namespace

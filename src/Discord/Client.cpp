@@ -163,8 +163,9 @@ void Client::fetchLatestMessages(Snowflake channelId, int limit, MessagesCallbac
 
         QList<Message> results;
         QJsonArray arr = QJsonDocument::fromJson(response.body).array();
+        results.reserve(arr.size());
         for (const QJsonValue &val : arr)
-            results.append(Message::fromJson(val.toObject()));
+            results.append(Message::fromJson(val.toObject(), false));
 
         callback({ results });
     });
@@ -187,8 +188,9 @@ void Client::fetchHistory(Snowflake channelId, Snowflake beforeId, int limit,
 
         QList<Message> results;
         QJsonArray arr = QJsonDocument::fromJson(response.body).array();
+        results.reserve(arr.size());
         for (const QJsonValue &val : arr)
-            results.append(Message::fromJson(val.toObject()));
+            results.append(Message::fromJson(val.toObject(), false));
 
         callback({ results });
     });
@@ -208,7 +210,7 @@ void Client::fetchMessage(Snowflake channelId, Snowflake messageId, MessagesCall
         }
 
         QList<Message> results;
-        results.append(Message::fromJson(QJsonDocument::fromJson(response.body).object()));
+        results.append(Message::fromJson(QJsonDocument::fromJson(response.body).object(), false));
         callback({ results });
     });
 }
@@ -619,7 +621,7 @@ void Client::searchForumThreads(Snowflake forumId, int offset, const QString &so
             httpClient, forumId, query, QStringLiteral("Failed to search forum threads:"),
             std::move(callback), [](const QJsonObject &obj, ForumThreadSearchResult &result) {
                 for (const QJsonValue &val : obj.value("first_messages").toArray()) {
-                    Message msg = Message::fromJson(val.toObject());
+                    Message msg = Message::fromJson(val.toObject(), false);
                     if (msg.channelId.hasValue())
                         result.firstMessages.insert(msg.channelId.get(), msg);
                 }
@@ -727,7 +729,7 @@ void Client::postForumThread(Snowflake forumId, const QString &name,
         CreatedForumThread created;
         created.thread = Channel::fromJson(obj);
         if (obj.contains("message"))
-            created.starterMessage = Message::fromJson(obj.value("message").toObject());
+            created.starterMessage = Message::fromJson(obj.value("message").toObject(), false);
         if (callback)
             callback(Core::Result<CreatedForumThread>::makeOk(created));
     });
@@ -759,7 +761,7 @@ void Client::fetchForumPostData(Snowflake forumId, const QList<Snowflake> &threa
             QJsonValue fm = it.value().toObject().value("first_message");
             if (fm.isObject())
                 firstMessages.insert(Snowflake(it.key().toULongLong()),
-                                     Message::fromJson(fm.toObject()));
+                                     Message::fromJson(fm.toObject(), false));
         }
         callback(Core::Result<QHash<Snowflake, Message>>::makeOk(firstMessages));
     });
@@ -1304,8 +1306,9 @@ void Client::getPinnedMessages(Snowflake channelId, const MessagesCallback &call
 
         QList<Message> results;
         QJsonArray arr = QJsonDocument::fromJson(response.body).array();
+        results.reserve(arr.size());
         for (const QJsonValue &val : arr)
-            results.append(Message::fromJson(val.toObject()));
+            results.append(Message::fromJson(val.toObject(), false));
 
         callback({ results });
     });
@@ -1386,7 +1389,7 @@ void Client::votePoll(Core::Snowflake channelId, Core::Snowflake messageId, Core
                              const QJsonDocument doc = QJsonDocument::fromJson(response.body);
                              if (doc.isObject())
                                  callback(Core::Result<Message>::makeOk(
-                                         Message::fromJson(doc.object())));
+                                         Message::fromJson(doc.object(), false)));
                              else
                                  callback(Core::Result<Message>::makeOk(Message{}));
                          }

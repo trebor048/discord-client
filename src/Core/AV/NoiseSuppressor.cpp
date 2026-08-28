@@ -74,7 +74,12 @@ QByteArray NoiseSuppressor::process(const QByteArray &pcmFrame, float &outVoiceP
     const int frameSize = rnnoise_get_frame_size();
     const auto *in = reinterpret_cast<const int16_t *>(pcmFrame.constData());
 
-    QByteArray out(AUDIO_FRAME_SIZE, '\0');
+    // Reuse a persistent output scratch: the frame size is constant and every
+    // sample is overwritten below, so the per-frame alloc + zero-fill is pure
+    // waste. The voice thread calls process() once per frame and copies the
+    // result before the next call, so the shared buffer is never aliased.
+    static QByteArray out;
+    out.resize(AUDIO_FRAME_SIZE);
     auto *outSamples = reinterpret_cast<int16_t *>(out.data());
     float prob = 0.0f;
 
@@ -90,23 +95,6 @@ QByteArray NoiseSuppressor::process(const QByteArray &pcmFrame, float &outVoiceP
             float pl = rnnoise_process_frame(states[0], left.data() + off, left.data() + off);
             float pr = rnnoise_process_frame(states[1], right.data() + off, right.data() + off);
             prob = std::max({ prob, pl, pr });
-        }
-        for (int i = 0; i < AUDIO_FRAME_SAMPLES; i++) {
-            outSamples[i * AUDIO_CHANNELS] = floatToSample(left[i]);
-            outSamples[i * AUDIO_CHANNELS + 1] = floatToSample(right[i]);
-        }
-    } else if (states[1]) {
-        // stereo — process each channel independently
-        std::array<float, AUDIO_FRAME_SAMPLES> left, right;
-        for (int i = 0; i < AUDIO_FRAME_SAMPLES; i++) {
-            left[i] = static_cast<float>(in[i * AUDIO_CHANNELS]);
-            right[i] = static_cast<float>(in[i * AUDIO_CHANNELS + 1]);
-        }
-        for (int off = 0; off + frameSize <= AUDIO_FRAME_SAMPLES; off += frameSize) {
-            float p = rnnoise_process_frame(states[0], left.data() + off, left.data() + off);
-            prob = std::max(prob, p);
-            p = rnnoise_process_frame(states[1], right.data() + off, right.data() + off);
-            prob = std::max(prob, p);
         }
         for (int i = 0; i < AUDIO_FRAME_SAMPLES; i++) {
             outSamples[i * AUDIO_CHANNELS] = floatToSample(left[i]);

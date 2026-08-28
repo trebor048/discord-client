@@ -6,17 +6,21 @@ namespace Acheron {
 namespace Discord {
 namespace AV {
 
-QByteArray RtpHeader::serialize() const
+void RtpHeader::serialize(char *dst) const
 {
-    QByteArray data(FIXED_SIZE, '\0');
-    auto *p = reinterpret_cast<uint8_t *>(data.data());
+    auto *p = reinterpret_cast<uint8_t *>(dst);
 
     p[0] = static_cast<uint8_t>((version << 6) | (padding ? 0x20 : 0) | (extension ? 0x10 : 0) | (csrcCount & 0x0F));
     p[1] = static_cast<uint8_t>((marker ? 0x80 : 0) | (payloadType & 0x7F));
     qToBigEndian(sequence, p + 2);
     qToBigEndian(timestamp, p + 4);
     qToBigEndian(ssrc, p + 8);
+}
 
+QByteArray RtpHeader::serialize() const
+{
+    QByteArray data(FIXED_SIZE, '\0');
+    serialize(data.data());
     return data;
 }
 

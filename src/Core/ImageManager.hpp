@@ -221,6 +221,12 @@ public:
     /// default on). When false, animations show their first frame statically.
     [[nodiscard]] static bool gifAutoplayEnabled();
 
+    /// Invalidates the cached "ui/gifAutoplay" value. The settings write site
+    /// (UI/Settings/GeneralPage) calls this so a toggle applies immediately
+    /// instead of at the next load/play re-read; the read points inside
+    /// GifAnimation also invalidate when playback state actually changes.
+    static void invalidateGifAutoplayCache();
+
     /// Returns true if the last fetch for this url+size failed (network or
     /// decode). Failed requests are not re-issued until clearFailedRequests().
     [[nodiscard]] bool hasFailed(const QUrl &url, const QSize &size) const;
