@@ -337,9 +337,43 @@ void ChannelTreeModel::populateFromReady(const Discord::Ready &ready)
 
     const auto &settings = instance->discord()->getSettings();
 
+    if (!ready.guilds.hasValue())
+        return;
     QHash<Core::Snowflake, const Discord::GatewayGuild *> guildMap;
     for (const auto &guild : ready.guilds.get())
         guildMap.insert(guild.properties->id, &guild);
+
+    // The user's server order, from UserGuildSettings.guildPositions (the
+    // authoritative ordering Discord keeps the server list in). Used to order
+    // unfolder'd guilds; the previous rbegin()/rend() iteration REVERSED the
+    // ready order, which also fed the server rail an inverted list.
+    QHash<Core::Snowflake, int> guildPosition;
+    if (settings.guildFolders.has_value()) {
+        const auto &positions = settings.guildFolders->guildPositions;
+        for (int i = 0; i < positions.size(); ++i)
+            guildPosition.insert(positions[i], i);
+    }
+
+    // Appends the unfolder'd guilds (those not in `excluded`) in user order:
+    // guildPositions when available, otherwise the ready array order (stable).
+    auto appendUnfoldered = [&](const QList<Discord::GatewayGuild> &guilds,
+                                const QSet<Core::Snowflake> &excluded,
+                                std::vector<std::unique_ptr<ChannelNode>> &out) {
+        QList<const Discord::GatewayGuild *> list;
+        for (const auto &g : guilds)
+            if (!excluded.contains(g.properties->id))
+                list.append(&g);
+        std::stable_sort(list.begin(), list.end(),
+                         [&](const Discord::GatewayGuild *a, const Discord::GatewayGuild *b) {
+                             const int pa = guildPosition.value(a->properties->id,
+                                                                std::numeric_limits<int>::max());
+                             const int pb = guildPosition.value(b->properties->id,
+                                                                std::numeric_limits<int>::max());
+                             return pa < pb;
+                         });
+        for (const auto *g : list)
+            out.push_back(createGuildNode(*g, instance));
+    };
 
     // folders and unfolder'd guilds
     std::vector<std::unique_ptr<ChannelNode>> topLevelNodes;
@@ -353,9 +387,7 @@ void ChannelTreeModel::populateFromReady(const Discord::Ready &ready)
                 guildIdsInFolders.insert(guildId);
 
         const auto &guilds = ready.guilds.get();
-        for (auto it = guilds.rbegin(); it != guilds.rend(); ++it)
-            if (!guildIdsInFolders.contains(it->properties->id))
-                topLevelNodes.push_back(createGuildNode(*it, instance));
+        appendUnfoldered(guilds, guildIdsInFolders, topLevelNodes);
 
         for (const auto &folder : folders) {
             if (!folder.id.has_value()) {
@@ -382,17 +414,14 @@ void ChannelTreeModel::populateFromReady(const Discord::Ready &ready)
             positioned.insert(id);
 
         const auto &guilds = ready.guilds.get();
-        for (auto it = guilds.rbegin(); it != guilds.rend(); ++it)
-            if (!positioned.contains(it->properties->id))
-                topLevelNodes.push_back(createGuildNode(*it, instance));
+        appendUnfoldered(guilds, positioned, topLevelNodes);
 
         for (const auto &guildId : positions)
             if (guildMap.contains(guildId))
                 topLevelNodes.push_back(createGuildNode(*guildMap[guildId], instance));
     } else {
         const auto &guilds = ready.guilds.get();
-        for (auto it = guilds.rbegin(); it != guilds.rend(); ++it)
-            topLevelNodes.push_back(createGuildNode(*it, instance));
+        appendUnfoldered(guilds, {}, topLevelNodes);
     }
 
     // READY is a full snapshot that Discord can resend on resume/reconnect.
@@ -1314,7 +1343,15 @@ void ChannelTreeModel::removeGuild(Snowflake accountId, Snowflake guildId)
     if (!parent)
         return;
 
-    removeChildRow(parent, guildNode);
+    if (!removeChildRow(parent, guildNode))
+        return;
+
+    // The removed guild's unread/mention counts must not linger on the
+    // account/folder node.
+    updateNodeAggregates(parent);
+    QModelIndex parentIdx = indexForNode(parent);
+    if (parentIdx.isValid())
+        emit dataChanged(parentIdx, parentIdx);
 }
 
 void ChannelTreeModel::placeGuildNode(ChannelNode *accNode, Snowflake guildId,
@@ -1546,8 +1583,10 @@ void ChannelTreeModel::updateChannel(const Discord::ChannelUpdate &update, Snowf
         oldParent->children.erase(oldParent->children.begin() + oldRow);
         endRemoveRows();
 
-        node->name = channel.name.get();
-        node->position = channel.position.get();
+        if (channel.name.hasValue())
+            node->name = channel.name.get();
+        if (channel.position.hasValue())
+            node->position = channel.position.get();
         node->parentId = newParentId;
         node->isPrivate = isChannelPrivate(channel, guildNode->id);
         if (node->type == ChannelNode::Type::VoiceChannel && channel.userLimit.hasValue())
@@ -1568,8 +1607,10 @@ void ChannelTreeModel::updateChannel(const Discord::ChannelUpdate &update, Snowf
         if (newParent->type == ChannelNode::Type::Category && newParentIdx.isValid())
             emit dataChanged(newParentIdx, newParentIdx);
     } else {
-        channelNode->name = channel.name.get();
-        channelNode->position = channel.position.get();
+        if (channel.name.hasValue())
+            channelNode->name = channel.name.get();
+        if (channel.position.hasValue())
+            channelNode->position = channel.position.get();
         channelNode->parentId = newParentId;
 
         ChannelNode *guildNode = findGuildNode(channelNode);
@@ -1608,6 +1649,11 @@ void ChannelTreeModel::deleteChannel(const Discord::ChannelDelete &event, Snowfl
 
     if (!removeChildRow(parent, channelNode))
         return;
+
+    // Recompute the parent's aggregated unread/mention state: the removed
+    // subtree's counts would otherwise linger on the category/folder until an
+    // unrelated event triggers an aggregate refresh.
+    updateNodeAggregates(parent);
 
     // notify proxy to re-check category visibility
     QModelIndex parentIdx = indexForNode(parent);

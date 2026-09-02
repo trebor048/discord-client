@@ -119,6 +119,8 @@ void SettingsWindow::setClient(Discord::Client *c)
 
 void SettingsWindow::setImageManager(Core::ImageManager *mgr)
 {
+    if (auto *page = findChild<GeneralPage *>())
+        page->setImageManager(mgr);
     if (auto *page = findChild<AuthorizedAppsPage *>())
         page->setImageManager(mgr);
 }

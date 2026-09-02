@@ -36,7 +36,12 @@ void Session::shutdown()
         disconnect(instance, nullptr, this, nullptr);
         instance->stop();
         Storage::DatabaseManager::instance().closeCacheDatabase(instance->accountId());
-        instance->deleteLater();
+        // Synchronous delete: shutdown() runs after app.exec() returns, when no
+        // event loop remains to process DeferredDelete — deleteLater() would
+        // leave the ClientInstance (and its repos/connections) alive while
+        // DatabaseManager::shutdown() tears the cache connections out from
+        // under them.
+        delete instance;
     }
 }
 

@@ -25,6 +25,7 @@ private slots:
     void testGuildDelete();
     void testGuildBan();
     void testGuildEmojisUpdate();
+    void testGatewayGuildFlatPayload();
     void testThreadCreate();
     void testThreadDelete();
     void testPresenceUpdate();
@@ -414,6 +415,34 @@ void TestDeserialization::testGuildEmojisUpdate()
     QCOMPARE(event.emojis->at(1).animated.get(), true);
 }
 
+void TestDeserialization::testGatewayGuildFlatPayload()
+{
+    // Regression: GatewayGuild is parsed from GUILD_CREATE / GUILD_UPDATE /
+    // READY.guilds, where the guild fields sit FLAT at the top level (there is
+    // no "properties" wrapper). The parser previously looked for the
+    // nonexistent key, leaving guild.properties Undefined — which starved the
+    // guild tree, permission precomputes, and channel→guild mappings.
+    QJsonObject obj;
+    obj["id"] = "111222333444555666";
+    obj["name"] = "Test Server";
+    obj["icon"] = "abc123";
+    obj["owner_id"] = "777";
+    obj["premium_tier"] = 2;
+    obj["joined_at"] = "2024-01-01T00:00:00.000000+00:00";
+    obj["unavailable"] = false;
+
+    GatewayGuild guild = GatewayGuild::fromJson(obj);
+
+    QVERIFY(guild.properties.hasValue());
+    QCOMPARE(static_cast<quint64>(guild.properties->id.get()), 111222333444555666ull);
+    QCOMPARE(guild.properties->name.get(), QStringLiteral("Test Server"));
+    QCOMPARE(guild.properties->icon.get(), QStringLiteral("abc123"));
+    QCOMPARE(static_cast<quint64>(guild.properties->ownerId.get()), 777ull);
+    QVERIFY(guild.properties->premiumTier.hasValue());
+    QCOMPARE(guild.properties->premiumTier.get(), PremiumTier::TIER_2);
+    QVERIFY(guild.joinedAt.hasValue());
+}
+
 void TestDeserialization::testThreadCreate()
 {
     QJsonObject obj;
@@ -557,12 +586,13 @@ void TestDeserialization::testMalformedJson()
     QVERIFY(emptyChannel.name.isUndefined());
     QVERIFY(emptyChannel.guildId.isUndefined());
 
-    // Non-numeric snowflake string should yield 0
+    // Non-numeric snowflake string should be rejected as Invalid, not
+    // silently collapsed to a "valid" snowflake 0.
     QJsonObject badId;
     badId["id"] = "not_a_number";
     badId["type"] = 0;
     Channel badChannel = Channel::fromJson(badId);
-    QCOMPARE(static_cast<quint64>(badChannel.id.get()), 0ull);
+    QCOMPARE(static_cast<quint64>(badChannel.id.get()), static_cast<quint64>(Snowflake::Invalid));
 }
 
 void TestDeserialization::testMissingFields()

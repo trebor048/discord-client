@@ -3,16 +3,56 @@
 #include "ChatModel.hpp"
 #include "ChatLayout.hpp"
 #include "ChatView.hpp"
+#include "Core/EmojiCatalog.hpp"
 #include "Core/ImageManager.hpp"
 #include "Core/Theme/Icons.hpp"
 #include "Core/Theme/Manager.hpp"
 #include "Core/Theme/RoundedAvatar.hpp"
 #include "Core/AnimationUtils.hpp"
 
+#include <QAbstractItemView>
+
 #include <algorithm>
 
 namespace Acheron {
 namespace UI {
+
+ChatDelegate::ChatDelegate(Core::ImageManager *imageManager, QObject *parent)
+    : QStyledItemDelegate(parent), imageManager(imageManager)
+{
+    // Bound the caches by total pixels (~16 MiB of RGBA per cache).
+    scaledCache.setMaxCost(4 * 1024 * 1024);
+    blurredCache.setMaxCost(4 * 1024 * 1024);
+
+    if (imageManager) {
+        // Quick-reaction custom emoji arrive asynchronously; repaint the view
+        // when a pending one lands so it appears without another mouse move.
+        // The key includes the requested size (see the member doc in the
+        // header): only the exact (url, size) fetch clears the pending flag.
+        connect(imageManager, &Core::ImageManager::imageFetched, this,
+                [this](const QUrl &url, const QSize &size, const QPixmap &) {
+                    const QString key = url.toString()
+                                        + QLatin1Char('@')
+                                        + QString::number(size.width())
+                                        + QLatin1Char('x')
+                                        + QString::number(size.height());
+                    if (!quickReactionPendingUrls.remove(key))
+                        return;
+                    if (auto *view = qobject_cast<QAbstractItemView *>(QObject::parent()))
+                        view->viewport()->update();
+                });
+        connect(imageManager, &Core::ImageManager::imageFailed, this,
+                [this](const QUrl &url, const QSize &size) {
+                    // A failed fetch never emits imageFetched; drop the key so
+                    // the set doesn't accumulate dead entries. Nothing was
+                    // painted yet, so no repaint is needed.
+                    quickReactionPendingUrls.remove(url.toString() + QLatin1Char('@')
+                                                    + QString::number(size.width())
+                                                    + QLatin1Char('x')
+                                                    + QString::number(size.height()));
+                });
+    }
+}
 
 QPixmap ChatDelegate::scaledCached(const QPixmap &source, const QSize &target) const
 {
@@ -90,8 +130,12 @@ static void drawReactionButtonHover(QPainter *painter, const QRect &rect, const 
     painter->restore();
 }
 
+// Quick-reaction entries are stored as plain strings. Unicode emoji are the
+// codepoints themselves; custom emoji are Discord tokens (`<:name:id>` or
+// `<a:name:id>`, as produced by EmojiCatalogItem::selectionValue()).
 static void drawQuickReactionBar(QPainter *painter, const QStyleOptionViewItem &option,
-                                 const ChatLayout::QuickReactionLayout &bar, int hoveredButton)
+                                 const ChatLayout::QuickReactionLayout &bar, int hoveredButton,
+                                 Core::ImageManager *imageManager, QSet<QString> *pendingUrls)
 {
     if (bar.barRect.isNull())
         return;
@@ -109,11 +153,36 @@ static void drawQuickReactionBar(QPainter *painter, const QStyleOptionViewItem &
     painter->setFont(emojiFont);
     painter->setPen(option.palette.text().color());
 
+    const int buttonSize = ChatLayout::quickReactionButtonSize();
+    const QSize iconSize(buttonSize, buttonSize);
     const QStringList &emojis = ChatLayout::quickReactionEmojis();
     for (int i = 0; i < bar.buttonRects.size() && i < emojis.size(); ++i) {
         if (i == hoveredButton)
             drawReactionButtonHover(painter, bar.buttonRects[i], option.palette);
-        painter->drawText(bar.buttonRects[i], Qt::AlignCenter, emojis[i]);
+
+        const QString url = Core::EmojiCatalog::cdnUrlForSelection(emojis[i], 32);
+        if (url.isEmpty()) {
+            // Unicode emoji: paint the codepoint glyph.
+            painter->drawText(bar.buttonRects[i], Qt::AlignCenter, emojis[i]);
+            continue;
+        }
+
+        // Custom emoji: paint the actual image (png/webp/gif frame). Ask the
+        // ImageManager for a cached copy first — an uncached emoji shows
+        // nothing this frame and triggers a fetch whose arrival repaints the
+        // hovered row (see ChatDelegate ctor's imageFetched hook).
+        QPixmap pix = imageManager ? imageManager->getIfCached(QUrl(url), iconSize) : QPixmap();
+        if (!pix.isNull()) {
+            painter->drawPixmap(bar.buttonRects[i], pix);
+        } else if (imageManager) {
+            imageManager->get(QUrl(url), iconSize);
+            if (pendingUrls) {
+                pendingUrls->insert(url + QLatin1Char('@')
+                                   + QString::number(iconSize.width())
+                                   + QLatin1Char('x')
+                                   + QString::number(iconSize.height()));
+            }
+        }
     }
 
     // "More" button: a bold plus glyph inviting the full emoji picker.
@@ -822,8 +891,18 @@ void ChatDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
         const auto &att = attachments[videoLayout.index];
         QRect videoRect = videoLayout.rect;
 
-        // Dark video tile background
-        painter->fillRect(videoRect, QColor(0, 0, 0, 200));
+        // Video tile: the grabbed frame / og:image poster cover-cropped into
+        // the tile, with a bottom shade for the filename, or a plain dark
+        // background while the thumbnail is still loading.
+        if (!att.videoThumbnail.isNull()) {
+            ChatLayout::drawCroppedPixmap(painter, videoRect, att.videoThumbnail);
+            QLinearGradient shade(videoRect.topLeft(), videoRect.bottomLeft());
+            shade.setColorAt(0.0, QColor(0, 0, 0, 0));
+            shade.setColorAt(1.0, QColor(0, 0, 0, 210));
+            painter->fillRect(videoRect, shade);
+        } else {
+            painter->fillRect(videoRect, QColor(0, 0, 0, 200));
+        }
         painter->setPen(QPen(option.palette.mid().color(), 1));
         painter->drawRect(videoRect);
 
@@ -1323,7 +1402,8 @@ void ChatDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
         int hoveredButton = -1;
         if (auto *chatView = qobject_cast<const ChatView *>(option.widget))
             hoveredButton = chatView->hoveredQuickReaction();
-        drawQuickReactionBar(painter, option, layout.quickReaction, hoveredButton);
+        drawQuickReactionBar(painter, option, layout.quickReaction, hoveredButton, imageManager,
+                             &quickReactionPendingUrls);
     }
 
     painter->restore();

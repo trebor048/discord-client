@@ -13,6 +13,8 @@
 #include "Discord/Client.hpp"
 #include "UI/Dialogs/EmojiPickerDialog.hpp"
 
+#include <exception>
+
 namespace Acheron {
 namespace UI {
 
@@ -121,17 +123,23 @@ qint64 CustomStatusEdit::expiresAt() const
 
 void CustomStatusEdit::onEmojiPicked()
 {
-    auto *picker = new EmojiPickerDialog(this);
-    picker->setAttribute(Qt::WA_DeleteOnClose);
-    picker->setWindowModality(Qt::ApplicationModal);
+    // The picker allocates large widget/emoji pools while it opens; an
+    // out-of-memory failure must not escape into Qt's event dispatch and
+    // terminate the whole app — just skip opening it.
+    try {
+        auto *picker = new EmojiPickerDialog(this);
+        picker->setAttribute(Qt::WA_DeleteOnClose);
+        picker->setWindowModality(Qt::ApplicationModal);
 
-    connect(picker, &EmojiPickerDialog::emojiSelected, this, [this, picker](const QString &emoji) {
-        selectedEmoji = emoji;
-        emojiButton->setText(emoji);
-        picker->close();
-    });
+        connect(picker, &EmojiPickerDialog::emojiSelected, this, [this, picker](const QString &emoji) {
+            selectedEmoji = emoji;
+            emojiButton->setText(emoji);
+            picker->close();
+        });
 
-    picker->exec();
+        picker->exec();
+    } catch (const std::exception &) {
+    }
 }
 
 void CustomStatusEdit::onClearStatus()

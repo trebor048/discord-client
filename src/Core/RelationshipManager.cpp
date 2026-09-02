@@ -58,7 +58,8 @@ void RelationshipManager::onRelationshipUpdated(const Discord::RelationshipParti
     auto it = store.find(id);
     if (it == store.end())
         return;
-    it.value().type = rel.type.get();
+    if (rel.type.hasValue())
+        it.value().type = rel.type.get();
     if (rel.nickname.hasValue())
         it.value().nickname = rel.nickname.get();
     else if (rel.nickname.isNull())
@@ -67,7 +68,8 @@ void RelationshipManager::onRelationshipUpdated(const Discord::RelationshipParti
         it.value().since = rel.since.get();
     if (rel.strangerRequest.hasValue())
         it.value().strangerRequest = rel.strangerRequest.get();
-    it.value().userIgnored = rel.userIgnored.get();
+    if (rel.userIgnored.hasValue())
+        it.value().userIgnored = rel.userIgnored.get();
     emit relationshipChanged(id);
 }
 

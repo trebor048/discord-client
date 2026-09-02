@@ -71,6 +71,7 @@ public:
 
 signals:
     void tabChanged(const TabEntry &entry);
+    void tabsChanged();
     void addTabRequested();
     void readStateCleared(Core::Snowflake channelId);
 

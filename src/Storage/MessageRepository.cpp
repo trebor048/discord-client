@@ -46,18 +46,27 @@ void MessageRepository::saveMessages(const QList<Discord::Message> &messages, QS
     }
     QSqlQuery qMsg(db);
     qMsg.prepare(R"(
-        INSERT OR REPLACE INTO messages
+        INSERT INTO messages
 		(id, channel_id, author_id, content, timestamp, edited_timestamp, type, flags, embeds, reactions, deleted,
 		 referenced_message_id, context_only, parsed_content)
 		VALUES (:id, :channel_id, :author_id, :content, :timestamp, :edited_timestamp, :type, :flags, :embeds, :reactions, 0,
 		        :ref_msg_id, 0, :parsed_content)
+		ON CONFLICT(id) DO UPDATE SET
+		    channel_id=excluded.channel_id, author_id=excluded.author_id, content=excluded.content,
+		    timestamp=excluded.timestamp, edited_timestamp=excluded.edited_timestamp, type=excluded.type,
+		    flags=excluded.flags, embeds=excluded.embeds, deleted=deleted,
+		    referenced_message_id=excluded.referenced_message_id, context_only=0, parsed_content=excluded.parsed_content
     )");
 
     QSqlQuery qAtt(db);
     qAtt.prepare(R"(
-        INSERT OR REPLACE INTO attachments
+        INSERT INTO attachments
         (id, message_id, filename, content_type, size, url, proxy_url, width, height)
         VALUES (:id, :message_id, :filename, :content_type, :size, :url, :proxy_url, :width, :height)
+        ON CONFLICT(id) DO UPDATE SET
+            message_id=excluded.message_id, filename=excluded.filename, content_type=excluded.content_type,
+            size=excluded.size, url=excluded.url, proxy_url=excluded.proxy_url,
+            width=excluded.width, height=excluded.height
     )");
 
     // Prepare the user upsert once and rebind per message instead of
@@ -79,6 +88,10 @@ void MessageRepository::saveMessages(const QList<Discord::Message> &messages, QS
     QSet<qint64> touchedChannels;
 
     for (const auto &message : messages) {
+        if (!message.author.hasValue() || !message.author->id.hasValue()) {
+            qCWarning(LogDB) << "MessageRepository: skipping message without author" << message.id.get();
+            continue;
+        }
         qMsg.bindValue(":id", static_cast<qint64>(message.id.get()));
         qMsg.bindValue(":channel_id", static_cast<qint64>(message.channelId.get()));
         qMsg.bindValue(":author_id", static_cast<qint64>(message.author->id.get()));
@@ -135,17 +148,30 @@ void MessageRepository::saveMessages(const QList<Discord::Message> &messages, QS
         }
     }
 
-    // Save referenced messages as their own rows (INSERT OR IGNORE to not overwrite
-    // a potentially more complete version already in the DB)
+    // Save referenced messages as their own rows. Unlike the previous
+    // INSERT OR IGNORE (which silently dropped fresh data whenever a stale
+    // stub already existed), use the same upsert semantics as the main path so
+    // reply previews refresh from the newest payload. context_only/deleted are
+    // preserved on conflict: a referenced-message write must never resurrect a
+    // tombstone or downgrade a real row into a stub.
     if (!referencedMessages.isEmpty()) {
         QSqlQuery qRef(db);
         qRef.prepare(R"(
-            INSERT OR IGNORE INTO messages
-            (id, channel_id, author_id, content, timestamp, edited_timestamp, type, flags, embeds, deleted, context_only)
-            VALUES (:id, :channel_id, :author_id, :content, :timestamp, :edited_timestamp, :type, :flags, :embeds, 0, 1)
+            INSERT INTO messages
+            (id, channel_id, author_id, content, timestamp, edited_timestamp, type, flags, embeds, deleted, context_only, parsed_content)
+            VALUES (:id, :channel_id, :author_id, :content, :timestamp, :edited_timestamp, :type, :flags, :embeds, 0, 1, :parsed_content)
+            ON CONFLICT(id) DO UPDATE SET
+                channel_id=excluded.channel_id, author_id=excluded.author_id, content=excluded.content,
+                timestamp=excluded.timestamp, edited_timestamp=excluded.edited_timestamp, type=excluded.type,
+                flags=excluded.flags, embeds=excluded.embeds, deleted=deleted, context_only=context_only,
+                parsed_content=excluded.parsed_content
         )");
 
         for (const auto &ref : referencedMessages) {
+            if (!ref.author.hasValue() || !ref.author->id.hasValue()) {
+                qCWarning(LogDB) << "MessageRepository: skipping referenced message without author" << ref.id.get();
+                continue;
+            }
             qRef.bindValue(":id", static_cast<qint64>(ref.id.get()));
             qRef.bindValue(":channel_id", static_cast<qint64>(ref.channelId.get()));
             qRef.bindValue(":author_id", static_cast<qint64>(ref.author->id.get()));
@@ -155,6 +181,9 @@ void MessageRepository::saveMessages(const QList<Discord::Message> &messages, QS
             qRef.bindValue(":type", static_cast<qint64>(ref.type.get()));
             qRef.bindValue(":flags", static_cast<qint64>(ref.flags.get()));
             qRef.bindValue(":embeds", ref.embedsJson.isEmpty() ? QVariant() : ref.embedsJson);
+            qRef.bindValue(":parsed_content",
+                           ref.parsedContentCached.isEmpty() ? QVariant()
+                                                             : ref.parsedContentCached);
 
             if (!execLogged(qRef, "MessageRepository: Save referenced message"))
                 goto rollback;
@@ -167,11 +196,33 @@ void MessageRepository::saveMessages(const QList<Discord::Message> &messages, QS
 
             if (!execLogged(qUser, "MessageRepository: Save user"))
                 goto rollback;
+
+            if (ref.attachments.hasValue()) {
+                for (const auto &att : *ref.attachments) {
+                    qAtt.bindValue(":id", static_cast<qint64>(att.id.get()));
+                    qAtt.bindValue(":message_id", static_cast<qint64>(ref.id.get()));
+                    qAtt.bindValue(":filename", att.filename);
+                    qAtt.bindValue(":content_type", att.contentType);
+                    qAtt.bindValue(":size", static_cast<qint64>(att.size.get()));
+                    qAtt.bindValue(":url", att.url);
+                    qAtt.bindValue(":proxy_url", att.proxyUrl);
+                    bindOptional(qAtt, ":width", att.width);
+                    bindOptional(qAtt, ":height", att.height);
+
+                    if (!execLogged(qAtt, "MessageRepository: Save referenced attachment"))
+                        goto rollback;
+                }
+            }
         }
     }
 
+    // Prune only channels that can actually be over the cap: the DELETE below
+    // runs two indexed NOT IN scans per touched channel on every save batch
+    // (channel open, history page, latest refresh) even when the channel holds
+    // a handful of messages and removes nothing. A COUNT served by the same
+    // (channel_id, id) covering index is far cheaper for the common case.
     for (qint64 channelId : touchedChannels)
-        pruneChannel(channelId, db);
+        pruneChannelIfOverCap(channelId, db);
 
     if (ownsTransaction && !db.commit()) {
         qCWarning(LogDB) << "MessageRepository: failed to commit transaction:";
@@ -186,12 +237,33 @@ rollback:
 
 void MessageRepository::pruneChannel(qint64 channelId, QSqlDatabase &db)
 {
+    // Delete orphaned attachments first, then messages. attachments has no
+    // FK cascade, so otherwise pruned messages leak attachment rows forever.
+    // Only LIVE rows (deleted=0, context_only=0) participate in the cap: a
+    // tombstone is a tiny row and must not evict real history.
+    {
+        QSqlQuery q(db);
+        q.prepare(R"(
+            DELETE FROM attachments
+            WHERE message_id IN (
+                SELECT id FROM messages
+                WHERE channel_id = :channel_id AND id NOT IN (
+                    SELECT id FROM messages
+                    WHERE channel_id = :channel_id AND deleted = 0 AND context_only = 0
+                    ORDER BY id DESC LIMIT :limit
+                )
+            )
+        )");
+        q.bindValue(":channel_id", channelId);
+        q.bindValue(":limit", maxMessagesPerChannel);
+        execLogged(q, "MessageRepository: Prune orphan attachments");
+    }
     QSqlQuery q(db);
     q.prepare(R"(
         DELETE FROM messages
-        WHERE channel_id = :channel_id AND id NOT IN (
+        WHERE channel_id = :channel_id AND deleted = 0 AND context_only = 0 AND id NOT IN (
             SELECT id FROM messages
-            WHERE channel_id = :channel_id
+            WHERE channel_id = :channel_id AND deleted = 0 AND context_only = 0
             ORDER BY id DESC
             LIMIT :limit
         )
@@ -200,6 +272,27 @@ void MessageRepository::pruneChannel(qint64 channelId, QSqlDatabase &db)
     q.bindValue(":limit", maxMessagesPerChannel);
 
     execLogged(q, "MessageRepository: Prune channel");
+}
+
+void MessageRepository::pruneChannelIfOverCap(qint64 channelId, QSqlDatabase &db)
+{
+    // Fast gate: only run the (two-statement) prune when the channel has more
+    // LIVE messages than the retention cap. Tombstones (deleted=1) and
+    // referenced-message stubs (context_only=1) don't count toward the cap —
+    // they're tiny and must not evict real history. The COUNT is served by
+    // idx_messages_channel (channel_id, id) and costs a fraction of the
+    // NOT IN deletes for the common under-cap case.
+    QSqlQuery countQuery(db);
+    countQuery.prepare(R"(
+        SELECT COUNT(*) FROM messages
+        WHERE channel_id = :channel_id AND deleted = 0 AND context_only = 0
+    )");
+    countQuery.bindValue(":channel_id", channelId);
+    if (!countQuery.exec() || !countQuery.next())
+        return;
+    if (countQuery.value(0).toLongLong() <= maxMessagesPerChannel)
+        return;
+    pruneChannel(channelId, db);
 }
 
 void MessageRepository::markMessageDeleted(Core::Snowflake messageId)
@@ -524,51 +617,54 @@ void MessageRepository::loadAttachmentsForMessages(QList<Discord::Message> &mess
         messageIndexMap.insert(static_cast<qint64>(messages[i].id.get()), i);
     }
 
-    // Build a parameterised IN clause — SQLite doesn't support binding
-    // an array to a single placeholder, so we generate one '?' per ID.
-    QStringList placeholders;
-    placeholders.reserve(messages.size());
-    for (int i = 0; i < messages.size(); ++i)
-        placeholders.append(QStringLiteral("?"));
+    // Chunk IN clause to avoid SQLite variable limit (999) for large batches.
+    constexpr int chunkSize = 500;
+    for (int offset = 0; offset < messages.size(); offset += chunkSize) {
+        const int count = qMin(chunkSize, static_cast<int>(messages.size() - offset));
+        QStringList placeholders;
+        placeholders.reserve(count);
+        for (int i = 0; i < count; ++i)
+            placeholders.append(QStringLiteral("?"));
 
-    QSqlQuery q(db);
-    QString query = QString(R"(
-        SELECT id, message_id, filename, content_type, size, url, proxy_url, width, height
-        FROM attachments
-        WHERE message_id IN (%1)
-    )")
-                            .arg(placeholders.join(", "));
-    q.prepare(query);
+        QSqlQuery q(db);
+        QString query = QString(R"(
+            SELECT id, message_id, filename, content_type, size, url, proxy_url, width, height
+            FROM attachments
+            WHERE message_id IN (%1)
+        )")
+                                .arg(placeholders.join(", "));
+        q.prepare(query);
 
-    for (int i = 0; i < messages.size(); ++i)
-        q.bindValue(i, static_cast<qint64>(messages[i].id.get()));
+        for (int i = 0; i < count; ++i)
+            q.bindValue(i, static_cast<qint64>(messages[offset + i].id.get()));
 
-    if (!q.exec()) {
-        qCWarning(LogDB) << "MessageRepository: Load attachments failed:" << q.lastError().text();
-        return;
-    }
-
-    while (q.next()) {
-        qint64 messageId = q.value(1).toLongLong();
-        int idx = messageIndexMap.value(messageId, -1);
-        if (idx < 0)
+        if (!q.exec()) {
+            qCWarning(LogDB) << "MessageRepository: Load attachments failed:" << q.lastError().text();
             continue;
+        }
 
-        Discord::Attachment att;
-        att.id = static_cast<Core::Snowflake>(q.value(0).toLongLong());
-        att.filename = q.value(2).toString();
-        att.contentType = q.value(3).toString();
-        att.size = q.value(4).toLongLong();
-        att.url = q.value(5).toString();
-        att.proxyUrl = q.value(6).toString();
-        if (!q.value(7).isNull())
-            att.width = q.value(7).toInt();
-        if (!q.value(8).isNull())
-            att.height = q.value(8).toInt();
+        while (q.next()) {
+            qint64 messageId = q.value(1).toLongLong();
+            int idx = messageIndexMap.value(messageId, -1);
+            if (idx < 0)
+                continue;
 
-        if (!messages[idx].attachments.hasValue())
-            messages[idx].attachments = QList<Discord::Attachment>();
-        messages[idx].attachments->append(att);
+            Discord::Attachment att;
+            att.id = static_cast<Core::Snowflake>(q.value(0).toLongLong());
+            att.filename = q.value(2).toString();
+            att.contentType = q.value(3).toString();
+            att.size = q.value(4).toLongLong();
+            att.url = q.value(5).toString();
+            att.proxyUrl = q.value(6).toString();
+            if (!q.value(7).isNull())
+                att.width = q.value(7).toInt();
+            if (!q.value(8).isNull())
+                att.height = q.value(8).toInt();
+
+            if (!messages[idx].attachments.hasValue())
+                messages[idx].attachments = QList<Discord::Attachment>();
+            messages[idx].attachments->append(att);
+        }
     }
 }
 

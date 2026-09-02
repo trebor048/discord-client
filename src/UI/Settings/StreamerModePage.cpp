@@ -117,6 +117,13 @@ void StreamerModePage::checkForStreamingSoftware()
                 detectionLabel->setText(found ? tr("OBS/XSplit detected!")
                                               : tr("No streaming software detected"));
                 detectionLabel->setStyleSheet(found ? "color: green;" : "color: gray;");
+                // When auto-detect is enabled, the detection result should
+                // actually engage streamer mode (mirroring the periodic check
+                // in NotificationManager), not just paint a label. setChecked
+                // re-enters the toggled handler, which persists the key and
+                // emits streamerModeChanged so the rest of the app reacts.
+                if (found && QSettings().value("streamer/auto_detect", false).toBool())
+                    streamerModeCheckbox->setChecked(true);
                 process->deleteLater();
             });
     process->start(args.takeFirst(), args);

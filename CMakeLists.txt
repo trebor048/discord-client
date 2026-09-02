@@ -357,6 +357,7 @@ endif()
 file(GLOB_RECURSE PROJECT_CPP_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
 )
+list(SORT PROJECT_CPP_SOURCES)
 list(APPEND PROJECT_SOURCES ${PROJECT_CPP_SOURCES})
 list(REMOVE_DUPLICATES PROJECT_SOURCES)
 
@@ -434,6 +435,11 @@ if(BUILD_TESTS)
     target_link_libraries(TestEmojiSegmenter PRIVATE Qt::Core Qt::Test)
     target_include_directories(TestEmojiSegmenter PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/vendor/emoji-segmenter)
     add_test(NAME EmojiSegmenterTests COMMAND TestEmojiSegmenter)
+
+    qt_add_executable(TestJitterBuffer tests/tst_JitterBuffer.cpp src/Core/AV/JitterBuffer.cpp)
+    target_link_libraries(TestJitterBuffer PRIVATE Qt::Core Qt::Test)
+    target_include_directories(TestJitterBuffer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME JitterBufferTests COMMAND TestJitterBuffer)
 
     qt_add_executable(TestMemberList
         tests/tst_MemberList.cpp
@@ -552,6 +558,7 @@ if(BUILD_TESTS)
             NotificationDeciderTests
             AppearanceConfigTests
             ScaleStepperTests
+            ReadStateTests
             PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORM_PLUGIN_PATH=${QT_INSTALL_PREFIX}/plugins/platforms"
         )
         if(NOT WIN32)

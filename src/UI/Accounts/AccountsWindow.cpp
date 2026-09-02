@@ -301,6 +301,10 @@ void AccountsWindow::onSetTokenRequested(int row)
         return;
 
     const QString accountLabel = info->displayName.isEmpty() ? info->username : info->displayName;
+    // Snapshot the connection state BEFORE the nested event loop: the model's
+    // accounts QVector can be mutated re-entrantly (add/remove/reorder/state
+    // change) while TokenInputDialog::exec() runs, invalidating `info`.
+    const ConnectionState stateBefore = info->state;
 
     TokenInputDialog dlg(tr("Set Token"), tr("Enter the new token for %1:").arg(accountLabel), this);
     if (dlg.exec() != QDialog::Accepted)
@@ -334,7 +338,7 @@ void AccountsWindow::onSetTokenRequested(int row)
     }
 
     QString followup;
-    if (info->state == ConnectionState::Connected)
+    if (stateBefore == ConnectionState::Connected)
         followup = tr(" Disconnect and reconnect this account for the new token to take effect.");
 
     QMessageBox::information(this, tr("Token Updated"),

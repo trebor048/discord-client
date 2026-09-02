@@ -174,6 +174,16 @@ void DaveSession::onExecuteTransition(int transitionId)
     }
 
     if (!pendingTransitionReady) {
+        // Transition 0 is auto-completed locally (see onAnnounceCommitTransition
+        // / onWelcome) because some servers never send EXECUTE_TRANSITION(0)
+        // for the initial epoch. Servers that DO send it arrive here with
+        // nothing pending — treat that as the expected completion of an already
+        // active session rather than a state-machine failure (which would
+        // reinit() and restart the epoch handshake in a loop).
+        if (transitionId == 0 && !daveDowngraded) {
+            qCDebug(LogDave) << "Execute transition 0 already completed locally; ignoring";
+            return;
+        }
         qCWarning(LogDave) << "Execute transition" << transitionId
                            << "but no pending commit/welcome, reinitializing DAVE session";
         reinit();

@@ -42,6 +42,7 @@ private:
 
     inline static std::thread *writerThread = nullptr;
     inline static std::mutex queueMutex;
+    inline static std::mutex fileMutex;
     inline static std::condition_variable queueCv;
     inline static std::vector<std::string> queue;
     inline static bool stopping = false;

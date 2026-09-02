@@ -69,6 +69,15 @@ ServerRailModel::ServerRailModel(Core::Session *session, ChannelTreeModel *sourc
                 if (pendingAccountAvatars.remove(url))
                     emitAllChanged();
             });
+    // A failed avatar fetch never emits imageFetched (and ImageManager blocks
+    // re-requests for failed URLs), so the pending entry would otherwise leak
+    // forever and the account row would show an empty decoration instead of
+    // the placeholder. Prune it on failure too.
+    connect(session->getImageManager(), &Core::ImageManager::imageFailed, this,
+            [this](const QUrl &url, const QSize &) {
+                if (pendingAccountAvatars.remove(url))
+                    emitAllChanged();
+            });
 }
 
 int ServerRailModel::rowCount(const QModelIndex &parent) const

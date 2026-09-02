@@ -110,13 +110,11 @@ QVariant MemberListModel::data(const QModelIndex &index, int role) const
 
         QUrl url = Discord::Cdn::userAvatar(userId, avatarHash, AvatarRequestSize.width());
 
-        if (imageManager->isCached(url, AvatarRequestSize))
-            return imageManager->get(url, AvatarRequestSize);
-
-        imageManager->get(url, AvatarRequestSize);
-        avatarTracker.track(url, index);
-
-        return QVariant();
+        // Use the tracker helper: it only registers the URL when get() returns
+        // a usable (placeholder) pixmap, so unresolvable/failed URLs don't leak
+        // a pending entry that can never be notified (imageFailed never emits
+        // imageFetched, and ImageManager blocks re-requests for failed keys).
+        return avatarTracker.fetch(imageManager, url, AvatarRequestSize, index);
     }
     case RoleColorRole:
         return item->type == Core::MemberListItem::Type::Member
@@ -130,11 +128,7 @@ QVariant MemberListModel::data(const QModelIndex &index, int role) const
         const QUrl url = Discord::Cdn::roleIcon(item->roleIconRoleId, item->roleIconHash, 32);
         // Mirror the avatar path: don't return the gray placeholder as if it were
         // a real icon; return nothing until the icon is fetched.
-        if (imageManager->isCached(url, iconSize))
-            return imageManager->get(url, iconSize);
-        imageManager->get(url, iconSize);
-        roleIconTracker.track(url, index);
-        return QVariant();
+        return roleIconTracker.fetch(imageManager, url, iconSize, index);
     }
     case RoleBadgeColorRole: {
         if (item->type != Core::MemberListItem::Type::Member || !m_roleColorProvider || !manager)

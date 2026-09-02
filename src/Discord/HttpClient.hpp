@@ -2,7 +2,9 @@
 
 #include <QObject>
 #include <QJsonArray>
+#include <QList>
 #include <QPair>
+#include <QTimer>
 
 #include <curl/curl.h>
 
@@ -10,6 +12,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <vector>
 
 #include "CaptchaResolver.hpp"
 
@@ -91,6 +94,20 @@ private:
 
     void onRequestComplete(RequestDescriptor descriptor, HttpResponse response,
                            std::optional<CaptchaChallenge> challenge);
+
+    // 429-retry descriptors parked in single-shot timers. A plain
+    // QTimer::singleShot(retryAfterMs, this, ...) silently drops the descriptor
+    // (and thus the caller's callback) if this client is destroyed before the
+    // timer fires — the worker's shutdown drain never sees it. Track them so
+    // the destructor can fail them back to their callbacks. The descriptor is
+    // heap-allocated because RequestDescriptor is only forward-declared here,
+    // and the vector holds move-only entries (unique_ptr).
+    struct PendingRetry
+    {
+        QTimer *timer = nullptr;
+        std::unique_ptr<RequestDescriptor> descriptor;
+    };
+    std::vector<PendingRetry> m_retryTimers;
 
     QString baseUrl;
     QString token;

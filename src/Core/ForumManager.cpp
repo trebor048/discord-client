@@ -41,6 +41,7 @@ QList<Snowflake> ForumManager::RequestBatch::take(Snowflake &outForumId)
 
     QList<Snowflake> ids;
     ids.swap(pending);
+    lastTaken = ids; // remember for forgetTaken() (empty batch -> empty take)
     return ids;
 }
 
@@ -204,6 +205,11 @@ void ForumManager::flushUnreadRequests()
 
 void ForumManager::onForumUnreads(const Discord::ForumUnreads &event)
 {
+    // The taken batch is now answered — or failed (permission denied, no
+    // threads payload). Clear its in-flight markers either way so the threads
+    // can be re-requested when needed and `requested` doesn't accumulate.
+    unreadBatch.forgetTaken();
+
     if (event.permissionDenied.hasValue() && event.permissionDenied.get())
         return;
     if (!event.threads.hasValue())
@@ -262,7 +268,8 @@ bool ForumManager::isForum(Snowflake channelId) const
     if (!ch)
         return false; // idk
 
-    bool forum = ch->type == Discord::ChannelType::GUILD_FORUM;
+    bool forum = ch->type == Discord::ChannelType::GUILD_FORUM
+                   || ch->type == Discord::ChannelType::GUILD_MEDIA;
     forumTypeCache.insert(channelId, forum);
     return forum;
 }
@@ -441,7 +448,7 @@ void ForumManager::fetchPage(Snowflake forumId, bool reset)
                         qCWarning(LogCore) << "Forum search index not ready after retries for" << forumId;
                         return;
                     }
-                    int delayMs = qMax(1, data.retryAfterSeconds) * 1000;
+                    int delayMs = qBound(1000, data.retryAfterSeconds * 1000, 60000);
                     QTimer::singleShot(delayMs, this, [this, forumId, reset, generation]() {
                         if (state(forumId).generation == generation)
                             fetchPage(forumId, reset);
@@ -474,16 +481,9 @@ void ForumManager::fetchPage(Snowflake forumId, bool reset)
 
 void ForumManager::applySearchReset(Snowflake forumId, ForumState &st, const QList<Discord::Channel> &threads)
 {
-    QSet<Snowflake> searchIds;
-    for (const auto &t : threads)
-        searchIds.insert(t.id.get());
-    QList<Discord::Channel> merged = threads;
-    for (const auto &existing : st.posts)
-        if (!searchIds.contains(existing.id.get()))
-            merged.append(existing);
-
+    // On reset the server result is authoritative; do not resurrect deleted posts.
     st.offset = threads.size();
-    replacePosts(forumId, st, std::move(merged));
+    replacePosts(forumId, st, QList<Discord::Channel>(threads));
 
     std::stable_sort(st.posts.begin(), st.posts.end(), [this, &st](const auto &a, const auto &b) {
         return sortsBefore(a, b, st.sortMode);
@@ -512,8 +512,16 @@ void ForumManager::applySearchAppend(Snowflake forumId, ForumState &st, const QL
             appendPost(forumId, st, t);
 
     st.offset += threads.size();
-    if (st.posts.size() > start)
-        emit postsAppended(forumId, start, st.posts.size() - start);
+    if (st.posts.size() > start) {
+        // Non-pinned pages may not be tail-sorted relative to existing data
+        // after a sort-mode switch; restore global order (bounded by page size).
+        std::stable_sort(st.posts.begin(), st.posts.end(),
+                         [this, &st](const auto &a, const auto &b) { return sortsBefore(a, b, st.sortMode); });
+        // Stable-sort may have moved appended rows away from the tail, so the
+        // bulk-append emission would be stale; emit a reset to force correct
+        // view order (cost is one model reset per page, page size small).
+        emit postsReset(forumId);
+    }
 }
 
 void ForumManager::onThreadCreated(const Discord::ChannelCreate &event)
@@ -541,11 +549,11 @@ void ForumManager::onThreadUpdated(const Discord::ChannelUpdate &event)
     if (!post)
         return;
 
-    Discord::Channel updated = thread;
-    if (!updated.messageCount.hasValue() && post->messageCount.hasValue())
-        updated.messageCount = post->messageCount.get();
-    if ((!updated.lastMessageId.hasValue() || !updated.lastMessageId.get().isValid()) && post->lastMessageId.hasValue())
-        updated.lastMessageId = post->lastMessageId.get();
+    // THREAD_UPDATE is partial: any field the gateway omitted arrives as
+    // undefined. Merge field-wise so a partial update doesn't wipe locally
+    // cached state (name, applied_tags, thread_metadata, member_count, etc.).
+    Discord::Channel updated = *post;
+    updated.mergeFrom(thread);
 
     *post = updated;
     trackReadState(forumId, updated);
@@ -709,6 +717,11 @@ void ForumManager::flushStarterRequests()
         client->fetchForumPostData(
                 forumId, batch,
                 [this, forumId, batch](const Core::Result<QHash<Snowflake, Discord::Message>> &res) {
+                    // Clear the in-flight markers for the whole taken batch on
+                    // success too: threads the API answered with nothing have no
+                    // starter message, and re-requesting them later is harmless
+                    // (starterMessages gates re-fetches for ones we have).
+                    starterBatch.forgetTaken();
                     if (!res.success()) {
                         for (Snowflake id : batch)
                             starterBatch.forget(id);

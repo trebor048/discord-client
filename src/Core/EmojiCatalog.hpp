@@ -82,10 +82,22 @@ public:
     static void registerCustomEmojis(const QVector<EmojiCatalogItem> &items);
     static void unregisterCustomEmoji(const QString &customId);
     static void unregisterCustomEmojisByGuild(const QString &guildId);
+
+    // Monotonic counter bumped on every custom-emoji registry mutation.
+    // Consumers that cache derived views of items() (e.g. autocomplete search
+    // indexes) can compare it to detect content changes that leave the item
+    // COUNT unchanged (switching guilds with the same number of custom emoji).
+    static quint64 customEmojiGeneration();
     static void clearCustomEmojis();
     static QVector<EmojiCatalogItem> customEmojis();
 
     static std::optional<EmojiSelectionValue> selectionForRaw(const QString &value);
+
+    // Returns the CDN url for a custom-emoji selection token (`<:name:id>` or
+    // `<a:name:id>`), or an empty string when `value` is not a custom token.
+    // Mirrors EmojiCatalogItem::cdnUrl without needing the item in the catalog
+    // (the token itself carries the id + animated flag).
+    static QString cdnUrlForSelection(const QString &value, int size = 48);
 
     // O(1) indexed lookups; return nullptr when the value is not in the catalog.
     static const EmojiCatalogItem *itemForUnicode(const QString &unicodeEmoji);

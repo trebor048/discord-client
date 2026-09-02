@@ -46,6 +46,14 @@ namespace {
 MiniaudioAudioBackend *sCaptureOwner = nullptr;
 ma_pcm_rb *sCaptureRB = nullptr;
 
+// Partial capture frame stitched across drains (see drainCaptureFrames): a
+// read that hits the ring's wrap boundary can be handed fewer samples than a
+// full frame, and those samples must carry over to the next drain instead of
+// being dropped (which would desync the 960-sample grid). Reset on capture
+// stop so a new session starts on a fresh grid.
+static QByteArray sCapturePartialFrame;
+static int sCapturePartialWritten = 0;
+
 } // namespace
 
 void OnCapture(ma_device *pDevice, void *, const void *pInput, ma_uint32 frameCount)
@@ -272,6 +280,10 @@ void MiniaudioAudioBackend::stopCapture()
     // startCapture() session begins from silence.
     if (ma->captureRBInit)
         ma_pcm_rb_reset(&ma->captureRB);
+    // A partial capture frame stitched across drains belongs to the session
+    // that just ended; discard it so the next session starts on a fresh grid.
+    sCapturePartialWritten = 0;
+    sCapturePartialFrame.clear();
 
     qCInfo(LogVoice) << "Miniaudio capture stopped";
 }
@@ -452,6 +464,14 @@ void MiniaudioAudioBackend::handlePlaybackFrames(void *output, unsigned int fram
 // half of a lock-free single-producer/single-consumer hand-off (same model as
 // the playback ring buffer, in the opposite direction). Declared in
 // AudioPipeline.cpp; defined here because only this TU knows MiniaudioState.
+//
+// ma_pcm_rb_acquire_read() only returns the CONTIGUOUS run available, so a
+// read that starts near the ring's wrap boundary can be handed fewer frames
+// than requested. Committing those partial samples and dropping the frame
+// would desync the 960-sample grid for the rest of the capture session (every
+// subsequent frame would stitch samples across device boundaries), so the
+// partial frame is stashed here (see sCapturePartialFrame above) and completed
+// by the next drain instead.
 QList<QByteArray> drainCaptureFrames(IAudioBackend *backend)
 {
     QList<QByteArray> frames;
@@ -467,6 +487,27 @@ QList<QByteArray> drainCaptureFrames(IAudioBackend *backend)
     if (ma_pcm_rb_available_read(rb) > maxQueued)
         ma_pcm_rb_seek_read(rb, ma_pcm_rb_available_read(rb) - maxQueued);
 
+    // Finish a frame left incomplete by a previous drain at the ring wrap.
+    if (sCapturePartialWritten > 0) {
+        int needed = AUDIO_FRAME_SAMPLES - sCapturePartialWritten;
+        while (needed > 0 && ma_pcm_rb_available_read(rb) > 0) {
+            ma_uint32 toRead = static_cast<ma_uint32>(needed);
+            void *readPtr = nullptr;
+            if (ma_pcm_rb_acquire_read(rb, &toRead, &readPtr) != MA_SUCCESS || toRead == 0)
+                break;
+            std::memcpy(sCapturePartialFrame.data()
+                                + sCapturePartialWritten * AUDIO_CHANNELS * static_cast<int>(sizeof(int16_t)),
+                        readPtr, toRead * AUDIO_CHANNELS * static_cast<int>(sizeof(int16_t)));
+            ma_pcm_rb_commit_read(rb, toRead);
+            sCapturePartialWritten += static_cast<int>(toRead);
+            needed -= static_cast<int>(toRead);
+        }
+        if (sCapturePartialWritten >= AUDIO_FRAME_SAMPLES) {
+            frames.append(sCapturePartialFrame);
+            sCapturePartialWritten = 0;
+        }
+    }
+
     while (ma_pcm_rb_available_read(rb) >= static_cast<ma_uint32>(AUDIO_FRAME_SAMPLES)) {
         QByteArray frame(AUDIO_FRAME_SIZE, Qt::Uninitialized);
         int written = 0;
@@ -480,8 +521,14 @@ QList<QByteArray> drainCaptureFrames(IAudioBackend *backend)
             ma_pcm_rb_commit_read(rb, toRead);
             written += static_cast<int>(toRead);
         }
-        if (written < AUDIO_FRAME_SAMPLES)
-            break; // safety: partial frame at the wrap; leave it for next drain
+        if (written < AUDIO_FRAME_SAMPLES) {
+            // Ring-wrap partial: stash the consumed samples so the next drain
+            // completes the frame instead of dropping it (which would desync
+            // the capture grid for the whole session).
+            sCapturePartialFrame = frame;
+            sCapturePartialWritten = written;
+            break;
+        }
         frames.append(frame);
     }
     return frames;

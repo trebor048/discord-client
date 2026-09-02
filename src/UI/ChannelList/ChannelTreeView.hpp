@@ -20,6 +20,11 @@ public:
     void setModel(QAbstractItemModel *m) override;
     void performDefaultExpansion();
 
+    // Fills the viewport with the channel rows when the list is shorter than
+    // the panel: distributes the leftover height across the visible rows so a
+    // small server doesn't leave a large empty region below the last channel.
+    void updateViewportFill();
+
     void setAccountVoiceChannel(Core::Snowflake accountId, Core::Snowflake channelId);
     [[nodiscard]] bool isAccountInVoice(Core::Snowflake accountId) const;
 
@@ -48,6 +53,7 @@ signals:
 protected:
     void contextMenuEvent(QContextMenuEvent *event) override;
     void currentChanged(const QModelIndex &current, const QModelIndex &previous) override;
+    void resizeEvent(QResizeEvent *event) override;
 
 private:
     void mousePressEvent(QMouseEvent *event) override;
@@ -59,6 +65,7 @@ private:
     bool canReorderIndex(const QModelIndex &sourceIndex) const;
 
     void onRowsInserted(const QModelIndex &parent, int first, int last);
+    void onModelStructureChanged();
 
     Core::Snowflake findAccountIdForIndex(const QModelIndex &sourceIndex) const;
 

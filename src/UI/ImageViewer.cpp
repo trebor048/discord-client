@@ -100,10 +100,21 @@ void ImageViewer::fetchFullImage(const QUrl &proxyUrl)
     }
 
     QNetworkRequest request(fetchUrl);
+    // Abort any in-flight fetch for a previous image: a stale response must
+    // never overwrite the currently displayed image.
+    if (m_activeFullReply) {
+        disconnect(m_activeFullReply, nullptr, this, nullptr);
+        m_activeFullReply->abort();
+        m_activeFullReply->deleteLater();
+        m_activeFullReply = nullptr;
+    }
     QNetworkReply *reply = networkManager->get(request);
+    m_activeFullReply = reply;
 
     connect(reply, &QNetworkReply::finished, this, [this, reply, cacheKey]() {
         reply->deleteLater();
+        if (m_activeFullReply == reply)
+            m_activeFullReply = nullptr;
 
         if (reply->error() != QNetworkReply::NoError) {
             isLoadingFull = false;
@@ -280,6 +291,10 @@ void ImageViewer::wheelEvent(QWheelEvent *event)
 #endif
     QPointF beforeZoom = widgetToImage(mousePos);
 
+    // Ignore horizontal-only scroll (trackpad horizontal swipe / Shift+wheel);
+    // treating a zero vertical delta as zoom-out is wrong.
+    if (event->angleDelta().y() == 0)
+        return;
     qreal factor = event->angleDelta().y() > 0 ? 1.15 : 1.0 / 1.15;
     qreal newZoom = zoomLevel * factor;
 

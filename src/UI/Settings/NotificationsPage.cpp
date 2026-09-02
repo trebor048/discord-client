@@ -393,6 +393,15 @@ void NotificationsPage::setupSoundTab(QWidget *tab)
     contentLayout->setSpacing(14);
     layout->addWidget(content);
 
+    // Master switch: gates every sound below it. Mirrors the "Notification
+    // sounds" toggle on the General page / Me panel so the gate is visible
+    // where the sound settings actually live.
+    auto *masterGroup = new QGroupBox(tr("Notification Sounds"), content);
+    auto *masterLayout = new QVBoxLayout(masterGroup);
+    m_soundMasterCheck = new QCheckBox(tr("Enable notification sounds"), masterGroup);
+    masterLayout->addWidget(m_soundMasterCheck);
+    contentLayout->addWidget(masterGroup);
+
     // Global volume
     auto *volumeGroup = new QGroupBox(tr("Global Volume"), content);
     auto *volumeLayout = new QFormLayout(volumeGroup);
@@ -475,6 +484,7 @@ void NotificationsPage::setupSoundTab(QWidget *tab)
     contentLayout->addStretch();
 
     connect(m_globalVolumeSlider, &QSlider::valueChanged, this, &NotificationsPage::onSettingChanged);
+    connect(m_soundMasterCheck, &QCheckBox::toggled, this, &NotificationsPage::onSettingChanged);
     connect(m_soundDMsCheck, &QCheckBox::toggled, this, &NotificationsPage::onSettingChanged);
     connect(m_soundGroupDMsCheck, &QCheckBox::toggled, this, &NotificationsPage::onSettingChanged);
     connect(m_soundMentionsCheck, &QCheckBox::toggled, this, &NotificationsPage::onSettingChanged);
@@ -493,7 +503,7 @@ void NotificationsPage::setupUserSoundsTab(QWidget *tab)
     contentLayout->setSpacing(14);
     layout->addWidget(content);
 
-    auto *infoLabel = new QLabel(tr("Configure custom notification sounds for specific users. Right-click a user in Discord to set their sound."), content);
+    auto *infoLabel = new QLabel(tr("Configure custom notification sounds for specific users. Add a user by ID, then pick their sound below."), content);
     infoLabel->setWordWrap(true);
     infoLabel->setStyleSheet("color: #72767d; font-style: italic; margin-bottom: 16px;");
     contentLayout->addWidget(infoLabel);
@@ -506,14 +516,17 @@ void NotificationsPage::setupUserSoundsTab(QWidget *tab)
     contentLayout->addWidget(m_userSoundsList);
 
     auto *buttonLayout = new QHBoxLayout();
+    m_addUserSoundBtn = new QPushButton(tr("Add User Sound..."), content);
     m_clearUserSoundsBtn = new QPushButton(tr("Clear All User Sounds"), content);
     m_clearUserSoundsBtn->setStyleSheet("color: #ff6b6b;");
-    buttonLayout->addWidget(m_clearUserSoundsBtn);
+    buttonLayout->addWidget(m_addUserSoundBtn);
     buttonLayout->addStretch();
+    buttonLayout->addWidget(m_clearUserSoundsBtn);
     contentLayout->addLayout(buttonLayout);
 
     contentLayout->addStretch();
 
+    connect(m_addUserSoundBtn, &QPushButton::clicked, this, &NotificationsPage::onAddUserSound);
     connect(m_clearUserSoundsBtn, &QPushButton::clicked, this, [this]() {
         if (QMessageBox::question(this, tr("Clear All"), tr("Remove all per-user sound settings?")) == QMessageBox::Yes) {
             m_userSoundsList->clear();
@@ -543,6 +556,57 @@ void NotificationsPage::setupUserSoundsTab(QWidget *tab)
         });
         menu.exec(m_userSoundsList->mapToGlobal(pos));
     });
+}
+
+void NotificationsPage::onAddUserSound()
+{
+    if (!m_notificationManager)
+        return;
+
+    bool ok;
+    const QString id = QInputDialog::getText(this, tr("Add User Sound"),
+                                             tr("Enter the user ID to assign a custom notification sound:"),
+                                             QLineEdit::Normal, QString(), &ok);
+    if (!ok || id.trimmed().isEmpty())
+        return;
+    const QString userId = id.trimmed();
+
+    // Already configured? Jump to the existing row instead of duplicating.
+    for (int i = 0; i < m_userSoundsList->count(); ++i) {
+        if (m_userSoundsList->item(i)->data(Qt::UserRole).toString() == userId) {
+            m_userSoundsList->setCurrentRow(i);
+            m_userSoundsList->scrollToItem(m_userSoundsList->item(i));
+            return;
+        }
+    }
+
+    // Resolve a display name when the user is known to the connected account.
+    QString displayName = userId;
+    if (m_notificationManager) {
+        if (auto *instance = m_notificationManager->instance()) {
+            const Core::Snowflake sfx(userId.toULongLong());
+            if (sfx.isValid()) {
+                if (auto user = instance->users()->getUser(sfx))
+                    displayName = user->getDisplayName();
+            }
+        }
+    }
+
+    auto *item = new QListWidgetItem(m_userSoundsList);
+    item->setData(Qt::UserRole, userId);
+    // The editor row mirrors the sound-overrides rows; the checkbox label
+    // carries the display name with the ID in parentheses for disambiguation.
+    auto *widget = new SoundOverrideWidget(userId, QStringLiteral("%1 (%2)").arg(displayName, userId),
+                                           m_userSoundsList);
+    connect(widget, &SoundOverrideWidget::changed, this, &NotificationsPage::onSettingChanged);
+    m_userSoundsList->setItemWidget(item, widget);
+    item->setSizeHint(widget->sizeHint());
+
+    if (m_userSoundsFadeDelegate)
+        m_userSoundsFadeDelegate->fadeInAll(m_userSoundsList->count());
+
+    // Persist the new (empty) entry so the manager picks it up.
+    onSettingChanged();
 }
 
 void NotificationsPage::setupNativeTab(QWidget *tab)
@@ -663,6 +727,7 @@ void NotificationsPage::loadSettings()
     m_voiceDebounceSpin->setValue(settings.value("notifications/voice_debounce", 2000).toInt());
 
     // Sound
+    m_soundMasterCheck->setChecked(settings.value("notifications/sounds", true).toBool());
     m_globalVolumeSlider->setValue(settings.value("notifications/sound_volume", 100).toInt());
     m_soundDMsCheck->setChecked(settings.value("notifications/sound_for_dms", true).toBool());
     m_soundGroupDMsCheck->setChecked(settings.value("notifications/sound_for_group_dms", true).toBool());
@@ -696,15 +761,27 @@ void NotificationsPage::loadSettings()
     if (userSoundsVar.isValid()) {
         QJsonDocument doc = QJsonDocument::fromJson(userSoundsVar.toByteArray());
         if (doc.isObject()) {
-            QJsonObject obj = doc.object();
             m_userSoundsList->clear();
+            QJsonObject obj = doc.object();
             for (auto it = obj.begin(); it != obj.end(); ++it) {
                 QJsonObject o = it.value().toObject();
-                auto *item = new QListWidgetItem(
-                    QString("%1 (%2)").arg(it.key(), o["selected_sound"].toString()),
-                    m_userSoundsList);
+                auto *item = new QListWidgetItem(m_userSoundsList);
                 item->setData(Qt::UserRole, it.key());
-                item->setData(Qt::UserRole + 1, o);
+
+                QString displayName = it.key();
+                if (auto *instance = m_notificationManager ? m_notificationManager->instance() : nullptr) {
+                    const Core::Snowflake sfx(it.key().toULongLong());
+                    if (sfx.isValid()) {
+                        if (auto user = instance->users()->getUser(sfx))
+                            displayName = user->getDisplayName();
+                    }
+                }
+                auto *widget = new SoundOverrideWidget(
+                        it.key(), QStringLiteral("%1 (%2)").arg(displayName, it.key()), m_userSoundsList);
+                widget->loadFromJson(o);
+                connect(widget, &SoundOverrideWidget::changed, this, &NotificationsPage::onSettingChanged);
+                m_userSoundsList->setItemWidget(item, widget);
+                item->setSizeHint(widget->sizeHint());
             }
             if (m_userSoundsFadeDelegate)
                 m_userSoundsFadeDelegate->fadeInAll(m_userSoundsList->count());
@@ -762,6 +839,7 @@ void NotificationsPage::saveSettings()
     settings.setValue("notifications/voice_debounce", m_voiceDebounceSpin->value());
 
     // Sound
+    settings.setValue("notifications/sounds", m_soundMasterCheck->isChecked());
     settings.setValue("notifications/sound_volume", m_globalVolumeSlider->value());
     settings.setValue("notifications/sound_for_dms", m_soundDMsCheck->isChecked());
     settings.setValue("notifications/sound_for_group_dms", m_soundGroupDMsCheck->isChecked());
@@ -789,6 +867,8 @@ void NotificationsPage::saveSettings()
         auto *item = m_userSoundsList->item(i);
         QString userId = item->data(Qt::UserRole).toString();
         QJsonObject o = item->data(Qt::UserRole + 1).toJsonObject();
+        if (auto *widget = qobject_cast<SoundOverrideWidget *>(m_userSoundsList->itemWidget(item)))
+            o = widget->toJson();
         userSoundsObj[userId] = o;
     }
     settings.setValue("notifications/user_sounds", QJsonDocument(userSoundsObj).toJson(QJsonDocument::Compact));
@@ -814,6 +894,19 @@ void NotificationsPage::setNotificationManager(Core::NotificationManager *mgr)
         connect(mgr->imageManager(), &Core::ImageManager::imageFetched,
                 this, &NotificationsPage::onNotifyIconFetched, Qt::UniqueConnection);
     }
+
+    // Give the sound editors a SoundManager so their "Test Play" buttons can
+    // preview built-in sounds through the real playback path.
+    auto *soundManager = mgr ? mgr->soundManager() : nullptr;
+    for (int i = 0; i < m_soundOverridesList->count(); ++i) {
+        if (auto *widget = qobject_cast<SoundOverrideWidget *>(m_soundOverridesList->itemWidget(m_soundOverridesList->item(i))))
+            widget->setSoundManager(soundManager);
+    }
+    for (int i = 0; i < m_userSoundsList->count(); ++i) {
+        if (auto *widget = qobject_cast<SoundOverrideWidget *>(m_userSoundsList->itemWidget(m_userSoundsList->item(i))))
+            widget->setSoundManager(soundManager);
+    }
+
     refreshNotifyLists();
 }
 
@@ -839,6 +932,9 @@ void NotificationsPage::refreshNotifyLists()
     m_notifyForFancyList->clear();
     m_notifyForList->clear();
     m_notifyIconRows.clear();
+
+    if (!m_notificationManager)
+        return;
 
     auto *instance = m_notificationManager->instance();
     auto *images = m_notificationManager->imageManager();
@@ -1032,9 +1128,13 @@ void NotificationsPage::onImportSettings()
         QJsonObject userSounds = obj["userSounds"].toObject();
         for (auto it = userSounds.begin(); it != userSounds.end(); ++it) {
             QJsonObject o = it.value().toObject();
-            auto *item = new QListWidgetItem(QString("%1 (%2)").arg(it.key()).arg(o["selected_sound"].toString()), m_userSoundsList);
+            auto *item = new QListWidgetItem(m_userSoundsList);
             item->setData(Qt::UserRole, it.key());
-            item->setData(Qt::UserRole + 1, o);
+            auto *widget = new SoundOverrideWidget(it.key(), it.key(), m_userSoundsList);
+            widget->loadFromJson(o);
+            connect(widget, &SoundOverrideWidget::changed, this, &NotificationsPage::onSettingChanged);
+            m_userSoundsList->setItemWidget(item, widget);
+            item->setSizeHint(widget->sizeHint());
         }
         if (m_userSoundsFadeDelegate)
             m_userSoundsFadeDelegate->fadeInAll(m_userSoundsList->count());
@@ -1070,7 +1170,10 @@ void NotificationsPage::onExportSettings()
     QJsonObject userSoundsObj;
     for (int i = 0; i < m_userSoundsList->count(); ++i) {
         auto *item = m_userSoundsList->item(i);
-        userSoundsObj[item->data(Qt::UserRole).toString()] = item->data(Qt::UserRole + 1).toJsonObject();
+        QJsonObject o = item->data(Qt::UserRole + 1).toJsonObject();
+        if (auto *widget = qobject_cast<SoundOverrideWidget *>(m_userSoundsList->itemWidget(item)))
+            o = widget->toJson();
+        userSoundsObj[item->data(Qt::UserRole).toString()] = o;
     }
     obj["userSounds"] = userSoundsObj;
 

@@ -1,5 +1,7 @@
 #include "SoundOverrideWidget.hpp"
 
+#include "Core/Notification/SoundManager.hpp"
+
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QStandardPaths>
@@ -180,6 +182,13 @@ void SoundOverrideWidget::onTestPlay()
             return;
         }
         playTestSound(QUrl::fromLocalFile(m_customFilePath));
+    } else if (m_soundManager) {
+        // Preview a built-in sound through the real playback path so the
+        // volume slider matches what notifications will actually sound like.
+        QString playId = sound;
+        if (playId == QLatin1String("default"))
+            playId = QString::fromLatin1(Acheron::Core::SoundManager::DefaultNotification);
+        m_soundManager->playNotificationSound(playId, m_volumeSlider->value());
     } else {
         QMessageBox::information(this, tr("Test Play"),
             tr("Connect a SoundManager to enable in-app preview. Sound: %1").arg(sound));

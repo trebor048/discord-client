@@ -3,6 +3,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QEasingCurve>
+#include <QShowEvent>
 #include <QVariantAnimation>
 #include <QWindow>
 
@@ -10,7 +11,7 @@ namespace Acheron {
 namespace UI {
 
 namespace {
-constexpr int kGlyphInset = 3; // glyph length inside the 12px button
+constexpr int kGlyphInset = 4; // glyph length inside the 14px button
 constexpr int kHoverDurationMs = 130;
 constexpr qreal kHoverGrow = 0.10; // diameter grows up to 10% on hover
 
@@ -29,6 +30,19 @@ CustomTitleBar::CustomTitleBar(QWidget *parent)
     setFixedHeight(kHeight);
     setMouseTracking(true);
     setAttribute(Qt::WA_Hover);
+    // The window may already be maximized (restored geometry / WM-driven)
+    // before the first WindowStateChange event reaches this bar; initialize
+    // the flag from the real state so the drag fallback and double-click
+    // toggle don't act on a stale false.
+    updateMaximized();
+}
+
+void CustomTitleBar::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    // Fresh maximized state (e.g. a maximized geometry restored between
+    // construction and first show) must be picked up before any interaction.
+    updateMaximized();
 }
 
 void CustomTitleBar::setMenuButtonVisible(bool visible)

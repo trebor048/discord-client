@@ -26,6 +26,15 @@ static constexpr uint64_t NONCE_EXHAUSTION_WARN_THRESHOLD = 1000;
 VoiceEncryption::VoiceEncryption(EncryptionMode mode, const QByteArray &secretKey)
     : m_mode(mode), m_key(secretKey)
 {
+    // Validate key length early — libsodium expects 32 bytes; a truncated key
+    // from a malformed SessionDescription would cause heap OOB read in encrypt().
+    const int expected = (mode == EncryptionMode::AEAD_AES256_GCM_RTPSIZE)
+                             ? static_cast<int>(crypto_aead_aes256gcm_KEYBYTES)
+                             : static_cast<int>(crypto_aead_xchacha20poly1305_ietf_KEYBYTES);
+    if (m_key.size() != expected) {
+        qCCritical(LogVoice) << "VoiceEncryption: wrong key size" << m_key.size() << "expected" << expected;
+        m_key.clear();
+    }
 }
 
 bool VoiceEncryption::isNonceExhausted() const
@@ -92,6 +101,8 @@ QByteArray VoiceEncryption::encrypt(const QByteArray &rtpHeader, const QByteArra
 
 QByteArray VoiceEncryption::encryptAes256Gcm(const QByteArray &rtpHeader, const QByteArray &payload)
 {
+    if (m_key.isEmpty())
+        return {};
     // Nonce: 4-byte BE counter padded to 12 bytes
     // Use lower 32 bits; 64-bit counter prevents silent wraparound at 2^32
     uint8_t nonce[crypto_aead_aes256gcm_NPUBBYTES] = {};
@@ -123,6 +134,8 @@ QByteArray VoiceEncryption::encryptAes256Gcm(const QByteArray &rtpHeader, const 
 
 QByteArray VoiceEncryption::encryptXChacha20(const QByteArray &rtpHeader, const QByteArray &payload)
 {
+    if (m_key.isEmpty())
+        return {};
     // Nonce: 4-byte BE counter padded to 24 bytes
     // Use lower 32 bits; 64-bit counter prevents silent wraparound at 2^32
     uint8_t nonce[crypto_aead_xchacha20poly1305_ietf_NPUBBYTES] = {};
@@ -165,6 +178,8 @@ bool VoiceEncryption::decrypt(const QByteArray &packet, int headerOffset, int pa
 
 bool VoiceEncryption::decryptAes256Gcm(const QByteArray &packet, int headerOffset, int payloadLen, QByteArray &out)
 {
+    if (m_key.isEmpty())
+        return false;
     int minSize = static_cast<int>(crypto_aead_aes256gcm_ABYTES) + SUPPLEMENTAL_NONCE_SIZE;
     if (payloadLen < minSize) {
         qCDebug(LogVoice) << "AES-GCM decrypt: too short, need" << minSize << "got" << payloadLen;
@@ -203,6 +218,8 @@ bool VoiceEncryption::decryptAes256Gcm(const QByteArray &packet, int headerOffse
 
 bool VoiceEncryption::decryptXChacha20(const QByteArray &packet, int headerOffset, int payloadLen, QByteArray &out)
 {
+    if (m_key.isEmpty())
+        return false;
     int minSize = static_cast<int>(crypto_aead_xchacha20poly1305_ietf_ABYTES) + SUPPLEMENTAL_NONCE_SIZE;
     if (payloadLen < minSize) {
         qCDebug(LogVoice) << "XChaCha20 decrypt: too short, need" << minSize << "got" << payloadLen;

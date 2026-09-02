@@ -10,7 +10,7 @@ namespace Storage {
 ///
 /// Begins a transaction on construction (if one isn't already active on this
 /// connection), and automatically rolls back on destruction if commit() was
-/// never called.  Thread-safe via a thread-local set of active connections.
+/// never called.  Thread-safe via a global mutex-protected set of active connections.
 ///
 /// Usage:
 /// @code

@@ -5,6 +5,9 @@
 
 #include <QCoreApplication>
 #include <atomic>
+#include <chrono>
+#include <limits>
+#include <thread>
 #include <QDir>
 #include <QFile>
 #include <QHash>
@@ -118,7 +121,16 @@ UserAgentProps getUserAgentProps()
 
 void applyCommonOptions(CURL *curl)
 {
-    static const QString certPath = getCertificatePath();
+    // Cache the resolved path only once it is confirmed present: a portable
+    // layout may deploy certs/cacert.pem after the first connection attempt,
+    // and caching the empty result would break TLS verification for the whole
+    // session (every later connection reuses the stale empty path).
+    static QString certPath;
+    static bool certResolved = false;
+    if (!certResolved) {
+        certPath = getCertificatePath();
+        certResolved = !certPath.isEmpty();
+    }
     if (!certPath.isEmpty())
         curl_easy_setopt(curl, CURLOPT_CAINFO, certPath.toUtf8().constData());
 #ifdef HAS_CURL_IMPERSONATE
@@ -148,6 +160,17 @@ QMutex g_superPropertiesMutex;
 QHash<const ClientIdentity *, SuperPropertiesCacheEntry> g_superPropertiesCache;
 
 } // namespace
+
+void evictSuperProperties(const ClientIdentity *identity)
+{
+    QMutexLocker locker(&g_superPropertiesMutex);
+    g_superPropertiesCache.remove(identity);
+    // Bound growth: if many identities churned (tests), prune oldest when >64
+    if (g_superPropertiesCache.size() > 64) {
+        auto it = g_superPropertiesCache.begin();
+        g_superPropertiesCache.erase(it);
+    }
+}
 
 void appendDiscordHeaders(curl_slist **headers, const ClientIdentity &identity, const QString &referer)
 {
@@ -188,7 +211,13 @@ void appendDiscordHeaders(curl_slist **headers, const ClientIdentity &identity, 
 size_t writeToByteArray(char *ptr, size_t size, size_t nmemb, void *userdata)
 {
     size_t bytes = size * nmemb;
-    static_cast<QByteArray *>(userdata)->append(ptr, static_cast<int>(bytes));
+    // QByteArray::append takes qsizetype; signal an error to libcurl rather
+    // than silently dropping the tail (which would corrupt the payload).
+    if (bytes > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        qCWarning(LogNetwork) << "writeToByteArray: chunk too large" << bytes;
+        return 0;
+    }
+    static_cast<QByteArray *>(userdata)->append(ptr, static_cast<qsizetype>(bytes));
     return bytes;
 }
 
@@ -201,8 +230,20 @@ curl_socket_t getActiveSocket(CURL *curl)
 
 void waitOnSocket(curl_socket_t sockfd, bool forWrite, long timeoutMs)
 {
-    if (sockfd == CURL_SOCKET_BAD)
+    if (sockfd == CURL_SOCKET_BAD) {
+        // Socket not yet assigned (e.g. during TLS handshake). Sleep briefly
+        // to avoid busy-looping at 100% CPU in wsRecvWait / wsSend retry.
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
         return;
+    }
+#ifdef _WIN32
+    if (sockfd >= FD_SETSIZE) {
+        // curl_socket_t is SOCKET (~UINT_PTR) which may exceed FD_SETSIZE(64)
+        // on Windows — FD_SET would corrupt stack. Just sleep the timeout.
+        std::this_thread::sleep_for(std::chrono::milliseconds(timeoutMs));
+        return;
+    }
+#endif
 
     timeval timeout;
     timeout.tv_sec = timeoutMs / 1000;

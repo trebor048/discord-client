@@ -23,8 +23,7 @@ enum class VoiceOpCode {
     RESUMED = 9,
     SIGNAL = 10, // deprecated
     RESET = 11, // deprecated
-    CLIENT_CONNECT = 11,
-    VIDEO = 12,
+    CLIENT_CONNECT = 12,
     CLIENT_DISCONNECT = 13,
     SESSION_UPDATE = 14,
     MEDIA_SINK_WANTS = 15,

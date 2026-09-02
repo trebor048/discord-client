@@ -11,6 +11,7 @@ class BasePopup : public QDialog
     Q_OBJECT
 public:
     explicit BasePopup(QWidget *parent = nullptr);
+    ~BasePopup() override;
 
 protected:
     QFrame *getContainer() const { return container; }
@@ -18,6 +19,7 @@ protected:
     void paintEvent(QPaintEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void showEvent(QShowEvent *event) override;
+    void hideEvent(QHideEvent *event) override;
     void accept() override;
     void reject() override;
     bool eventFilter(QObject *obj, QEvent *event) override;

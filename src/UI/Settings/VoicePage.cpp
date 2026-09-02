@@ -21,13 +21,28 @@ bool VoicePage::eventFilter(QObject *watched, QEvent *event)
 {
     if (watched == recordKeyButton && event->type() == QEvent::KeyPress) {
         auto *keyEvent = static_cast<QKeyEvent *>(event);
-        const QString keyText = QKeySequence(keyEvent->key()).toString();
+        // Reject bare modifier presses (Ctrl/Shift/Alt/Meta alone): they are
+        // not usable as a push-to-talk binding and would record a sequence
+        // like "Ctrl" that can never match a real key press.
+        const int key = keyEvent->key();
+        if (key == Qt::Key_Control || key == Qt::Key_Shift || key == Qt::Key_Alt ||
+            key == Qt::Key_Meta || key == Qt::Key_AltGr || key == Qt::Key_CapsLock) {
+            recordKeyButton->releaseKeyboard();
+            recordKeyButton->removeEventFilter(this);
+            return true;
+        }
+        // Use the full key + modifiers so chords like Ctrl+V are captured
+        // correctly (a bare modifier yields an empty sequence).
+        const QString keyText =
+                QKeySequence(key | keyEvent->modifiers()).toString();
+        // Always release the grab + filter, otherwise a bare-modifier press
+        // leaves the button holding the keyboard grab forever.
+        recordKeyButton->releaseKeyboard();
+        recordKeyButton->removeEventFilter(this);
         if (!keyText.isEmpty()) {
             recordKeyButton->setText(keyText);
             QSettings().setValue("voice/ptt_key", keyText);
             emit pushToTalkKeyChanged(keyText);
-            recordKeyButton->releaseKeyboard();
-            recordKeyButton->removeEventFilter(this);
         }
         return true;
     }

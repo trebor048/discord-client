@@ -22,6 +22,7 @@ class QNetworkAccessManager;
 #include <QVector>
 #include "Core/Session.hpp"
 #include "Core/MessageManager.hpp"
+#include "Core/LinkPreviewManager.hpp"
 #include "UI/AvatarRequestTracker.hpp"
 
 namespace Acheron {
@@ -29,6 +30,8 @@ namespace Acheron {
 namespace Core {
 class ImageManager;
 class GifAnimation;
+class VideoThumbnailLoader;
+class LinkPreviewManager;
 } // namespace Core
 
 using Core::Snowflake;
@@ -50,6 +53,12 @@ struct AttachmentData
     bool isSpoiler = false;
     qint64 uploadSent = -1;
     qint64 uploadTotal = -1;
+    // Video preview: frame-grab for Discord attachments, og:image for
+    // client-side link previews (klipy-style). videoThumbnailUrl is the
+    // og:image source when one exists; the frame-grab path fills
+    // videoThumbnail asynchronously via VideoThumbnailLoader.
+    QPixmap videoThumbnail;
+    QUrl videoThumbnailUrl;
     // Voice message fields
     QByteArray waveform;      // base64-decoded waveform samples (0-255)
     double durationSecs = 0;  // duration in seconds
@@ -389,6 +398,18 @@ private:
     void warmCachesForMessage(const Discord::Message &msg);
     void ensureStickerMoviesForRow(int row, const QList<StickerData> &stickers);
 
+    /// Client-side link unfurling: attach the resolved media for a link-only
+    /// message (klipy/imgur-style URLs Discord didn't embed) as a pseudo
+    /// attachment, then invalidate + repaint the row.
+    void attachLinkPreview(Core::Snowflake messageId, const QUrl &requestedUrl,
+                           const Core::LinkPreviewResult &result);
+
+    /// Rebuilds fresh AttachmentData from a stored link-preview result, re-
+    /// reading ImageManager / VideoThumbnailLoader caches so async loads land
+    /// on the next repaint (mirrors buildAttachmentData).
+    QList<AttachmentData> buildLinkPreviewAttachments(
+            Core::Snowflake messageId, const Core::LinkPreviewResult &result) const;
+
     void shiftMessageRows(int startRow, int delta);
     void insertMessageRow(Snowflake messageId, int row);
     void removeMessageRow(Snowflake messageId);
@@ -460,6 +481,14 @@ private:
     mutable QHash<QUrl, Core::GifAnimation *> gifAttachmentAnimations; // GIF animations by attachment proxy URL
     mutable QHash<QUrl, QList<QPersistentModelIndex>> gifAnimationRows; // track rows with active GIF animations
     mutable QSet<QUrl> failedGifUrls; // GIF URLs that failed to load/decode; don't re-create every paint
+
+    // Video frame-grab thumbnails + client-side link previews.
+    Core::VideoThumbnailLoader *m_videoThumbnails = nullptr;
+    Core::LinkPreviewManager *m_linkPreviews = nullptr;
+    mutable QHash<Snowflake, Core::LinkPreviewResult> m_previewResults; // msg id -> unfurled media
+    mutable QHash<Snowflake, QUrl> m_previewPending;                    // msg id -> URL being unfurled
+    mutable QSet<Snowflake> m_previewFailed;                            // msgs whose links failed to unfurl
+    mutable QHash<QUrl, QSet<Snowflake>> m_videoOwners;                 // video URL -> message ids showing it
 
     mutable QSet<Snowflake> newMessageIds; // IDs of recently inserted messages for highlight animation
 

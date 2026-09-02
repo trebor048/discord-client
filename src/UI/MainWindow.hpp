@@ -112,6 +112,7 @@ private:
     void refreshTabReadStates();
 
     void saveWindowState();
+    void saveTabs();
     void restoreWindowState();
     void applyTreeState();
     void captureTreeState(QStringList &expanded,
@@ -272,7 +273,6 @@ private:
     QHash<Core::Snowflake, QList<QMetaObject::Connection>> instanceConnections;
     QSplitter *mainSplitter = nullptr;
     QMenu *windowMenu = nullptr;
-    bool notificationSoundsEnabled = true;
     QElapsedTimer lastNotificationTime;
 
     // same thing for expansion state

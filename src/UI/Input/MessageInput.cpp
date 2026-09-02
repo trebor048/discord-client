@@ -20,7 +20,6 @@
 #include <QImageReader>
 #include <QKeyEvent>
 #include <QDragEnterEvent>
-#include <QFrame>
 #include <QImage>
 #include <QMimeData>
 #include <QRegularExpression>
@@ -32,9 +31,7 @@
 #include <QPropertyAnimation>
 #include <QParallelAnimationGroup>
 #include <QScreen>
-#include <QSplitter>
 #include <QTextBlock>
-#include <QTextBrowser>
 #include <QTextCursor>
 #include <QTextImageFormat>
 #include <QTimer>
@@ -50,61 +47,6 @@ namespace {
 // Forward decls (defined below, used by the returnPressed handler).
 bool hasAllRequiredOptions(const Discord::ApplicationCommand &command,
                            const QList<Discord::InteractionOptionValue> &parsed);
-
-QString markdownPreviewHtml(const QString &body)
-{
-    return QStringLiteral(
-                   "<html><head><style>"
-                   "body { margin: 0; color: #dbdee1; font-size: 13px; }"
-                   "a { color: #00a8fc; text-decoration: none; }"
-                   ".mention { color: #c9cdfb; background: rgba(88, 101, 242, 0.25); "
-                   "border-radius: 3px; padding: 0 2px; }"
-                   "code { background: rgba(0, 0, 0, 0.25); border-radius: 3px; padding: 1px 3px; }"
-                   "</style></head><body>%1</body></html>")
-            .arg(body);
-}
-
-// Sanitize HTML to prevent XSS in the markdown preview.
-// Strips dangerous constructs even though the parser should already produce
-// safe output (defense-in-depth).
-static QString sanitizeHtml(const QString &html)
-{
-    QString result = html;
-    // Remove <script>...</script> blocks (including variants with attributes)
-    static const QRegularExpression scriptRe(
-        QStringLiteral("<script[^>]*>[\\s\\S]*?</script>"),
-        QRegularExpression::CaseInsensitiveOption);
-    result.remove(scriptRe);
-    // Remove self-closing <script ... /> (rare but possible)
-    static const QRegularExpression scriptSelfClosRe(
-        QStringLiteral("<script[^>]*/>"),
-        QRegularExpression::CaseInsensitiveOption);
-    result.remove(scriptSelfClosRe);
-    // Remove <iframe>...</iframe> blocks
-    static const QRegularExpression iframeRe(
-        QStringLiteral("<iframe[^>]*>[\\s\\S]*?</iframe>"),
-        QRegularExpression::CaseInsensitiveOption);
-    result.remove(iframeRe);
-    static const QRegularExpression iframeSelfClosRe(
-        QStringLiteral("<iframe[^>]*/>"),
-        QRegularExpression::CaseInsensitiveOption);
-    result.remove(iframeSelfClosRe);
-    // Remove JavaScript pseudo-protocol in href/src attributes
-    static const QRegularExpression jsInHref(
-        QStringLiteral("(href|src)\\s*=\\s*[\"']\\s*javascript\\s*:"),
-        QRegularExpression::CaseInsensitiveOption);
-    result.replace(jsInHref, QStringLiteral("href=\"about:blank\""));
-    // Remove event handler attributes (onclick, onload, onerror, etc.)
-    static const QRegularExpression eventHandler(
-        QStringLiteral("\\son\\w+\\s*=\\s*\"[^\"]*\""),
-        QRegularExpression::CaseInsensitiveOption);
-    result.remove(eventHandler);
-    static const QRegularExpression eventHandlerSingle(
-        QStringLiteral("\\son\\w+\\s*=\\s*'[^']*'"),
-        QRegularExpression::CaseInsensitiveOption);
-    result.remove(eventHandlerSingle);
-    return result;
-}
 
 QString gifFilenamePrefix(const Discord::GifItem &gif)
 {
@@ -258,28 +200,6 @@ MessageInput::MessageInput(QWidget *parent) : QWidget(parent)
     stickerPreviewLabel->installEventFilter(this);
     outerLayout->addWidget(stickerPreviewLabel);
 
-    previewSplitter = new QSplitter(Qt::Vertical, this);
-    previewSplitter->setChildrenCollapsible(false);
-    previewSplitter->setHandleWidth(4);
-
-    markdownPreview = new QTextBrowser(previewSplitter);
-    markdownPreview->setObjectName("MarkdownInputPreview");
-    markdownPreview->setVisible(false);
-    markdownPreview->setOpenExternalLinks(false);
-    markdownPreview->setFrameShape(QFrame::NoFrame);
-    markdownPreview->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    markdownPreview->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    markdownPreview->setStyleSheet(
-            QString("#MarkdownInputPreview { background: #2b2d31; border: 1px solid #3f4147; "
-                    "border-radius: %1px; padding: 6px; }")
-                    .arg(Core::Theme::Manager::instance().roundness()));
-
-    markdownPreviewDebounceTimer = new QTimer(this);
-    markdownPreviewDebounceTimer->setSingleShot(true);
-    markdownPreviewDebounceTimer->setInterval(150);
-    connect(markdownPreviewDebounceTimer, &QTimer::timeout,
-            this, &MessageInput::renderMarkdownPreview);
-
     // Text edit
     auto *inputContainer = new QWidget(this);
     auto *inputLayout = new QHBoxLayout(inputContainer);
@@ -335,7 +255,12 @@ MessageInput::MessageInput(QWidget *parent) : QWidget(parent)
             // as a normal message instead of silently dropping them. A bare "/"
             // (no command name) is also a literal message.
             const QString trimmed = txt.trimmed();
+            // A slash command must start at column 0: leading whitespace makes
+            // the message a literal text message (matches Discord), not an
+            // "Unknown command" error that swallows the user's text. A bare "/"
+            // (no command name) is also a literal message.
             const bool slashLike = !attachmentPanel->hasAttachments()
+                                   && txt.startsWith(QLatin1Char('/'))
                                    && trimmed.startsWith(QLatin1Char('/'))
                                    && trimmed.mid(1).length() > 0;
             if (slashLike && tryParseSlashCommand(txt, &command, &options)) {
@@ -368,6 +293,20 @@ MessageInput::MessageInput(QWidget *parent) : QWidget(parent)
         m_pendingSlashQuery.clear();
     });
 
+    // Typing-indicator pacing. Single-shot so a quiet draft goes silent ~8s
+    // after the last keystroke instead of broadcasting forever; every
+    // keystroke re-arms it. The first keystroke of a session emits immediately.
+    typingTimer = new QTimer(this);
+    typingTimer->setSingleShot(true);
+    typingTimer->setInterval(8000);
+    connect(typingTimer, &QTimer::timeout, this, [this]() {
+        if (textEdit->toPlainText().trimmed().isEmpty()) {
+            typingActive = false;
+            return;
+        }
+        emit typingTick();
+    });
+
     connect(textEdit->document(), &QTextDocument::contentsChanged, this, [this]() {
         // One text snapshot per keystroke shared by all popup updates — the
         // prefix helpers would otherwise each re-copy the whole document.
@@ -375,8 +314,24 @@ MessageInput::MessageInput(QWidget *parent) : QWidget(parent)
         updateEmojiPopup(text);
         updateSlashPopup(text);
         updateMentionPopup(text);
-        updateMarkdownPreview();
         adjustHeight();
+
+        // Typing-indicator state machine (see typingTimer above).
+        const bool hasText = !text.trimmed().isEmpty();
+        if (hasText) {
+            if (!typingActive) {
+                typingActive = true;
+                emit typingTick();
+            }
+            typingTimer->start();
+        } else if (typingActive) {
+            typingActive = false;
+            typingTimer->stop();
+        }
+
+        // Animated emoji the user deleted from the document keep decoding and
+        // repainting forever (looping GIFs never emit finished()).
+        pruneOrphanedEmojiMovies();
     });
 
     connect(textEdit, &ChatTextEdit::filesPasted, this, &MessageInput::queueAttachments);
@@ -525,38 +480,9 @@ MessageInput::MessageInput(QWidget *parent) : QWidget(parent)
 
         dialog.exec();
     });
-    connect(previewSplitter, &QSplitter::splitterMoved, this, [this](int, int) {
-        if (!markdownPreviewVisible)
-            return;
-        const auto sizes = previewSplitter->sizes();
-        if (!sizes.isEmpty())
-            markdownPreviewHeight = std::max(56, sizes.first());
-        adjustHeight();
-    });
 
     inputLayout->addWidget(textEdit);
-    previewSplitter->addWidget(markdownPreview);
-    previewSplitter->addWidget(inputContainer);
-    outerLayout->addWidget(previewSplitter);
-
-    auto *previewToggleRow = new QWidget(this);
-    auto *previewToggleLayout = new QHBoxLayout(previewToggleRow);
-    previewToggleLayout->setContentsMargins(0, 4, 0, 0);
-    previewToggleLayout->setSpacing(0);
-    previewToggleLayout->addStretch();
-
-    markdownPreviewToggle = new QToolButton(previewToggleRow);
-    markdownPreviewToggle->setCheckable(true);
-    markdownPreviewToggle->setText(tr("Preview"));
-    markdownPreviewToggle->setToolTip(tr("Toggle markdown preview"));
-    markdownPreviewToggle->setStyleSheet(
-            "QToolButton { border: none; color: #b5bac1; font-size: 12px; padding: 2px 6px; }"
-            "QToolButton:hover, QToolButton:checked { color: #ffffff; }");
-    previewToggleLayout->addWidget(markdownPreviewToggle);
-    outerLayout->addWidget(previewToggleRow);
-
-    connect(markdownPreviewToggle, &QToolButton::toggled, this,
-            &MessageInput::setMarkdownPreviewVisible);
+    outerLayout->addWidget(inputContainer);
 
     setAcceptDrops(true);
 
@@ -675,6 +601,10 @@ void MessageInput::clear()
     if (slashQueryDebounce)
         slashQueryDebounce->stop();
     m_pendingSlashQuery.clear();
+    // Sent/cleared drafts must stop broadcasting the typing indicator.
+    if (typingTimer)
+        typingTimer->stop();
+    typingActive = false;
     // Properly delete movies held via QPointer (MEDIUM #17)
     for (auto it = activeEmojiMovies.begin(); it != activeEmojiMovies.end(); ++it) {
         if (QMovie *m = it.value())
@@ -1672,52 +1602,9 @@ void MessageInput::setStickerGuildInfo(Core::Snowflake guildId, const QString &g
     stickerGuildIconProvider = std::move(iconProvider);
 }
 
-void MessageInput::setMarkdownPreviewVisible(bool visible)
-{
-    markdownPreviewVisible = visible;
-    markdownPreview->setVisible(visible);
-    markdownPreviewDebounceTimer->stop();
-    lastMarkdownPreviewText.reset();
-    renderMarkdownPreview();
-    adjustHeight();
-    textEdit->setFocus();
-}
-
-void MessageInput::updateMarkdownPreview()
-{
-    if (!markdownPreviewVisible)
-        return;
-
-    // Debounce: re-rendering parses the whole message, so don't do it on
-    // every keystroke while the user is still typing.
-    markdownPreviewDebounceTimer->start();
-}
-
-void MessageInput::renderMarkdownPreview()
-{
-    if (!markdownPreviewVisible)
-        return;
-
-    const QString text = textEdit->toPlainText();
-    if (lastMarkdownPreviewText && text == *lastMarkdownPreviewText)
-        return;
-    lastMarkdownPreviewText = text;
-
-    if (text.trimmed().isEmpty()) {
-        markdownPreview->setHtml(markdownPreviewHtml(QStringLiteral(
-                "<span style=\"color: #949ba4;\">Markdown preview</span>")));
-        return;
-    }
-
-    const auto nodes = markdownParser.parse(text);
-    const QString rawHtml = markdownParser.toHtml(nodes);
-    markdownPreview->setHtml(markdownPreviewHtml(sanitizeHtml(rawHtml)));
-}
-
 int MessageInput::collapsedContentHeight() const
 {
-    const int splitterHeight = previewSplitter->height();
-    int h = splitterHeight + markdownPreviewToggle->parentWidget()->sizeHint().height() + 8;
+    int h = textEdit->height() + 8;
     if (replyBar->isVisible())
         h += replyBar->sizeHint().height();
     if (attachmentPanel->isVisible())
@@ -1746,10 +1633,6 @@ void MessageInput::adjustHeight()
         textEdit->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
     textEdit->setFixedHeight(newHeight);
-    const int splitterHeight = newHeight + (markdownPreviewVisible ? markdownPreviewHeight : 0);
-    previewSplitter->setFixedHeight(splitterHeight);
-    if (markdownPreviewVisible)
-        previewSplitter->setSizes({markdownPreviewHeight, newHeight});
 
     // The block's height is a minimum (collapsed) plus a maximum that grows
     // with the status strip, so the strip can slide open without snapping
@@ -2016,6 +1899,37 @@ void MessageInput::cleanEmojiAnimation(const QString &emojiValue)
         activeEmojiMovies.erase(it);
     }
     emojiGifCache.remove(emojiValue);
+}
+
+void MessageInput::pruneOrphanedEmojiMovies()
+{
+    if (activeEmojiMovies.isEmpty())
+        return;
+
+    // Collect the image resource names actually referenced by the document's
+    // fragments (insertImage(..., emojiValue) names them with the emoji value).
+    QSet<QString> referenced;
+    QTextDocument *doc = textEdit->document();
+    for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
+        for (auto it = block.begin(); !it.atEnd(); ++it) {
+            const QTextFragment fragment = it.fragment();
+            if (!fragment.isValid())
+                continue;
+            const QTextCharFormat fmt = fragment.charFormat();
+            if (fmt.isImageFormat()) {
+                const QString name = fmt.toImageFormat().name();
+                if (!name.isEmpty())
+                    referenced.insert(name);
+            }
+        }
+    }
+
+    for (auto it = activeEmojiMovies.begin(); it != activeEmojiMovies.end();) {
+        const QString value = it.key();
+        ++it; // cleanEmojiAnimation erases from the map
+        if (!referenced.contains(value))
+            cleanEmojiAnimation(value);
+    }
 }
 
 int MessageInput::emojiInlineSize() const

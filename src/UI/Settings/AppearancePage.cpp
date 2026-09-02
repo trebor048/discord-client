@@ -209,8 +209,14 @@ AppearancePage::AppearancePage(QWidget *parent)
     scalingLayout->setVerticalSpacing(10);
 
     auto addScaleRow = [this, scalingGroup, scalingLayout](const QString &label, float initial,
-                                                           std::function<void(float)> setter) {
+                                                           std::function<void(float)> setter,
+                                                           std::pair<float, float> range = { 0, 0 }) {
         auto *stepper = new ScaleStepper(scalingGroup);
+        // Widen the range BEFORE setValue: the stepper clamps to its current
+        // range, so a saved value outside the default range would be silently
+        // lost (and later persisted at the clamped value).
+        if (range.first < range.second)
+            stepper->setRange(range.first, range.second);
         stepper->setValue(initial);
         scalingLayout->addRow(label, stepper);
         connect(stepper, &ScaleStepper::valueChanged, this, [setter](float v) { setter(v); });
@@ -223,12 +229,15 @@ AppearancePage::AppearancePage(QWidget *parent)
     addScaleRow(tr("Guild icons:"),
                 Core::Appearance::AppearanceConfig::instance().guildIconScale(),
                 [](float v) { Core::Appearance::AppearanceConfig::instance().setGuildIconScale(v); });
-    auto *channelStepper = addScaleRow(tr("Channel list:"),
-                                       Core::Appearance::AppearanceConfig::instance().channelScale(),
-                                       [](float v) { Core::Appearance::AppearanceConfig::instance().setChannelScale(v); });
-    // The channel list scales over a much wider range than member/guild icons.
-    channelStepper->setRange(Core::Appearance::AppearanceConfig::kChannelMinScale,
-                             Core::Appearance::AppearanceConfig::kChannelMaxScale);
+    // The channel list scales over a much wider range than member/guild icons;
+    // the range is passed in so the saved value isn't clamped to the default
+    // range before the wide range is applied.
+    auto *channelStepper = addScaleRow(
+            tr("Channel list:"),
+            Core::Appearance::AppearanceConfig::instance().channelScale(),
+            [](float v) { Core::Appearance::AppearanceConfig::instance().setChannelScale(v); },
+            { Core::Appearance::AppearanceConfig::kChannelMinScale,
+              Core::Appearance::AppearanceConfig::kChannelMaxScale });
 
     outer->addWidget(scalingGroup);
 

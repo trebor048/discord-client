@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QPointer>
 #include <QWidget>
 
 class QComboBox;
@@ -26,7 +27,7 @@ private:
     void syncFriendRequestControls(int policy);
     void fetchSettings();
 
-    Discord::Client *client = nullptr;
+    QPointer<Discord::Client> client;
 
     QComboBox *dmFilterCombo;
     QComboBox *friendAddCombo;

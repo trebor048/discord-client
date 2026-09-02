@@ -39,7 +39,10 @@ void Settings::load()
         ChannelNotificationOverride o;
         o.muted = s.value("muted", false).toBool();
         o.muteUntilMs = s.value("mute_until", 0).toLongLong();
-        o.level = static_cast<Discord::MessageNotificationLevel>(s.value("level", 0).toInt());
+        const int rawLevel = s.value("level", 0).toInt();
+        o.level = (rawLevel >= 0 && rawLevel <= 3)
+                ? static_cast<Discord::MessageNotificationLevel>(rawLevel)
+                : Discord::MessageNotificationLevel::ALL_MESSAGES;
         s.endGroup();
         m_channelOverrides.insert(id, o);
     }
@@ -56,7 +59,10 @@ void Settings::load()
         ServerNotificationOverride o;
         o.muted = s.value("muted", false).toBool();
         o.muteUntilMs = s.value("mute_until", 0).toLongLong();
-        o.level = static_cast<Discord::MessageNotificationLevel>(s.value("level", 0).toInt());
+        const int rawLevel = s.value("level", 0).toInt();
+        o.level = (rawLevel >= 0 && rawLevel <= 3)
+                ? static_cast<Discord::MessageNotificationLevel>(rawLevel)
+                : Discord::MessageNotificationLevel::ALL_MESSAGES;
         s.endGroup();
         m_serverOverrides.insert(id, o);
     }

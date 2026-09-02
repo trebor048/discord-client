@@ -99,7 +99,8 @@ QColor generateBadgeColor(const QString &id)
 {
     // Generate a deterministic color from the ID using a hash
     QByteArray hash = QCryptographicHash::hash(id.toUtf8(), QCryptographicHash::Md5);
-    quint32 hashValue = *reinterpret_cast<const quint32 *>(hash.constData());
+    quint32 hashValue = 0;
+    memcpy(&hashValue, hash.constData(), sizeof(hashValue));
 
     int hue = hashValue % 360;
     int sat = 55 + ((hashValue >> 8) % 20);
@@ -111,7 +112,8 @@ QColor generateBadgeColor(const QString &id)
 QColor colorForSnowflake(const QString &seed, ColorPalette palette)
 {
     QByteArray hash = QCryptographicHash::hash(seed.toUtf8(), QCryptographicHash::Md5);
-    quint32 hashValue = *reinterpret_cast<const quint32 *>(hash.constData());
+    quint32 hashValue = 0;
+    memcpy(&hashValue, hash.constData(), sizeof(hashValue));
 
     int hue = hashValue % 360;
     int sat;

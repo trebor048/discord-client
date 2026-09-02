@@ -36,9 +36,19 @@ constexpr int kHeaderPoolSize = 32;
 
 VirtualEmojiGrid::VirtualEmojiGrid(QWidget *parent) : QWidget(parent)
 {
-    m_buttons.reserve(kButtonPoolSize);
-    for (int i = 0; i < kButtonPoolSize; ++i)
-        m_buttons.append(createPoolButton());
+    // The initial pool is the largest single allocation burst in the app (two
+    // grids of 264 buttons + 32 headers each live in the emoji picker). If it
+    // fails under memory pressure, degrade to a smaller pool — relayout()
+    // already skips cells beyond m_buttons.size() — instead of letting the
+    // exception escape during dialog construction and aborting the process.
+    try {
+        m_buttons.reserve(kButtonPoolSize);
+        for (int i = 0; i < kButtonPoolSize; ++i)
+            m_buttons.append(createPoolButton());
+    } catch (const std::bad_alloc &) {
+        // Partial pool is fine: visible cells beyond the pool just don't
+        // render until a later ensureButtonPoolSize() succeeds.
+    }
 
     // Capture the button's pristine icon size so recycled buttons can be reset
     // to their native rendering (unicode emoji) before a custom icon overrides
@@ -46,14 +56,19 @@ VirtualEmojiGrid::VirtualEmojiGrid(QWidget *parent) : QWidget(parent)
     if (!m_buttons.isEmpty())
         m_defaultIconSize = m_buttons.first()->iconSize();
 
-    m_headers.reserve(kHeaderPoolSize);
-    for (int i = 0; i < kHeaderPoolSize; ++i) {
-        auto *label = new QLabel(this);
-        QFont font = label->font();
-        font.setBold(true);
-        label->setFont(font);
-        label->hide();
-        m_headers.append(label);
+    try {
+        m_headers.reserve(kHeaderPoolSize);
+        for (int i = 0; i < kHeaderPoolSize; ++i) {
+            auto *label = new QLabel(this);
+            QFont font = label->font();
+            font.setBold(true);
+            label->setFont(font);
+            label->hide();
+            m_headers.append(label);
+        }
+    } catch (const std::bad_alloc &) {
+        // Degrade to whatever headers were created; relayout() hides missing
+        // ones instead of crashing.
     }
 
     // Measure the bold header height once so section offsets are deterministic.

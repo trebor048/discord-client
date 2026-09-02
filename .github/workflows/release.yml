@@ -61,7 +61,7 @@ jobs:
           key: >-
             vcpkg-${{ runner.os }}-${{ env.VCPKG_TRIPLET }}-${{
             env.VCPKG_BASELINE }}-${{ hashFiles('vcpkg.json',
-            'vcpkg-overlay-ports/mlspp/**') }}
+            'vcpkg-triplets/**', 'vcpkg-overlay-ports/**', 'CMakePresets.json') }}
           restore-keys: |
             vcpkg-${{ runner.os }}-${{ env.VCPKG_TRIPLET }}-${{ env.VCPKG_BASELINE }}-
 
@@ -206,7 +206,8 @@ jobs:
           path: build-linux/vcpkg_installed
           key: >-
             vcpkg-${{ runner.os }}-x64-linux-${{ env.VCPKG_BASELINE }}-${{
-            hashFiles('vcpkg.json', 'vcpkg-overlay-ports/mlspp/**') }}
+            hashFiles('vcpkg.json', 'vcpkg-triplets/**', 'vcpkg-overlay-ports/**',
+            'CMakePresets.json') }}
           restore-keys: |
             vcpkg-${{ runner.os }}-x64-linux-${{ env.VCPKG_BASELINE }}-
 

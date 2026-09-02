@@ -72,12 +72,18 @@ FriendsPage::FriendsPage(Core::ClientInstance *instance, QWidget *parent)
     tabs->addTab(blockedTab, tr("Blocked"));
 
     connect(tabs, &QTabWidget::currentChanged, this, &FriendsPage::onTabChanged);
-    connect(friendList, &QListWidget::itemClicked, this, &FriendsPage::onItemClicked);
-    connect(friendList, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
-        Snowflake userId = item->data(Qt::UserRole).toULongLong();
-        if (userId.isValid())
-            openConversation(userId);
-    });
+
+    // Every tab needs the row interactions — previously only the Online tab
+    // had them, leaving All/Pending/Blocked rows unclickable (no profile, no
+    // DM).
+    for (QListWidget *list : { friendList, allTab, pendingTab, blockedTab }) {
+        connect(list, &QListWidget::itemClicked, this, &FriendsPage::onItemClicked);
+        connect(list, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
+            Snowflake userId = item->data(Qt::UserRole).toULongLong();
+            if (userId.isValid())
+                openConversation(userId);
+        });
+    }
 
     connect(relationships, &Core::RelationshipManager::relationshipChanged,
             this, &FriendsPage::onRelationshipChanged);
@@ -158,7 +164,7 @@ bool FriendsPage::updateRowInPlace(QListWidget *list, Tab tab, Core::Snowflake u
         return false; // relationship removed -> the row (if present) must go away
 
     const Discord::Relationship &rel = *relOpt;
-    if (!relationshipMatchesTab(tab, rel.type.get()))
+    if (!relationshipMatchesTab(tab, rel))
         return !row; // the row must leave this tab (or was never in it): rebuild only if visible here
 
     if (!row)
@@ -172,17 +178,30 @@ bool FriendsPage::updateRowInPlace(QListWidget *list, Tab tab, Core::Snowflake u
     return true;
 }
 
-bool FriendsPage::relationshipMatchesTab(Tab tab, Discord::RelationshipType type) const
+bool FriendsPage::relationshipMatchesTab(Tab tab, const Discord::Relationship &rel) const
 {
     switch (tab) {
     case Tab::Online:
+        // "Online" means friends with a non-offline presence; friends with no
+        // cached presence (or an explicit offline status) belong to the All
+        // tab instead. Previously every friend appeared here regardless of
+        // presence.
+        if (rel.type.get() != Discord::RelationshipType::FRIEND)
+            return false;
+        if (!instance)
+            return true;
+        {
+            const auto presence = instance->presence(rel.id.get());
+            return presence.has_value()
+                    && presence->status != QStringLiteral("offline");
+        }
     case Tab::All:
-        return type == Discord::RelationshipType::FRIEND;
+        return rel.type.get() == Discord::RelationshipType::FRIEND;
     case Tab::Pending:
-        return type == Discord::RelationshipType::INCOMING_REQUEST ||
-               type == Discord::RelationshipType::OUTGOING_REQUEST;
+        return rel.type.get() == Discord::RelationshipType::INCOMING_REQUEST ||
+               rel.type.get() == Discord::RelationshipType::OUTGOING_REQUEST;
     case Tab::Blocked:
-        return type == Discord::RelationshipType::BLOCKED;
+        return rel.type.get() == Discord::RelationshipType::BLOCKED;
     }
     return false;
 }
@@ -251,7 +270,7 @@ void FriendsPage::rebuildList()
 
     auto allRelationships = relationships->allRelationships();
     for (const auto &rel : allRelationships) {
-        if (!relationshipMatchesTab(tab, rel.type.get()))
+        if (!relationshipMatchesTab(tab, rel))
             continue;
 
         const QString label = labelFor(rel);

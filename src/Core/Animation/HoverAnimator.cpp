@@ -198,6 +198,12 @@ void HoverAnimator::onHoverEnter(QWidget *w)
         st.isItemView = isItem;
         st.target = w;
 
+        // Hook destroyed to clean hash entry: QEvent::Destroy is not delivered
+        // to event filters observing another object, so the previous Destroy
+        // case never fired and left dangling keys.
+        connect(w, &QObject::destroyed, this, [this, w]() { removeState(w); },
+                Qt::UniqueConnection);
+
         auto *overlay = new QWidget(host);
         overlay->setAttribute(Qt::WA_TransparentForMouseEvents);
         // A plain QWidget does not paint a stylesheet background unless

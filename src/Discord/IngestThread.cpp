@@ -24,11 +24,11 @@ IngestThread::~IngestThread()
 
 void IngestThread::start()
 {
-    if (running) {
+    bool expected = false;
+    if (!running.compare_exchange_strong(expected, true)) {
         qCDebug(LogNetwork) << "Attempt to start already running IngestThread";
         return;
     }
-    running = true;
     thread = std::thread(&IngestThread::threadLoop, this);
 }
 

@@ -6,6 +6,7 @@
 #include <QJsonObject>
 #include <QString>
 
+#include <cmath>
 #include <type_traits>
 
 #include "Snowflake.hpp"
@@ -17,6 +18,9 @@
 namespace Acheron {
 namespace Core {
 namespace JsonUtils {
+
+// Cap on the number of elements parsed from a single JSON array (DoS guard).
+constexpr qsizetype kMaxListElements = 100'000;
 
 namespace detail {
 template <typename T>
@@ -79,11 +83,13 @@ protected:
     public:
         Field()
         {
+            // Value-initialize `value` regardless of state: an optional scalar
+            // field (bool/int/enum) must never read indeterminate memory.
+            value = T();
             if constexpr (IsOptional) {
                 state = State::Undefined;
             } else {
                 state = State::Value;
-                value = T();
             }
         }
 
@@ -251,7 +257,22 @@ protected:
         if constexpr (Deserializable<T>) {
             return T::fromJson(value.toObject());
         } else if constexpr (std::is_same_v<T, Snowflake>) {
-            return value.toString().toULongLong();
+            // Discord sends snowflakes as strings, but numeric values also
+            // appear (some REST endpoints / malformed payloads). Reject
+            // non-numeric input as Invalid instead of silently collapsing to 0.
+            if (value.isString()) {
+                bool ok = false;
+                const quint64 v = value.toString().toULongLong(&ok);
+                return ok ? Snowflake(v) : Snowflake::Invalid;
+            }
+            if (value.isDouble()) {
+                const double d = value.toDouble();
+                if (d >= 0.0 && d < 1.8446744073709552e19 && d == std::floor(d)) {
+                    return Snowflake(static_cast<quint64>(d));
+                }
+                return Snowflake::Invalid;
+            }
+            return Snowflake::Invalid;
         } else if constexpr (std::is_same_v<T, bool>) {
             return value.toBool();
         } else if constexpr (std::is_same_v<T, QString>) {
@@ -288,10 +309,14 @@ protected:
 
             T list;
             const QJsonArray array = value.toArray();
-            list.reserve(array.size());
+            // Bound attacker-controlled arrays (e.g. a 1M-element "embeds" or
+            // "roles" list from a compromised gateway) to avoid OOM. The cap
+            // is far above any legitimate Discord payload size.
+            const qsizetype count = qMin(array.size(), static_cast<qsizetype>(kMaxListElements));
+            list.reserve(static_cast<typename T::size_type>(count));
 
-            for (const QJsonValue &element : array) {
-                list.append(fromJsonValue<InnerType>(element));
+            for (qsizetype i = 0; i < count; ++i) {
+                list.append(fromJsonValue<InnerType>(array.at(i)));
             }
             return list;
         } else {

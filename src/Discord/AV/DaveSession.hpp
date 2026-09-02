@@ -3,6 +3,7 @@
 #include <QObject>
 #include <QHash>
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <set>
@@ -46,9 +47,9 @@ public:
     discord::dave::IEncryptor *encryptor();
     discord::dave::IDecryptor *getOrCreateDecryptor(quint32 ssrc, uint64_t userId);
 
-    bool isDaveEnabled() const { return daveEnabled; }
+    bool isDaveEnabled() const { return daveEnabled.load(); }
 
-    bool isDowngraded() const { return daveDowngraded; }
+    bool isDowngraded() const { return daveDowngraded.load(); }
 
     using FingerprintCallback = std::function<void(const std::vector<uint8_t> &)>;
     void getPairwiseFingerprint(const std::string &userId, FingerprintCallback callback) const;
@@ -83,8 +84,8 @@ private:
 
     std::set<std::string> connectedUserIds;
     int pendingTransitionId = -1;
-    bool daveEnabled = false;
-    bool daveDowngraded = false;
+    std::atomic<bool> daveEnabled{ false };
+    std::atomic<bool> daveDowngraded{ false };
     bool pendingTransitionReady = false;
 
     const QHash<quint32, uint64_t> &ssrcMap;

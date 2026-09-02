@@ -84,7 +84,8 @@ private:
     void abortAllInFlight();
 
     HttpClient *owner;
-    QPointer<HttpClient> ownerGuard; // null-check
+    QPointer<HttpClient> ownerGuard; // null-check (guarded by guardMutex)
+    std::mutex guardMutex;
     QString token;
     ClientIdentity &identity;
     CaptchaResolver *captchaResolver;

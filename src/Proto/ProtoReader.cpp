@@ -49,6 +49,13 @@ bool ProtoReader::readVarint(uint64_t &value)
         if (!readByte(byte))
             return false;
 
+        // The 10th byte (shift == 63) may only contribute bit 0; any value bit
+        // beyond that would need >= 65 bits and `(byte & 0x7F) << 63` is UB.
+        if (shift == 63 && (byte & 0x7E) != 0) {
+            qCWarning(LogProto) << "Varint overflow";
+            return false;
+        }
+
         value |= static_cast<uint64_t>(byte & 0x7F) << shift;
         shift += 7;
     } while (byte & 0x80);

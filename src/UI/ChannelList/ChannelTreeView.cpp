@@ -1,4 +1,5 @@
 #include "ChannelTreeView.hpp"
+#include "ChannelDelegate.hpp"
 #include "ChannelFilterProxyModel.hpp"
 #include "ChannelTreeModel.hpp"
 #include "Core/Settings.hpp"
@@ -8,7 +9,11 @@
 #include <QContextMenuEvent>
 #include <QMenu>
 #include <QMouseEvent>
+#include <QResizeEvent>
 #include <QSettings>
+#include <QTimer>
+
+#include <functional>
 
 namespace Acheron {
 namespace UI {
@@ -25,21 +30,86 @@ ChannelTreeView::ChannelTreeView(QWidget *parent)
         auto nodeType = static_cast<ChannelNode::Type>(index.data(ChannelTreeModel::TypeRole).toInt());
         if (isAlwaysExpanded(nodeType))
             expand(index);
+        // Collapsing/expanding changes the visible row count, which changes
+        // how much leftover height can be distributed across the rows.
+        updateViewportFill();
+    });
+    connect(this, &QTreeView::expanded, this, [this](const QModelIndex &) {
+        updateViewportFill();
     });
 }
 
 void ChannelTreeView::setModel(QAbstractItemModel *m)
 {
     if (auto *oldModel = model()) {
-        disconnect(oldModel, &QAbstractItemModel::rowsInserted, this,
-                   &ChannelTreeView::onRowsInserted);
+        disconnect(oldModel, nullptr, this, nullptr);
     }
 
     QTreeView::setModel(m);
 
     if (m) {
         connect(m, &QAbstractItemModel::rowsInserted, this, &ChannelTreeView::onRowsInserted);
+        connect(m, &QAbstractItemModel::rowsRemoved, this, &ChannelTreeView::onModelStructureChanged);
+        connect(m, &QAbstractItemModel::modelReset, this, &ChannelTreeView::onModelStructureChanged);
     }
+}
+
+void ChannelTreeView::onModelStructureChanged()
+{
+    updateViewportFill();
+}
+
+void ChannelTreeView::updateViewportFill()
+{
+    auto *delegate = qobject_cast<ChannelDelegate *>(itemDelegate());
+    if (!delegate || !model() || !viewport())
+        return;
+
+    const int oldFill = delegate->fillExtra();
+
+    // Sum the natural (unfilled) row heights of every visible row, respecting
+    // expansion. The current fill is subtracted from each row so the result is
+    // independent of the previous fill value (a stable fixed point instead of
+    // an oscillation between "filled" and "unfilled" on every relayout).
+    int visibleRows = 0;
+    int baseTotal = 0;
+    std::function<void(const QModelIndex &)> walk = [&](const QModelIndex &parent) {
+        const int rows = model()->rowCount(parent);
+        for (int i = 0; i < rows; ++i) {
+            const QModelIndex idx = model()->index(i, 0, parent);
+            baseTotal += qMax(0, QTreeView::indexRowSizeHint(idx) - oldFill);
+            ++visibleRows;
+            if (isExpanded(idx) && model()->hasChildren(idx))
+                walk(idx);
+        }
+    };
+    walk(rootIndex());
+
+    int newFill = 0;
+    if (visibleRows > 0) {
+        const int slack = viewport()->height() - baseTotal;
+        if (slack > 0) {
+            // Cap per-row growth so a tiny server doesn't render comically
+            // tall rows; the remainder stays as (unobtrusive) panel space.
+            constexpr int kMaxExtraPerRow = 48;
+            newFill = qMin(slack / visibleRows, kMaxExtraPerRow);
+        }
+    }
+
+    if (newFill != oldFill) {
+        delegate->setFillExtra(newFill);
+        scheduleDelayedItemsLayout();
+        viewport()->update();
+    }
+}
+
+void ChannelTreeView::resizeEvent(QResizeEvent *event)
+{
+    QTreeView::resizeEvent(event);
+    // The viewport height changed: recompute how much slack can be spread
+    // across the rows. Defer so the viewport has its final size before the
+    // scrollbar/layout pass reads it.
+    QTimer::singleShot(0, this, &ChannelTreeView::updateViewportFill);
 }
 
 void ChannelTreeView::onRowsInserted(const QModelIndex &parent, int first, int last)
@@ -59,6 +129,8 @@ void ChannelTreeView::onRowsInserted(const QModelIndex &parent, int first, int l
         if (isAlwaysExpanded(nodeType) && !isExpanded(index))
             expand(index);
     }
+
+    updateViewportFill();
 }
 
 void ChannelTreeView::performDefaultExpansion()

@@ -124,6 +124,27 @@ void StickerPickerDialog::setGuildIconProvider(
 
 void StickerPickerDialog::buildAllTab()
 {
+    // Same hover/movie cleanup as rebuildGrid(): scrollArea->setWidget()
+    // deletes the previous All-tab widget synchronously, so entries keyed by
+    // its buttons must be purged first and the old widget taken + deferred —
+    // otherwise a hovered sticker leaves a dangling QToolButton* in
+    // hoveredMovies and an orphaned, still-decoding QMovie.
+    for (auto it = hoveredMovies.begin(); it != hoveredMovies.end(); ++it) {
+        QMovie *movie = it.value();
+        disconnect(movie, &QMovie::frameChanged, it.key(), nullptr);
+        movie->stop();
+    }
+    hoveredMovies.clear();
+    for (auto it = sharedMovies.begin(); it != sharedMovies.end(); ++it) {
+        it.value()->stop();
+        it.value()->deleteLater();
+    }
+    sharedMovies.clear();
+
+    auto *oldWidget = scrollArea->takeWidget();
+    if (oldWidget)
+        oldWidget->deleteLater();
+
     auto *container = buildStickerGrid(packs);
     scrollArea->setWidget(container);
 }

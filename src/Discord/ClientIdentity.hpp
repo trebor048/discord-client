@@ -22,6 +22,7 @@ class ClientIdentity
 {
 public:
     ClientIdentity();
+    ~ClientIdentity();
 
     // QString getLaunchId() const;
     // QString getLaunchSignature() const;

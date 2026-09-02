@@ -201,17 +201,27 @@ void RoleEditorWidget::loadRole(Core::Snowflake roleId)
     m_roleId = roleId;
     m_loading = true;
 
+    bool found = false;
     auto roles = m_instance->getRolesForGuild(m_guildId);
     for (const auto &role : roles) {
         if (role.id.get() == roleId) {
             applyRoleData(role);
+            found = true;
             break;
         }
     }
 
+    // A role id that isn't in the cache (stale/deleted role still selected in
+    // the list) must not leave the previous role's field values behind with
+    // the new role's id — a Save would then PATCH the wrong role with stale
+    // data. Reset to the empty state instead.
+    if (!found)
+        clearRole();
+
     m_loading = false;
     m_saveButton->setEnabled(false);
-    setEnabled(true);
+    if (found)
+        setEnabled(true);
 }
 
 void RoleEditorWidget::clearRole()

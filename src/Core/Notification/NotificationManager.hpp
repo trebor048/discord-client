@@ -141,6 +141,7 @@ private:
 
     // Sound selection
     QString selectSoundForNotification(const Notification::ToastNotificationData &data);
+    QString defaultSoundForType(const Notification::ToastNotificationData &data) const;
     bool shouldPlaySoundForType(const Notification::ToastNotificationData &data) const;
     bool shouldUseUserSound(const Notification::ToastNotificationData &data) const;
 

@@ -61,6 +61,7 @@ struct EmojiSearchIndex
     // chars per name, mirroring the contains() pre-filter semantics).
     QHash<QChar, QVector<int>> byChar;
     int catalogSize = -1;
+    quint64 catalogGeneration = 0;
 };
 
 const EmojiSearchIndex &emojiSearchIndex()
@@ -68,10 +69,16 @@ const EmojiSearchIndex &emojiSearchIndex()
     static EmojiSearchIndex index;
     const auto &items = Core::EmojiCatalog::items();
     // EmojiCatalog::items() is a lazily rebuilt combined list (built-in +
-    // runtime-registered custom emoji); a size change means a rebuild here.
-    if (index.catalogSize == items.size() && !index.entries.isEmpty())
+    // runtime-registered custom emoji). Size alone is not enough: switching
+    // between guilds with the SAME number of custom emoji leaves the count
+    // unchanged and would serve the previous guild's folded names/ids. The
+    // registry generation covers every content mutation.
+    const quint64 generation = Core::EmojiCatalog::customEmojiGeneration();
+    if (index.catalogSize == items.size() && index.catalogGeneration == generation
+        && !index.entries.isEmpty())
         return index;
 
+    index.catalogGeneration = generation;
     index.entries.clear();
     index.byChar.clear();
     index.entries.reserve(items.size());
@@ -446,12 +453,12 @@ void EmojiAutocompletePopup::acceptCurrent()
 {
     if (m_accepted)
         return;
-    m_accepted = true;
 
     const int row = list_->currentRow();
     if (row < 0 || row >= currentItems_.size())
         return;
 
+    m_accepted = true;
     emit emojiSelected(currentItems_.at(row));
 }
 

@@ -37,14 +37,25 @@ inline int duration(int baseMs)
 
 /// Stop any running QPropertyAnimation targeting "opacity" on a widget.
 /// Used internally so overlapping fades don't fight each other.
+///
+/// Only animations that target w itself (or an opacity effect owned by w)
+/// are stopped. Descendant widgets own their own fades and must not be
+/// killed when an ancestor fades: findChildren() recurses, so a parent fade
+/// (e.g. DialogAnimator fading a dialog on show) would otherwise freeze a
+/// child grid at 0.01 opacity forever. VoiceStatusBar previously had to work
+/// around exactly this (its pulse animation was killed by the recursion).
 inline void stopExistingOpacityAnimations(QWidget *w)
 {
     if (!w) return;
     for (auto *a : w->findChildren<QPropertyAnimation *>()) {
-        if (a->propertyName() == "opacity") {
-            a->stop();
-            a->deleteLater();
-        }
+        if (a->propertyName() != "opacity")
+            continue;
+        QObject *target = a->targetObject();
+        const bool ownedByW = target == w || (target && target->parent() == w);
+        if (!ownedByW)
+            continue;
+        a->stop();
+        a->deleteLater();
     }
 }
 

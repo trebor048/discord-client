@@ -100,6 +100,10 @@ void StickerListWidget::setHttpClient(Discord::HttpClient *http)
 
 void StickerListWidget::setEnabled(bool enabled)
 {
+    // Also propagate to the widget itself: without this, the scroll area and
+    // its children (selection, previews) stay fully interactive even when a
+    // caller considers the widget "disabled".
+    QWidget::setEnabled(enabled);
     enabled_ = enabled;
     uploadButton_->setEnabled(enabled);
     permissionLabel_->setText(enabled
@@ -197,11 +201,15 @@ void StickerListWidget::loadStickerPreview(StickerWidget &entry,
                 return;
 
             QByteArray data = reply->readAll();
-            auto *buffer = new QBuffer(this);
+            // Parent both to the BUTTON (not `this`): rebuildStickerList()
+            // destroys the button grid on every refresh, so the movie and its
+            // buffer die with the button instead of leaking per rebuild and
+            // decoding frames forever against dead widgets.
+            auto *buffer = new QBuffer(btn);
             buffer->setData(data);
             buffer->open(QIODevice::ReadOnly);
 
-            auto *movie = new QMovie(this);
+            auto *movie = new QMovie(btn);
             movie->setDevice(buffer);
             movie->setScaledSize(QSize(kStickerIconSize, kStickerIconSize));
 
@@ -388,17 +396,23 @@ void StickerListWidget::onUploadClicked()
         return;
 
     // Optional description
+    bool descOk = false;
     const QString description = QInputDialog::getText(
             this, tr("Upload Sticker"), tr("Description (optional):"),
-            QLineEdit::Normal, QString(), &ok);
+            QLineEdit::Normal, QString(), &descOk);
+    // Cancelling any modal step aborts the whole upload (consistent with the
+    // name dialog above); previously only the name prompt aborted, so a
+    // cancelled description still started an upload with an empty value.
+    if (!descOk)
+        return;
 
     // Optional tags (used for search/autocomplete)
-    QString tags;
-    if (ok) {
-        tags = QInputDialog::getText(
-                this, tr("Upload Sticker"), tr("Related emoji tags (optional):"),
-                QLineEdit::Normal, QString(), &ok);
-    }
+    bool tagsOk = false;
+    const QString tags = QInputDialog::getText(
+            this, tr("Upload Sticker"), tr("Related emoji tags (optional):"),
+            QLineEdit::Normal, QString(), &tagsOk);
+    if (!tagsOk)
+        return;
 
     uploadStickerFile(filePath, confirmedName, description, tags);
 }

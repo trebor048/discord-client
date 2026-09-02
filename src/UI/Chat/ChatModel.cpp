@@ -6,11 +6,14 @@
 #include <QBuffer>
 #include <QRegularExpression>
 
+#include "ChatLayout.hpp"
 #include "Core/Markdown/Parser.hpp"
 #include "Core/MessageManager.hpp"
 #include "Core/ImageManager.hpp"
 #include "Core/Theme/Manager.hpp"
 #include "Core/AnimationUtils.hpp"
+#include "Core/VideoThumbnailLoader.hpp"
+#include "Core/LinkPreviewManager.hpp"
 #include "Discord/CdnUrls.hpp"
 #include "Discord/Enums.hpp"
 
@@ -163,6 +166,45 @@ ChatModel::ChatModel(Core::ImageManager *imageManager, QObject *parent)
                 // can paint an error state instead of an eternal gray box.
                 notifyImageSettled(url);
             });
+
+    // Video frame-grab thumbnails: when a frame lands, repaint every row whose
+    // attachments reference that video so the tile swaps from the dark
+    // placeholder to the grabbed frame.
+    m_videoThumbnails = new Core::VideoThumbnailLoader(this);
+    connect(m_videoThumbnails, &Core::VideoThumbnailLoader::thumbnailReady, this,
+            [this](const QUrl &url, const QPixmap &) {
+                const auto owners = m_videoOwners.constFind(url);
+                if (owners == m_videoOwners.constEnd())
+                    return;
+                for (const Snowflake id : *owners) {
+                    const int row = rowForMessage(id);
+                    if (row < 0)
+                        continue;
+                    attachmentCache.remove(id);
+                    QModelIndex idx = index(row, 0);
+                    emit dataChanged(idx, idx, { AttachmentsRole });
+                }
+            });
+
+    // Client-side link unfurling for links Discord didn't embed (klipy-style).
+    m_linkPreviews = new Core::LinkPreviewManager(this);
+    connect(m_linkPreviews, &Core::LinkPreviewManager::previewReady, this,
+            [this](const QUrl &url, const Core::LinkPreviewResult &result) {
+                QList<Snowflake> resolved;
+                for (auto it = m_previewPending.constBegin();
+                     it != m_previewPending.constEnd();) {
+                    if (it.value() == url) {
+                        resolved.append(it.key());
+                        it = m_previewPending.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+                if (!result.valid)
+                    return;
+                for (const Snowflake id : resolved)
+                    attachLinkPreview(id, url, result);
+            });
 }
 
 void ChatModel::notifyImageSettled(const QUrl &url)
@@ -242,7 +284,7 @@ void ChatModel::setChannelNameResolver(ChannelNameResolver resolver)
 
 QString ChatModel::resolveAuthorName(const Discord::User &author) const
 {
-    if (displayNameResolver) {
+    if (displayNameResolver && author.id.hasValue()) {
         QString name = displayNameResolver(author.id.get(), currentGuildId);
         if (!name.isEmpty())
             return name;
@@ -252,7 +294,7 @@ QString ChatModel::resolveAuthorName(const Discord::User &author) const
 
 QColor ChatModel::resolveAuthorColor(const Discord::User &author) const
 {
-    if (!roleColorResolver || currentGuildId == Snowflake::Invalid)
+    if (!roleColorResolver || currentGuildId == Snowflake::Invalid || !author.id.hasValue())
         return {};
     return roleColorResolver(author.id.get(), currentGuildId);
 }
@@ -275,14 +317,19 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
         [[fallthrough]];
     case ContentRole:
         return msg.content;
-    case UsernameRole:
+    case UsernameRole: {
+        if (!msg.author.hasValue())
+            return QStringLiteral("Unknown User");
         return resolveAuthorName(msg.author.get());
+    }
     case AvatarRole: {
         const QSize desiredSize(32, 32);
 
         if (!avatarUrlResolver)
             return imageManager->placeholder(desiredSize);
 
+        if (!msg.author.hasValue())
+            return imageManager->placeholder(desiredSize);
         QUrl url = avatarUrlResolver(msg.author.get());
         return avatarTracker.fetch(imageManager, url, desiredSize, index, Core::PinGroup::ChatView);
     }
@@ -290,8 +337,11 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
         return msg.timestamp;
     case EditedTimestampRole:
         return msg.editedTimestamp.hasValue() ? QVariant(*msg.editedTimestamp) : QVariant();
-    case UserIdRole:
+    case UserIdRole: {
+        if (!msg.author.hasValue() || !msg.author->id.hasValue())
+            return QVariant();
         return msg.author->id;
+    }
     case CachedSizeRole: {
         if (sizeCache.contains(msg.id))
             return sizeCache.value(msg.id);
@@ -310,6 +360,8 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
 
         const auto &prevMsg = messages[index.row() - 1];
 
+        if (!prevMsg.author.hasValue() || !msg.author.hasValue())
+            return true;
         if (prevMsg.author->id != msg.author->id)
             return true;
 
@@ -338,8 +390,8 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
             else if (msg.flags.hasValue() && msg.flags->testFlag(Discord::MessageFlag::HAS_THREAD))
                 threadId = msg.id.get();
 
-            QString authorName = resolveAuthorName(msg.author.get()).toHtmlEscaped();
-            QColor authorColor = resolveAuthorColor(msg.author.get());
+            QString authorName = msg.author.hasValue() ? resolveAuthorName(msg.author.get()).toHtmlEscaped() : QStringLiteral("Unknown User");
+            QColor authorColor = msg.author.hasValue() ? resolveAuthorColor(msg.author.get()) : QColor();
             QString authorHtml = authorColor.isValid()
                                          ? QStringLiteral("<span style=\"color:%1;font-weight:600\">%2</span>")
                                                    .arg(authorColor.name(), authorName)
@@ -408,21 +460,52 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
         return html;
     }
     case AttachmentsRole: {
-        if (!msg.attachments.hasValue() || msg.attachments->isEmpty())
-            return QVariant();
+        if (msg.attachments.hasValue() && !msg.attachments->isEmpty()) {
+            auto it = attachmentCache.find(msg.id);
+            if (it != attachmentCache.end())
+                return QVariant::fromValue(*it);
 
-        auto it = attachmentCache.find(msg.id);
-        if (it != attachmentCache.end())
-            return QVariant::fromValue(*it);
+            QList<AttachmentData> data = buildAttachmentData(msg);
+            // Do not cache during the sizeHint pass: it runs with
+            // suppressImageFetch set, so only getIfCached() placeholders would be
+            // stored. Caching those freezes the gray box and stops the paint pass
+            // from ever issuing the real network fetch.
+            if (!suppressImageFetch)
+                attachmentCache.insert(msg.id, data);
+            return QVariant::fromValue(data);
+        }
 
-        QList<AttachmentData> data = buildAttachmentData(msg);
-        // Do not cache during the sizeHint pass: it runs with
-        // suppressImageFetch set, so only getIfCached() placeholders would be
-        // stored. Caching those freezes the gray box and stops the paint pass
-        // from ever issuing the real network fetch.
-        if (!suppressImageFetch)
-            attachmentCache.insert(msg.id, data);
-        return QVariant::fromValue(data);
+        // No Discord attachments: fall back to client-side link unfurling for
+        // link-only messages (klipy/imgur-style links Discord didn't embed).
+        auto resultIt = m_previewResults.constFind(msg.id);
+        if (resultIt != m_previewResults.constEnd())
+            return QVariant::fromValue(buildLinkPreviewAttachments(msg.id, resultIt.value()));
+
+        if (!m_previewPending.contains(msg.id) && !m_previewFailed.contains(msg.id)) {
+            // Only unfurl when Discord itself didn't embed the link (klipy-
+            // style URLs): a message with embeds already renders the media.
+            if (!(msg.embeds.hasValue() && !msg.embeds->isEmpty())) {
+                const QStringList urls =
+                        ChatLayout::extractUrls(msg.content.getOr(QString()));
+                for (const QString &urlStr : urls) {
+                    const QUrl url(urlStr);
+                    if (!url.isValid() || !url.scheme().startsWith(QStringLiteral("http")))
+                        continue;
+                    const QString host = url.host();
+                    if (host == QLatin1String("discord.com") || host.endsWith(QLatin1String(".discord.com")) ||
+                        host == QLatin1String("cdn.discordapp.com") ||
+                        host == QLatin1String("media.discordapp.net") ||
+                        host == QLatin1String("localhost"))
+                        continue;
+                    // The result arrives asynchronously through previewReady and
+                    // triggers a row repaint; only one URL per message is unfurled.
+                    m_previewPending.insert(msg.id, url);
+                    m_linkPreviews->requestPreview(url);
+                    break;
+                }
+            }
+        }
+        return QVariant();
     }
     case EmbedsRole: {
         if (!msg.embeds.hasValue() || msg.embeds->isEmpty())
@@ -667,8 +750,11 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
         return msg.nonce.hasValue() && pendingNonces.contains(msg.nonce.get());
     case IsErroredRole:
         return msg.nonce.hasValue() && erroredNonces.contains(msg.nonce.get());
-    case UsernameColorRole:
+    case UsernameColorRole: {
+        if (!msg.author.hasValue())
+            return QVariant();
         return resolveAuthorColor(msg.author.get());
+    }
     case MessageIdRole:
         return msg.id;
     case ReactionsRole: {
@@ -842,6 +928,21 @@ QList<AttachmentData> ChatModel::buildAttachmentData(const Discord::Message &msg
         // Detect video attachments (video/* content type)
         data.isVideo = att.isVideo();
 
+        // Video thumbnails: prefer an og:image (client-side previews), else a
+        // frame grabbed asynchronously by VideoThumbnailLoader. Owners are
+        // recorded so the row repaints the moment the frame lands.
+        if (data.isVideo) {
+            if (!data.videoThumbnailUrl.isEmpty()) {
+                const QSize thumbSize(480, 270);
+                data.videoThumbnail = imageManager->getIfCached(data.videoThumbnailUrl, thumbSize);
+            } else {
+                data.videoThumbnail = m_videoThumbnails->cached(data.proxyUrl);
+                if (data.videoThumbnail.isNull() && !m_videoThumbnails->isFailed(data.proxyUrl))
+                    m_videoThumbnails->request(data.proxyUrl);
+            }
+            m_videoOwners[data.proxyUrl].insert(msg.id);
+        }
+
         // Detect voice messages (audio attachments with IS_VOICE_MESSAGE flag)
         bool isVoice = false;
         if (att.contentType.hasValue() && att.contentType->startsWith("audio/") &&
@@ -890,6 +991,75 @@ QList<AttachmentData> ChatModel::buildAttachmentData(const Discord::Message &msg
     }
 
     return result;
+}
+
+void ChatModel::attachLinkPreview(Snowflake messageId, const QUrl &,
+                                  const Core::LinkPreviewResult &result)
+{
+    m_previewResults.insert(messageId, result);
+
+    // Register the media URLs so async loads (ImageManager fetch for the
+    // og:image / image, VideoThumbnailLoader frame for extension-less video)
+    // trigger a repaint of the owning row.
+    if (result.isVideo && result.thumbnailUrl.isEmpty())
+        m_videoThumbnails->request(result.mediaUrl);
+    const QUrl imageUrl = result.isImage ? result.mediaUrl : result.thumbnailUrl;
+    if (imageUrl.isValid()) {
+        emojiUrlIndex[imageUrl.toString()].images.insert(messageId);
+        emojiUrlsByMessage[messageId].insert(imageUrl.toString());
+    }
+    if (result.isVideo)
+        m_videoOwners[result.mediaUrl].insert(messageId);
+
+    const int row = rowForMessage(messageId);
+    if (row < 0)
+        return;
+    attachmentCache.remove(messageId);
+    sizeCache.remove(messageId);
+    QModelIndex idx = index(row, 0);
+    emit dataChanged(idx, idx, { AttachmentsRole, CachedSizeRole });
+}
+
+QList<AttachmentData> ChatModel::buildLinkPreviewAttachments(
+        Snowflake messageId, const Core::LinkPreviewResult &result) const
+{
+    AttachmentData data;
+    data.id = messageId;
+    data.isSpoiler = false;
+    data.filename = result.filename;
+
+    if (result.isVideo) {
+        data.isVideo = true;
+        data.proxyUrl = result.mediaUrl;
+        data.originalUrl = result.mediaUrl;
+        if (result.thumbnailUrl.isValid()) {
+            // og:image poster from the video page.
+            data.videoThumbnailUrl = result.thumbnailUrl;
+            const QSize thumbSize(480, 270);
+            data.videoThumbnail = suppressImageFetch
+                                          ? imageManager->getIfCached(result.thumbnailUrl, thumbSize)
+                                          : imageManager->get(result.thumbnailUrl, thumbSize);
+        } else {
+            // Frame grabbed by VideoThumbnailLoader once available.
+            data.videoThumbnail = m_videoThumbnails->cached(result.mediaUrl);
+        }
+    } else if (result.isImage) {
+        data.isImage = true;
+        data.proxyUrl = result.mediaUrl;
+        data.originalUrl = result.mediaUrl;
+        const QString ct = result.contentType.toLower();
+        data.isGif = ct == QLatin1String("image/gif") || ct == QLatin1String("image/webp") ||
+                     ct == QLatin1String("image/avif") ||
+                     result.mediaUrl.path().endsWith(QLatin1String(".gif"), Qt::CaseInsensitive) ||
+                     result.mediaUrl.path().endsWith(QLatin1String(".webp"), Qt::CaseInsensitive);
+        data.displaySize = Core::ImageManager::calculateDisplaySize(QSize(1280, 720));
+        data.pixmap = suppressImageFetch
+                              ? imageManager->getIfCached(result.mediaUrl, data.displaySize)
+                              : imageManager->get(result.mediaUrl, data.displaySize);
+        data.isLoading = !imageManager->isCached(result.mediaUrl, data.displaySize);
+    }
+
+    return { data };
 }
 
 QList<ReactionData> ChatModel::buildReactionData(const Discord::Message &msg) const
@@ -1074,6 +1244,10 @@ void ChatModel::handleIncomingMessages(const Core::MessageRequestResult &result)
         sizeCache.clear();
         attachmentCache.clear();
         embedCache.clear();
+        m_previewResults.clear();
+        m_previewPending.clear();
+        m_previewFailed.clear();
+        m_videoOwners.clear();
         reactionCache.clear();
         pollCache.clear();
         docCache.clear();
@@ -1485,6 +1659,9 @@ void ChatModel::handleMessageDeleted(Snowflake channelId, Snowflake messageId)
             pollCache.remove(messageId);
             invalidateDocCacheForMessage(messageId);
             unindexMessageEmojiUrls(messageId);
+            m_previewResults.remove(messageId);
+            m_previewPending.remove(messageId);
+            m_previewFailed.remove(messageId);
             messages.remove(i);
             messageRowIndexDirty = true;
             if (!deletedNonce.isEmpty()) {
@@ -1855,6 +2032,9 @@ void ChatModel::trimOldestMessagesIfNeeded()
         invalidateDocCacheForMessage(msg.id);
         unindexMessageEmojiUrls(msg.id);
         newMessageIds.remove(msg.id.get());
+        m_previewResults.remove(msg.id);
+        m_previewPending.remove(msg.id);
+        m_previewFailed.remove(msg.id);
     }
     // Trim the nonce index: entries below `excess` vanish with their messages,
     // entries at/above it shift up by `excess`.

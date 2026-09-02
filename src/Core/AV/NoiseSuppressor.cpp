@@ -74,11 +74,9 @@ QByteArray NoiseSuppressor::process(const QByteArray &pcmFrame, float &outVoiceP
     const int frameSize = rnnoise_get_frame_size();
     const auto *in = reinterpret_cast<const int16_t *>(pcmFrame.constData());
 
-    // Reuse a persistent output scratch: the frame size is constant and every
-    // sample is overwritten below, so the per-frame alloc + zero-fill is pure
-    // waste. The voice thread calls process() once per frame and copies the
-    // result before the next call, so the shared buffer is never aliased.
-    static QByteArray out;
+    // Thread-local scratch to avoid per-frame allocation while remaining safe
+    // if processing fans out to multiple threads in future.
+    thread_local QByteArray out;
     out.resize(AUDIO_FRAME_SIZE);
     auto *outSamples = reinterpret_cast<int16_t *>(out.data());
     float prob = 0.0f;

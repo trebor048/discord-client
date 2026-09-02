@@ -5,6 +5,7 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QLabel>
 #include <QPushButton>
 #include <QSettings>
@@ -13,6 +14,7 @@
 #include "UI/Widgets/CustomStatusEdit.hpp"
 #include "UI/Dialogs/EmojiPickerDialog.hpp"
 #include "UI/Chat/ChatLayout.hpp"
+#include "Core/EmojiCatalog.hpp"
 #include "Core/ImageManager.hpp"
 #include "Core/Settings.hpp"
 
@@ -70,6 +72,12 @@ GeneralPage::GeneralPage(QWidget *parent)
     developerModeCheckbox = new QCheckBox(tr("Developer Mode"), generalGroup);
     developerModeCheckbox->setChecked(Core::Settings::instance().developerMode());
     generalLayout->addWidget(developerModeCheckbox);
+
+    silentTypingCheckbox = new QCheckBox(tr("Silent typing (don't send typing indicators)"), generalGroup);
+    silentTypingCheckbox->setChecked(QSettings().value("chat/silentTyping", false).toBool());
+    silentTypingCheckbox->setToolTip(tr("When enabled, other users won't see a \"typing…\" indicator "
+                                        "while you are composing a message."));
+    generalLayout->addWidget(silentTypingCheckbox);
 
     layout->addWidget(generalGroup);
 
@@ -174,6 +182,10 @@ GeneralPage::GeneralPage(QWidget *parent)
     connect(developerModeCheckbox, &QCheckBox::toggled, this, [](bool checked) {
         Core::Settings::instance().setDeveloperMode(checked);
     });
+    connect(silentTypingCheckbox, &QCheckBox::toggled, this, [](bool checked) {
+        QSettings settings;
+        settings.setValue("chat/silentTyping", checked);
+    });
     connect(autoplayGifsCheckbox, &QCheckBox::toggled, this, [](bool checked) {
         QSettings().setValue("ui/gifAutoplay", checked);
         // The running ImageManager caches this flag; invalidate so the toggle
@@ -205,7 +217,7 @@ void GeneralPage::rebuildQuickReactionRow()
 
     const QStringList emojis = currentQuickReactions();
     for (int i = 0; i < emojis.size(); ++i) {
-        auto *button = new QPushButton(emojis[i], this);
+        auto *button = new QPushButton(QString(), this);
         button->setFixedSize(32, 32);
         button->setCursor(Qt::PointingHandCursor);
         button->setToolTip(tr("Click to change · Right-click to remove"));
@@ -220,10 +232,52 @@ void GeneralPage::rebuildQuickReactionRow()
         button->setContextMenuPolicy(Qt::CustomContextMenu);
         connect(button, &QPushButton::customContextMenuRequested, this,
                 [this, i]() { removeQuickReaction(i); });
+
+        // Custom emoji tokens (`<:name:id>` / `<a:name:id>`) render as the
+        // actual image instead of the raw token text; Unicode emoji render as
+        // their glyph.
+        const QString url = Core::EmojiCatalog::cdnUrlForSelection(emojis[i], 32);
+        if (url.isEmpty()) {
+            button->setText(emojis[i]);
+        } else {
+            const QSize iconSize(24, 24);
+            button->setIconSize(iconSize);
+            if (imageManager) {
+                QPixmap pix = imageManager->getIfCached(QUrl(url), iconSize);
+                if (!pix.isNull()) {
+                    button->setIcon(QIcon(pix));
+                } else {
+                    // Icon not cached yet: start the fetch and remember the
+                    // url so imageFetched can fill the button in.
+                    imageManager->get(QUrl(url), iconSize);
+                    button->setProperty("quickReactionUrl", url);
+                }
+            }
+        }
+
         // Emoji slots go before the "+" / Reset controls at the end of the row.
         quickReactionRowLayout->insertWidget(quickEmojiButtons.size(), button);
         quickEmojiButtons.append(button);
     }
+}
+
+void GeneralPage::setImageManager(Core::ImageManager *mgr)
+{
+    imageManager = mgr;
+    if (imageManager) {
+        connect(imageManager, &Core::ImageManager::imageFetched, this,
+                [this](const QUrl &url, const QSize &, const QPixmap &pixmap) {
+                    // Fill any quick-reaction button waiting on this emoji.
+                    const QString urlStr = url.toString();
+                    for (QPushButton *button : std::as_const(quickEmojiButtons)) {
+                        if (button->property("quickReactionUrl").toString() == urlStr) {
+                            button->setIcon(QIcon(pixmap));
+                            button->setProperty("quickReactionUrl", QString());
+                        }
+                    }
+                });
+    }
+    rebuildQuickReactionRow();
 }
 
 void GeneralPage::changeQuickReaction(int index)

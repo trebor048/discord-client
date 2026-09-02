@@ -51,7 +51,8 @@ public:
     void saveMember(Snowflake guildId, Snowflake userId, const Discord::Member &member);
     void saveMembers(Snowflake guildId, const QList<Discord::Member> &members);
     void removeGuildMembers(Snowflake guildId);
-
+    // Purges a single member from the cache and the DB (GUILD_MEMBER_REMOVE).
+    void removeGuildMember(Snowflake guildId, Snowflake userId);
     void saveMemberWithUser(Snowflake guildId, const Discord::Member &member);
 
     void loadNotesFromReady(const QHash<Snowflake, QString> &notes);

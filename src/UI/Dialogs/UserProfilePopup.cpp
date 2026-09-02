@@ -928,11 +928,18 @@ void UserProfilePopup::requestProfile()
                 self->renderFromProfile();
             });
 }
-
 void UserProfilePopup::loadCachedNote()
 {
     if (!instance || !noteEdit || isBot())
         return;
+
+    // Never clobber unsaved edits: an external note change (another window,
+    // another device, a late REST response) must not wipe text the user is
+    // currently typing — saveNote() persists the user's version when they
+    // finish.
+    if (noteDirty)
+        return;
+
     const QString cached = instance->users()->getCachedNote(userId).value_or(QString());
     if (noteLoaded && cached == noteEdit->toPlainText())
         return;

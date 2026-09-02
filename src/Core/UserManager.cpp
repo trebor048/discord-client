@@ -90,6 +90,20 @@ void UserManager::saveUser(const Discord::User &user)
 {
     userCache.insert(user.id, new Discord::User(user));
     userRepo.saveUser(user);
+
+    // Members embed their user at insert time; refresh the embedded copy so
+    // consumers reading member->user (profile popups, member list fallbacks,
+    // pinned-message authors) see the updated global name/avatar instead of
+    // stale data until cache eviction.
+    const QList<MemberKey> keys = memberCache.keys();
+    for (const MemberKey &key : keys) {
+        if (key.userId != user.id)
+            continue;
+        if (Discord::Member *m = memberCache.object(key)) {
+            if (m->user.hasValue())
+                m->user = user;
+        }
+    }
 }
 
 void UserManager::saveUsers(const QList<Discord::User> &users)
@@ -125,6 +139,12 @@ void UserManager::removeGuildMembers(Snowflake guildId)
     for (const MemberKey &key : keys)
         if (key.guildId == guildId)
             memberCache.remove(key);
+}
+
+void UserManager::removeGuildMember(Snowflake guildId, Snowflake userId)
+{
+    memberCache.remove(MemberKey{ guildId, userId });
+    memberRepo.deleteMember(guildId, userId);
 }
 
 void UserManager::saveMemberWithUser(Snowflake guildId, const Discord::Member &member)

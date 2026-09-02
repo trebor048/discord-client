@@ -223,7 +223,7 @@ static std::vector<HighlightSpan> highlightLineForLang(Lang lang, const QString 
             while (end < n) {
                 const QChar sc = line.at(end);
                 if (sc == QLatin1Char('\\')) {
-                    end += 2;
+                    end += (end + 1 < n ? 2 : 1);
                     continue;
                 }
                 if (sc == c) {
@@ -244,10 +244,21 @@ static std::vector<HighlightSpan> highlightLineForLang(Lang lang, const QString 
                 (line.at(end) == QLatin1Char('x') || line.at(end) == QLatin1Char('X') ||
                  line.at(end) == QLatin1Char('b') || line.at(end) == QLatin1Char('B') ||
                  line.at(end) == QLatin1Char('o') || line.at(end) == QLatin1Char('O'))) {
+                const QChar prefix = line.at(end);
                 ++end;
-                while (end < n &&
-                       (isHexDigit(line.at(end)) || line.at(end) == QLatin1Char('_')))
-                    ++end;
+                if (prefix == QLatin1Char('x') || prefix == QLatin1Char('X')) {
+                    while (end < n &&
+                           (isHexDigit(line.at(end)) || line.at(end) == QLatin1Char('_')))
+                        ++end;
+                } else if (prefix == QLatin1Char('b') || prefix == QLatin1Char('B')) {
+                    while (end < n &&
+                           (line.at(end) == QLatin1Char('0') || line.at(end) == QLatin1Char('1') || line.at(end) == QLatin1Char('_')))
+                        ++end;
+                } else {
+                    while (end < n &&
+                           ((line.at(end) >= QLatin1Char('0') && line.at(end) <= QLatin1Char('7')) || line.at(end) == QLatin1Char('_')))
+                        ++end;
+                }
             } else {
                 bool sawDot = false;
                 while (end < n) {

@@ -255,21 +255,24 @@ void SlashCommandPopup::acceptCurrent()
 {
     if (m_accepted)
         return;
-    m_accepted = true;
 
     const int row = list_->currentRow();
-    if (row < 0)
+    if (row < 0) {
         return;
+    }
 
     if (m_suggestionMode) {
-        if (row < suggestionInsertTexts_.size())
+        if (row < suggestionInsertTexts_.size()) {
+            m_accepted = true;
             emit suggestionSelected(suggestionInsertTexts_.at(row));
+        }
         return;
     }
 
     if (row >= currentItems_.size())
         return;
 
+    m_accepted = true;
     emit commandSelected(currentItems_.at(row));
 }
 

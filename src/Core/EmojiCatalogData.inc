@@ -3420,7 +3420,7 @@
     {QStringLiteral("registered"), QString::fromUcs4(U"\U000000AE\U0000FE0F"), QStringLiteral("symbols")},
     {QStringLiteral("trade_mark"), QString::fromUcs4(U"\U00002122\U0000FE0F"), QStringLiteral("symbols")},
     {QStringLiteral("keycap"), QString::fromUcs4(U"\U00000023\U0000FE0F\U000020E3"), QStringLiteral("symbols")},
-    {QStringLiteral("keycap_2"), QString::fromUcs4(U"\U0000002A\U0000FE0F\U000020E3"), QStringLiteral("symbols")},
+    {QStringLiteral("keycap_asterisk"), QString::fromUcs4(U"\U0000002A\U0000FE0F\U000020E3"), QStringLiteral("symbols")},
     {QStringLiteral("keycap_0"), QString::fromUcs4(U"\U00000030\U0000FE0F\U000020E3"), QStringLiteral("symbols")},
     {QStringLiteral("keycap_1"), QString::fromUcs4(U"\U00000031\U0000FE0F\U000020E3"), QStringLiteral("symbols")},
     {QStringLiteral("keycap_2"), QString::fromUcs4(U"\U00000032\U0000FE0F\U000020E3"), QStringLiteral("symbols")},

@@ -106,8 +106,18 @@ void ContextMenuFactory::showUserContextMenu(Snowflake userId, Snowflake guildId
         menu.addSeparator();
     }
 
+    // The menu's exec() runs a nested event loop during which an account
+    // disconnect can null/destroy currentInstance; capture the instance at
+    // build time and re-verify it at trigger time like the sibling actions do.
+    auto *instanceAtBuild = m_window->currentInstance;
+    const auto instanceStillValid = [this, instanceAtBuild]() {
+        return m_window->currentInstance && m_window->currentInstance == instanceAtBuild;
+    };
+
     QAction *profileAction = menu.addAction(tr("Profile"));
-    connect(profileAction, &QAction::triggered, m_window, [this, userId, guildId]() {
+    connect(profileAction, &QAction::triggered, m_window, [this, instanceStillValid, userId, guildId]() {
+        if (!instanceStillValid())
+            return;
         (new UserProfilePopup(m_window->session->getImageManager(), m_window->currentInstance, userId,
                               guildId, m_window))
                 ->show();
@@ -131,7 +141,11 @@ void ContextMenuFactory::showUserContextMenu(Snowflake userId, Snowflake guildId
         dmChannelId = m_window->currentInstance->findDmChannelWithUser(userId);
     if (dmChannelId.has_value()) {
         connect(openDmAction, &QAction::triggered, m_window,
-                [this, channelId = *dmChannelId]() { m_window->selectChannelInTree(channelId); });
+                [this, instanceStillValid, channelId = *dmChannelId]() {
+                    if (!instanceStillValid())
+                        return;
+                    m_window->selectChannelInTree(channelId);
+                });
     } else {
         openDmAction->setEnabled(false);
     }

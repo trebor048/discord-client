@@ -368,6 +368,14 @@ void ChannelSearchPopup::onHistoryPage(const Core::Result<QList<Discord::Message
 
 void ChannelSearchPopup::rebuildList()
 {
+    // Preserve the user's selection across history-page rebuilds: each page
+    // that streams in calls rebuildList(), which clears and re-creates every
+    // row. Without this, the selection snaps back to the oldest result on
+    // every page and keyboard navigation fights the streaming results.
+    QListWidgetItem *previousCurrent = resultsList->currentItem();
+    const qulonglong previousId =
+            previousCurrent ? previousCurrent->data(Qt::UserRole).toULongLong() : 0;
+
     resultsList->clear();
     avatarPendingRows.clear();
 
@@ -460,7 +468,19 @@ void ChannelSearchPopup::rebuildList()
                                      : tr("%1 result(s)").arg(results.size()));
     }
 
-    if (first)
+    // Restore the previous selection (matched by message id) so streaming
+    // history pages don't yank the user's cursor back to the oldest result;
+    // fall back to the first row only when the old selection is gone.
+    if (previousId != 0) {
+        for (int i = 0; i < resultsList->count(); ++i) {
+            QListWidgetItem *it = resultsList->item(i);
+            if (it && it->data(Qt::UserRole).toULongLong() == previousId) {
+                resultsList->setCurrentItem(it);
+                break;
+            }
+        }
+    }
+    if (!resultsList->currentItem() && first)
         resultsList->setCurrentItem(first);
 }
 

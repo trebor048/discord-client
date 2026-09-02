@@ -202,20 +202,31 @@ bool PushToTalkListener::eventFilter(QObject *watched, QEvent *event)
             const Qt::Key base = Qt::Key(combined & int(~Qt::KeyboardModifierMask));
             const int mods = combined & int(Qt::KeyboardModifierMask);
             const bool isPress = event->type() == QEvent::KeyPress;
-            // A KeyRelease always ends the hold once the base key lifts, even
-            // if the user already released the modifier(s): requiring exact
-            // modifier equality on the release edge would leave the mic stuck
-            // open when the modifier leaves first (press matched Ctrl+V, but
-            // the V release arrives with modifiers()==0).
+            // Press edge: the modifiers must match too — a bare "V" press must
+            // not open the mic for a Ctrl+V binding (previously only the base
+            // key was checked, so plain typing triggered the mic).
+            // Release edge: match the base key alone. Requiring exact modifier
+            // equality here would leave the mic stuck open when the modifier is
+            // released before the base key (press matched Ctrl+V, but the V
+            // release arrives with modifiers()==0).
             if (keyEvent->key() == base
                 && (isPress
-                    || (int(keyEvent->modifiers()) & int(Qt::KeyboardModifierMask)) == mods))
+                        ? (int(keyEvent->modifiers()) & int(Qt::KeyboardModifierMask)) == mods
+                        : true))
                 setHeld(isPress);
         }
     } else if (event->type() == QEvent::ApplicationDeactivate) {
         // Losing focus while the key is held would otherwise leave the mic
-        // stuck open since the matching key release never arrives.
+        // stuck open since the matching key release never arrives. But when a
+        // global hotkey is registered, the key keeps working while unfocused
+        // (that is the point of a global PTT) — clearing the hold here would
+        // cut the mic mid-press on every alt-tab.
+#ifdef Q_OS_WIN
+        if (!hotKeyRegistered)
+            setHeld(false);
+#else
         setHeld(false);
+#endif
     }
 
     return QObject::eventFilter(watched, event);

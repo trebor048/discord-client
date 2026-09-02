@@ -651,7 +651,11 @@ QSize ChannelDelegate::sizeHint(const QStyleOptionViewItem &option, const QModel
     const float s = Core::Appearance::AppearanceConfig::instance().channelScale();
     const int h = qMax(Core::Appearance::AppearanceConfig::channelScaledInt(30, s),
                        Core::Appearance::AppearanceConfig::channelScaledInt(fm.height() + 12, s));
-    return QSize(sz.width(), h);
+    // Fill-to-viewport: the view distributes leftover sidebar height across the
+    // visible rows (see setFillExtra). Rows paint their full option.rect, so
+    // the taller rects read as a filled list instead of a gap below the last
+    // channel.
+    return QSize(sz.width(), h + m_fillExtra);
 }
 } // namespace UI
 } // namespace Acheron

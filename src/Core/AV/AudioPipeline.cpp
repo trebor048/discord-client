@@ -471,6 +471,11 @@ void AudioPipeline::onMixTick()
                         break;
                     state.pendingFrames.append(frames[i]);
                 }
+                // The remaining frames of this packet play from pendingFrames on
+                // the next N-1 ticks without calling pop(); fast-forward the
+                // jitter buffer over them so its sequence tracking stays aligned
+                // with the frames actually consumed (see advanceFrames).
+                state.jitterBuffer->advanceFrames(frames.size() - 1);
             }
         }
 

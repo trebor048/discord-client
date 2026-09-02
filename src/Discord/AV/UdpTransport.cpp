@@ -114,6 +114,8 @@ void UdpTransport::onReadyRead()
 
 void UdpTransport::parseIpDiscoveryResponse(const QByteArray &data)
 {
+    if (data.size() < IP_DISCOVERY_PACKET_SIZE)
+        return;
     quint16 type;
     memcpy(&type, data.constData(), 2);
     type = qFromBigEndian(type);

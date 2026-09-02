@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QPointer>
 #include <QWidget>
 #include <QTabWidget>
 #include <QHash>
@@ -46,6 +47,7 @@ private slots:
     void onImportSettings();
     void onExportSettings();
     void onResetSounds();
+    void onAddUserSound();
     void onSendTestNotification();
     void onDismissAllNotifications();
     void onRequestNativePermission();
@@ -106,6 +108,7 @@ private:
     QSpinBox *m_voiceDebounceSpin = nullptr;
 
     // Sound
+    QCheckBox *m_soundMasterCheck = nullptr;
     QSlider *m_globalVolumeSlider = nullptr;
     QCheckBox *m_soundDMsCheck = nullptr;
     QCheckBox *m_soundGroupDMsCheck = nullptr;
@@ -119,6 +122,7 @@ private:
 
     // User Sounds
     QListWidget *m_userSoundsList = nullptr;
+    QPushButton *m_addUserSoundBtn = nullptr;
     QPushButton *m_clearUserSoundsBtn = nullptr;
 
     // Native
@@ -131,7 +135,10 @@ private:
     QPushButton *m_dismissAllBtn = nullptr;
 
     bool m_loadingSettings = false;
-    Core::NotificationManager *m_notificationManager = nullptr;
+    // QPointer: the manager dies with its ClientInstance (account switch /
+    // disconnect) while this modal window can stay open; auto-nulls on
+    // destruction so late actions never deref freed memory.
+    QPointer<Core::NotificationManager> m_notificationManager = nullptr;
     QListWidget *m_notifyForFancyList = nullptr;
     QListWidget *m_notifyForList = nullptr;
     QListWidget *m_ignoreUsersList = nullptr;

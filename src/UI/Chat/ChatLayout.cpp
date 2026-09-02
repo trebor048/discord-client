@@ -8,6 +8,7 @@
 #include "Core/AnimationUtils.hpp"
 
 #include <QCoreApplication>
+#include <QElapsedTimer>
 #include <QPainter>
 #include <QGraphicsBlurEffect>
 #include <QGraphicsScene>
@@ -1068,24 +1069,31 @@ const QStringList &defaultQuickReactionEmojis()
 
 const QStringList &quickReactionEmojis()
 {
-    // User-customizable via Settings > General > Quick reactions. Re-read
-    // QSettings on every call (cheap in-process cache lookup) so edits apply
-    // without a restart; the serialized comparison keeps the static cache in
-    // sync. Empty/invalid configs fall back to the defaults.
+    // User-customizable via Settings > General > Quick reactions. Re-reading
+    // QSettings on every call is what makes edits apply without a restart, but
+    // constructing QSettings per message row (layout runs for every row while
+    // scrolling) is measurable overhead. Poll instead: re-read at most every
+    // 300 ms and serve the static cache in between, so edits still land within
+    // a third of a second while scrolling stays cheap. Empty/invalid configs
+    // fall back to the defaults.
     static const int MaxCustom = 10;
     static QStringList cached;
     static QString cachedSerialized;
+    static QElapsedTimer pollTimer;
 
-    const QString serialized =
-            QSettings().value(QStringLiteral("chat/quick_reactions")).toStringList().join(u'\n');
-    if (serialized != cachedSerialized) {
-        cachedSerialized = serialized;
-        if (serialized.isEmpty()) {
-            cached = defaultQuickReactionEmojis();
-        } else {
-            cached = serialized.split(u'\n', Qt::SkipEmptyParts);
-            if (cached.size() > MaxCustom)
-                cached = cached.mid(0, MaxCustom);
+    if (!pollTimer.isValid() || pollTimer.elapsed() >= 300) {
+        pollTimer.restart();
+        const QString serialized =
+                QSettings().value(QStringLiteral("chat/quick_reactions")).toStringList().join(u'\n');
+        if (serialized != cachedSerialized) {
+            cachedSerialized = serialized;
+            if (serialized.isEmpty()) {
+                cached = defaultQuickReactionEmojis();
+            } else {
+                cached = serialized.split(u'\n', Qt::SkipEmptyParts);
+                if (cached.size() > MaxCustom)
+                    cached = cached.mid(0, MaxCustom);
+            }
         }
     }
     return cached;
@@ -1225,13 +1233,54 @@ std::optional<HitRegion> hitTest(const ResolvedLayout &resolved, const QPoint &m
         if (charPos >= 0) {
             QVector<QPair<int, int>> spans;
             if (!ctx.model->textUrlSpansFor(ctx.messageId, &spans)) {
+                // Match the URL run itself (parens allowed), then trim trailing
+                // punctuation with ()/[]/{} balance awareness — a URL's own
+                // closing bracket must not be stripped, or the click target
+                // becomes an unbalanced broken link. Mirrors
+                // ChatLinkification::extractUrls.
                 static const QRegularExpression urlRe(
-                        QStringLiteral(R"(https?://[^\s<>"']+[^\s<>"',.;:!?)})"));
+                        QStringLiteral(R"(https?://[^\s<>"']+)"));
                 const QString renderedText = doc->toPlainText();
                 QRegularExpressionMatchIterator it = urlRe.globalMatch(renderedText);
                 while (it.hasNext()) {
                     QRegularExpressionMatch m = it.next();
-                    spans.append({ m.capturedStart(), m.capturedEnd() });
+                    int start = m.capturedStart();
+                    int end = m.capturedEnd();
+                    const auto unbalancedCloser = [&renderedText, start](int endPos,
+                                                                         QChar open,
+                                                                         QChar close) {
+                        int opens = 0, closes = 0;
+                        for (int i = start; i < endPos; ++i) {
+                            if (renderedText.at(i) == open)
+                                ++opens;
+                            else if (renderedText.at(i) == close)
+                                ++closes;
+                        }
+                        return closes > opens;
+                    };
+                    while (end > start) {
+                        const QChar last = renderedText.at(end - 1);
+                        const bool plainPunct = last == QLatin1Char('.')
+                                                || last == QLatin1Char(',')
+                                                || last == QLatin1Char(';')
+                                                || last == QLatin1Char(':')
+                                                || last == QLatin1Char('!')
+                                                || last == QLatin1Char('?');
+                        const bool balParen = last == QLatin1Char(')')
+                                              && unbalancedCloser(end, QLatin1Char('('),
+                                                                  QLatin1Char(')'));
+                        const bool balBracket = last == QLatin1Char(']')
+                                                && unbalancedCloser(end, QLatin1Char('['),
+                                                                    QLatin1Char(']'));
+                        const bool balBrace = last == QLatin1Char('}')
+                                              && unbalancedCloser(end, QLatin1Char('{'),
+                                                                  QLatin1Char('}'));
+                        if (!plainPunct && !balParen && !balBracket && !balBrace)
+                            break;
+                        --end;
+                    }
+                    if (end > start)
+                        spans.append({ start, end });
                 }
                 ctx.model->setTextUrlSpansFor(ctx.messageId, spans);
             }

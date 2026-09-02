@@ -196,6 +196,11 @@ private:
 
     bool atBottom = false;
 
+    // True while a deferred scroll-to-bottom glide is queued (rowsInserted
+    // defers the animation by one event-loop pass). Used so a second batch of
+    // messages inserted before the timer fires still counts as at-bottom.
+    bool bottomGlidePending_ = false;
+
     Core::Snowflake currentUserId = Core::Snowflake::Invalid;
     bool canPinMessages = false;
     bool pendingScroll_ = false;

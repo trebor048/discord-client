@@ -18,6 +18,7 @@ private slots:
     void testUrlWithFragment();
     void testHttpUppercase();
     void testNestedParens();
+    void testParenthesizedUrlKeepsClosingParen();
     void testUrlInAngleBrackets();
     void testNoUrlAtAll();
     void testMalformedUrl();
@@ -91,6 +92,15 @@ void TestLinkification::testNestedParens()
     QStringList urls = extractUrls("((https://example.com))");
     QCOMPARE(urls.size(), 1);
     QCOMPARE(urls[0], QStringLiteral("https://example.com"));
+}
+
+void TestLinkification::testParenthesizedUrlKeepsClosingParen()
+{
+    // A URL whose own path legitimately contains a balanced closing paren must
+    // not have that paren stripped.
+    QStringList urls = extractUrls("see https://en.wikipedia.org/wiki/HTTP_(disambiguation) now");
+    QCOMPARE(urls.size(), 1);
+    QCOMPARE(urls[0], QStringLiteral("https://en.wikipedia.org/wiki/HTTP_(disambiguation)"));
 }
 
 void TestLinkification::testUrlInAngleBrackets()

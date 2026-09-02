@@ -20,6 +20,7 @@ public:
                     QSqlDatabase &db);
     bool saveMembers(Core::Snowflake guildId, const QList<Discord::Member> &members);
     void deleteMembersForGuild(Core::Snowflake guildId, QSqlDatabase &db);
+    void deleteMember(Core::Snowflake guildId, Core::Snowflake userId);
 
     std::optional<Discord::Member> getMember(Core::Snowflake guildId, Core::Snowflake userId);
     QList<Core::Snowflake> getMemberUserIds(Core::Snowflake guildId);

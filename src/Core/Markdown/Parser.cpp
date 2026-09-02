@@ -32,10 +32,15 @@ QList<AstNode> Parser::parse(QString source, ParseState state)
     // Normalize once at the top-level entry: nested parses always operate on
     // captured substrings of the already-normalized source (no \r or \t can
     // survive into them), so re-running the two replaces per nesting level is
-    // pure waste. parse() has a single exit point, so the depth bookkeeping is
-    // trivially balanced.
-    const bool nested = sParseDepth > 0;
-    ++sParseDepth;
+    // pure waste. Use RAII so an exception (e.g. std::bad_alloc in reserve/regex)
+    // cannot leave sParseDepth permanently incremented and skip future normalisation.
+    struct DepthGuard {
+        int &d;
+        explicit DepthGuard(int &v) : d(v) { ++d; }
+        ~DepthGuard() { --d; }
+    };
+    DepthGuard guard(sParseDepth);
+    const bool nested = guard.d > 1;
     if (!nested) {
         source.replace(QRegularExpression(R"(\r\n?)"), "\n");
         source.replace("\t", "    ");
@@ -132,7 +137,6 @@ QList<AstNode> Parser::parse(QString source, ParseState state)
         pos += capturedStr.length();
     }
 
-    --sParseDepth;
     return result;
 }
 

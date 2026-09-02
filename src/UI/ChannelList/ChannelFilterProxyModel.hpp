@@ -43,6 +43,8 @@ private:
     Core::Snowflake selectedChannelId;
     Core::Snowflake selectedAccountId;
 
+    QMetaObject::Connection dataChangedConnection;
+
     // True while a deferred re-sort is queued; coalesces bursts of
     // dataChanged (e.g. a DM message storm) into a single sort.
     bool resortPending_ = false;

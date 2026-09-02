@@ -3,6 +3,8 @@
 
 #include "Core/Logging.hpp"
 
+#include <QSettings>
+
 #ifdef Q_OS_WIN
 #include <objbase.h>
 #endif
@@ -15,6 +17,17 @@ VoiceManager::VoiceManager(Snowflake accountId, QObject *parent)
     : QObject(parent), accountId(accountId), audioBackend(IAudioBackend::create())
 {
     connect(audioBackend.get(), &IAudioBackend::devicesChanged, this, &VoiceManager::onDevicesChanged);
+
+    // Seed the cached settings from QSettings so saved preferences (input/output
+    // device, VAD sensitivity/threshold, noise suppression) apply on the first
+    // voice connection without requiring Settings→Voice to be opened first.
+    // onVoiceClientConnected() re-applies these caches to every new pipeline.
+    QSettings settings;
+    currentInputDeviceId = settings.value("voice/input_device").toString().toUtf8();
+    currentOutputDeviceId = settings.value("voice/output_device").toString().toUtf8();
+    cachedVadSensitivity = static_cast<float>(settings.value("voice/input_sensitivity", 30.0).toDouble());
+    cachedVadThreshold = static_cast<float>(settings.value("voice/vadThreshold", 100).toInt());
+    cachedNoiseSuppression = settings.value("voice/noise_suppression", true).toBool();
 }
 
 VoiceManager::~VoiceManager()
@@ -237,6 +250,8 @@ void VoiceManager::setUserVolume(Snowflake userId, float volume)
 
 void VoiceManager::setVadThreshold(float threshold)
 {
+    cachedVadThreshold = threshold;
+
     if (audioPipeline)
         QMetaObject::invokeMethod(audioPipeline, [p = audioPipeline, threshold]() { p->setVadThreshold(threshold); });
 }
@@ -701,10 +716,12 @@ void VoiceManager::onVoiceClientConnected()
     bool pttEnabled = cachedPushToTalk;
     bool pttHeld = pushToTalkKeyHeld;
     float vadSensitivity = cachedVadSensitivity;
+    float vadThreshold = cachedVadThreshold;
     QMetaObject::invokeMethod(audioPipeline, [p = audioPipeline, backend, capturing, inputId, outputId,
                                               application, bitrate, complexity, signalType, fec, plp, ns, nsVad,
-                                              pttEnabled, pttHeld, vadSensitivity]() {
+                                              pttEnabled, pttHeld, vadSensitivity, vadThreshold]() {
         p->setVadSensitivity(vadSensitivity);
+        p->setVadThreshold(vadThreshold);
         p->setOpusApplication(application);
         p->setOpusBitrate(bitrate);
         p->setOpusComplexity(complexity);

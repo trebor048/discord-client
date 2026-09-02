@@ -10,6 +10,9 @@ class QHBoxLayout;
 class QPushButton;
 
 namespace Acheron {
+namespace Core {
+class ImageManager;
+}
 namespace Discord {
 class Client;
 }
@@ -24,6 +27,7 @@ public:
     explicit GeneralPage(QWidget *parent = nullptr);
 
     void setClient(Discord::Client *client);
+    void setImageManager(Core::ImageManager *imageManager);
 
 signals:
     void notificationSoundsChanged(bool enabled);
@@ -41,6 +45,7 @@ private:
     QCheckBox *inMemoryCacheCheckbox;
     QCheckBox *notificationSoundsCheckbox;
     QCheckBox *developerModeCheckbox;
+    QCheckBox *silentTypingCheckbox;
     QCheckBox *autoplayGifsCheckbox;
     QCheckBox *autoplayVideosCheckbox;
     QComboBox *newTabBehaviorCombo;
@@ -49,6 +54,8 @@ private:
 
     QHBoxLayout *quickReactionRowLayout = nullptr;
     QList<QPushButton *> quickEmojiButtons;
+
+    Core::ImageManager *imageManager = nullptr;
 };
 
 } // namespace UI

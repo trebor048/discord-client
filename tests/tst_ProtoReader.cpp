@@ -13,6 +13,7 @@ private slots:
     void testLargeVarint();
     void testMaximumVarint();
     void testVarintOverflow();
+    void testVarintTenthByteOverflow();
     void testReadFixed64();
     void testReadLengthDelimited();
     void testReadTag();
@@ -98,6 +99,17 @@ void TestProtoReader::testVarintOverflow()
     // 11 bytes of varint with continuation bits set should trigger overflow.
     // Read raw varint (not via wrapper) to test readVarint directly.
     QByteArray data = QByteArray::fromHex("FFFFFFFFFFFFFFFFFFFF01");
+    ProtoReader reader(data);
+    uint64_t value;
+    QVERIFY(!reader.readVarint(value));
+}
+
+void TestProtoReader::testVarintTenthByteOverflow()
+{
+    // A 10-byte varint whose 10th byte carries value bits beyond bit 0
+    // (e.g. 0x02) needs >= 65 bits; previously `(byte & 0x7F) << 63` was UB.
+    // 9 bytes of 0xFF then 0x02 (continuation cleared, but value bits set).
+    QByteArray data = QByteArray::fromHex("FFFFFFFFFFFFFFFFFF02");
     ProtoReader reader(data);
     uint64_t value;
     QVERIFY(!reader.readVarint(value));

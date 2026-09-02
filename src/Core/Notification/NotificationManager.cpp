@@ -154,6 +154,11 @@ void NotificationManager::initialize()
     }
     m_streamerTimer->setInterval(5000);
     m_streamerTimer->start();
+
+    // Run the first check immediately instead of waiting for the first 5s
+    // tick, so streamer mode (and its notification suppression) is active from
+    // the moment the client starts rather than after a startup gap.
+    checkStreamerMode();
 }
 
 void NotificationManager::shutdown()
@@ -450,7 +455,11 @@ void NotificationManager::showNotification(const Notification::ToastNotification
         shouldPlaySoundForType(data)) {
         QString soundId = selectSoundForNotification(data);
         if (!soundId.isEmpty()) {
-            int volume = m_settings.globalSoundVolume;
+            // Relative per-sound volume (0-100). The master volume is applied
+            // once by SoundManager::m_globalVolume (set from
+            // notifications/sound_volume); passing the global volume here too
+            // would scale loudness quadratically (50% slider -> 25% actual).
+            int volume = 100;
             QString customFileId;
             QString customUrl;
 
@@ -470,7 +479,11 @@ void NotificationManager::showNotification(const Notification::ToastNotification
             }
 
             if (!userSoundSelected) {
-                auto override = getSoundOverride(soundId);
+                // Look up the override by the notification's type key (e.g.
+                // "mention1"), NOT the already-resolved sound id — otherwise
+                // an override's volume/custom-file metadata is silently dropped
+                // whenever selectedSound differs from the type key.
+                auto override = getSoundOverride(defaultSoundForType(data));
                 if (override.enabled) {
                     volume = (volume * override.volume) / 100;
                     customFileId = override.customFileId;
@@ -736,6 +749,14 @@ void NotificationManager::onVoiceStateUpdated(const Discord::VoiceState &state)
 
     const auto userId = state.userId.get();
 
+    // Ignore self and ignored users BEFORE consuming the global throttle
+    // budget: the user's own mute/deafen/server-mute toggles and other users'
+    // state churn would otherwise silently suppress legitimate join
+    // notifications for everyone else (a burst of self updates eats the
+    // 20-per-10s window).
+    if (userId == m_instance->accountId()) return;
+    if (m_ignoreUsersSet.contains(userId.toString())) return;
+
     qint64 now = QDateTime::currentMSecsSinceEpoch();
 
     // Global debounce
@@ -748,17 +769,12 @@ void NotificationManager::onVoiceStateUpdated(const Discord::VoiceState &state)
         m_voiceTimestamps.removeFirst();
     }
     if (m_voiceTimestamps.size() >= 20) return;
-    m_voiceTimestamps.append(now);
-
-    // Ignore self
-    if (userId == m_instance->accountId()) return;
-
-    // Check ignore list
-    if (m_ignoreUsersSet.contains(userId.toString())) return;
 
     // Per-user debounce. Checked here (cheap early-out) but only recorded
-    // right before a notification is actually shown, so mute/deafen/stream
-    // toggles and unknown users don't consume the window.
+    // right before a notification is actually shown — the global window slot
+    // (m_voiceTimestamps.append below) is likewise consumed only when a toast
+    // is actually produced, so mute/deafen/stream toggles, per-user debounced
+    // repeats, and unknown users don't eat the 20-per-10s budget.
     qint64 lastUserVoice = m_lastVoiceNotification.value(userId, 0);
     if (now - lastUserVoice < m_settings.voiceDebounceMs) return;
 
@@ -812,7 +828,16 @@ void NotificationManager::onVoiceStateUpdated(const Discord::VoiceState &state)
 
     auto shouldNotify = [&](const std::optional<Discord::Channel>& channel) -> bool {
         if (!channel) return false;
-        if (!shouldShowVoiceNotification(state, nullptr)) return false;
+        // shouldShowVoiceNotification keys its mute/ignore checks on
+        // newState.channelId, which is only correct when the notification's
+        // target IS the new channel (join / move-join). For leaves (and the
+        // "left" half of a move), key the checks on the channel being left —
+        // otherwise moving out of an unmuted channel into a muted one would
+        // suppress the leave toast for a channel the user cares about.
+        Discord::VoiceState checkState = state;
+        if (channel->id.hasValue())
+            checkState.channelId = channel->id.get();
+        if (!shouldShowVoiceNotification(checkState, nullptr)) return false;
         // Mute check keyed on the target channel (for leaves, newState.channelId
         // is null so shouldShowVoiceNotification skips it).
         if (m_instance) {
@@ -830,35 +855,36 @@ void NotificationManager::onVoiceStateUpdated(const Discord::VoiceState &state)
         return false;
     };
 
+    // A notification is actually about to be shown: record the window slot AND
+    // the per-user timestamp together, so only real toasts consume either.
+    auto recordAndShow = [&](const Discord::Channel &channel, const QString &verb) {
+        m_voiceTimestamps.append(now);
+        m_lastVoiceNotification[userId] = now;
+        auto notification = createVoiceNotification(*user, channel, verb);
+        showNotification(notification);
+    };
+
     // Handle join
     if (!oldChannelId.has_value() && state.channelId.hasValue()) {
         if (shouldNotify(newChannel)) {
-            m_lastVoiceNotification[userId] = now;
-            auto notification = createVoiceNotification(*user, *newChannel, "joined");
-            showNotification(notification);
+            recordAndShow(*newChannel, "joined");
         }
     }
     // Handle leave
     else if (oldChannelId.has_value() && !state.channelId.hasValue()) {
         if (shouldNotify(oldChannel)) {
-            m_lastVoiceNotification[userId] = now;
-            auto notification = createVoiceNotification(*user, *oldChannel, "left");
-            showNotification(notification);
+            recordAndShow(*oldChannel, "left");
         }
     }
     // Handle move (send both leave and join notifications)
     else if (oldChannelId.has_value() && state.channelId.hasValue() && oldChannelId.value() != state.channelId.get()) {
         // Left old channel
         if (shouldNotify(oldChannel)) {
-            m_lastVoiceNotification[userId] = now;
-            auto notification = createVoiceNotification(*user, *oldChannel, "left");
-            showNotification(notification);
+            recordAndShow(*oldChannel, "left");
         }
         // Joined new channel
         if (shouldNotify(newChannel)) {
-            m_lastVoiceNotification[userId] = now;
-            auto notification = createVoiceNotification(*user, *newChannel, "joined");
-            showNotification(notification);
+            recordAndShow(*newChannel, "joined");
         }
     }
 }
@@ -1268,12 +1294,13 @@ bool NotificationManager::isMentioned(const Discord::Message &message) const
             if (mention.id.get() == myId) return true;
         }
     }
-
-    // @everyone / @here mentions
-    const auto content = message.content.get();
-    if (content.contains("@everyone") || content.contains("@here")) {
+    // @everyone / @here mentions. Discord only sets mention_everyone when the
+    // message actually pings (it does NOT set it for quoted/escaped/disabled
+    // text that merely contains the substring), so gate on the flag instead of
+    // a content scan — otherwise a literal "@everyone" in plain text fires a
+    // mention toast + sound on servers where the ping is disabled.
+    if (message.mentionEveryone.getOr(false))
         return true;
-    }
 
     if (message.mentionRoles.hasValue() && message.guildId.hasValue() && m_instance) {
         const auto myRoles = m_instance->getMemberRolesSorted(message.guildId.get(), myId);
@@ -1287,7 +1314,9 @@ bool NotificationManager::isMentioned(const Discord::Message &message) const
         }
     }
 
-    return content.contains(QString("<@%1>").arg(myId.toString()));
+    // Final fallback: a raw <@id> mention embedded in the content (covers
+    // messages whose mentions array wasn't populated).
+    return message.content.get().contains(QString("<@%1>").arg(myId.toString()));
 }
 
 Discord::MessageNotificationLevel NotificationManager::getChannelNotificationLevel(const Discord::Channel &channel) const
@@ -1306,13 +1335,16 @@ Discord::MessageNotificationLevel NotificationManager::getChannelNotificationLev
     if (auto channelOv = localSettings.channelOverride(channelId)) {
         if (channelOv->muted || channelOv->muteUntilMs > nowMs)
             return Level::NO_MESSAGES;
-        if (channelOv->level != Level::ALL_MESSAGES)
+        // INHERIT is not a decision — fall through to the server-side
+        // settings below instead of treating it as a final level (which would
+        // silently suppress notifications for the channel).
+        if (channelOv->level != Level::ALL_MESSAGES && channelOv->level != Level::INHERIT)
             return channelOv->level;
     }
     if (auto serverOv = localSettings.serverOverride(guildId)) {
         if (serverOv->muted || serverOv->muteUntilMs > nowMs)
             return Level::NO_MESSAGES; // local mute = hard suppress, like channels
-        if (serverOv->level != Level::ALL_MESSAGES)
+        if (serverOv->level != Level::ALL_MESSAGES && serverOv->level != Level::INHERIT)
             return serverOv->level;
     }
 
@@ -1493,6 +1525,26 @@ bool NotificationManager::shouldUseUserSound(const Notification::ToastNotificati
     return userOnNotifyList || isDM || channelOnNotifyList;
 }
 
+QString NotificationManager::defaultSoundForType(const Notification::ToastNotificationData &data) const
+{
+    switch (data.type) {
+    case Notification::NotificationType::Mention:
+        return SoundManager::Mention1;
+    case Notification::NotificationType::DirectMessage:
+    case Notification::NotificationType::GroupMessage:
+        return SoundManager::Message3;
+    case Notification::NotificationType::FriendRequest:
+    case Notification::NotificationType::FriendAccepted:
+    case Notification::NotificationType::VoiceJoin:
+    case Notification::NotificationType::VoiceLeave:
+    case Notification::NotificationType::VoiceMove:
+        return SoundManager::DefaultNotification;
+    case Notification::NotificationType::Message:
+    default:
+        return SoundManager::Message1;
+    }
+}
+
 QString NotificationManager::selectSoundForNotification(const Notification::ToastNotificationData &data)
 {
     // Check user-specific sound first
@@ -1507,27 +1559,7 @@ QString NotificationManager::selectSoundForNotification(const Notification::Toas
     // per-sound-type override. The "Sound Overrides" settings are keyed by sound
     // type (e.g. "mention1"), not by channel — the previous channel-keyed lookup
     // could never match and was dead code.
-    QString soundId;
-    switch (data.type) {
-    case Notification::NotificationType::Mention:
-        soundId = SoundManager::Mention1;
-        break;
-    case Notification::NotificationType::DirectMessage:
-    case Notification::NotificationType::GroupMessage:
-        soundId = SoundManager::Message3;
-        break;
-    case Notification::NotificationType::FriendRequest:
-    case Notification::NotificationType::FriendAccepted:
-    case Notification::NotificationType::VoiceJoin:
-    case Notification::NotificationType::VoiceLeave:
-    case Notification::NotificationType::VoiceMove:
-        soundId = SoundManager::DefaultNotification;
-        break;
-    case Notification::NotificationType::Message:
-    default:
-        soundId = SoundManager::Message1;
-        break;
-    }
+    const QString soundId = defaultSoundForType(data);
 
     auto override = getSoundOverride(soundId);
     if (override.enabled)
@@ -1650,6 +1682,11 @@ void NotificationManager::sendTestNotification()
     data.timeout = m_settings.timeoutSeconds;
     data.opacity = m_settings.opacity;
     data.pauseOnHover = m_settings.pauseOnHover;
+    // The preview should reflect the appearance settings, not just the
+    // timing/opacity ones.
+    data.animationsEnabled = m_settings.animationsEnabled;
+    data.showProgressBar = m_settings.progressBarEnabled;
+    data.coloredAccents = m_settings.coloredAccents;
 
     // Bypass the master enable switch: the preview must always render.
     if (m_settings.deliveryMode != Notification::NotificationSettings::DeliveryMode::Native)

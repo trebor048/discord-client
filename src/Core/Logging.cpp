@@ -22,6 +22,11 @@ namespace Core {
 
 void Logger::init()
 {
+    // Idempotent: guard against double-init which would leak the logFile and
+    // spawn a second writer thread.
+    if (writerThread)
+        return;
+
     QString path = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     QDir dir(path);
     if (!dir.exists())
@@ -46,7 +51,7 @@ void Logger::init()
 
 void Logger::rotateLogFile()
 {
-    std::lock_guard<std::mutex> lock(queueMutex);
+    std::lock_guard<std::mutex> lock(fileMutex);
 
     bool wasOpen = logFile && logFile->isOpen();
     if (wasOpen)
@@ -106,7 +111,7 @@ void Logger::writerLoop()
         if (logFile && logFile->isOpen()) {
             bool needsRotate = false;
             {
-                std::lock_guard<std::mutex> lock(queueMutex);
+                std::lock_guard<std::mutex> lock(fileMutex);
                 for (const auto &line : batch) {
                     logFile->write(line.data(), line.size());
                     logFile->write("\n", 1);
@@ -163,7 +168,7 @@ void Logger::messageHandler(QtMsgType type, const QMessageLogContext &context, c
 
     if (type == QtFatalMsg) {
         {
-            std::lock_guard<std::mutex> lock(queueMutex);
+            std::lock_guard<std::mutex> lock(fileMutex);
             if (logFile && logFile->isOpen()) {
                 auto utf8 = formatted.toUtf8();
                 logFile->write(utf8);
@@ -176,6 +181,10 @@ void Logger::messageHandler(QtMsgType type, const QMessageLogContext &context, c
 
     {
         std::lock_guard<std::mutex> lock(queueMutex);
+        // Bound the queue: a log flood (e.g. a decode loop warning every
+        // packet) must not OOM before the writer thread drains. Drop oldest.
+        if (queue.size() >= 20000)
+            queue.erase(queue.begin(), queue.begin() + 1000);
         queue.push_back(formatted.toUtf8().toStdString());
     }
     queueCv.notify_one();

@@ -21,6 +21,7 @@
 #include <QToolTip>
 #include <QSettings>
 #include <algorithm>
+#include <exception>
 
 #include "Core/TimeUtils.hpp"
 #include "UI/Dialogs/ConfirmPopup.hpp"
@@ -350,6 +351,19 @@ void ChatView::animateScrollToBottom()
         scrollAnimation->stop();
         scrollAnimation->setStartValue(vbar->value());
         scrollAnimation->setEndValue(vbar->maximum());
+        // Re-target on completion: if the content grew while the glide was
+        // running (an embed/GIF settled mid-animation, pushing the maximum
+        // past the end value captured above), land on the true bottom. Only
+        // snaps while the user is still pinned — a mid-glide scroll away
+        // cancels the snap via the live atBottom flag.
+        disconnect(scrollAnimation, &QPropertyAnimation::finished, this, nullptr);
+        connect(scrollAnimation, &QPropertyAnimation::finished, this, [this]() {
+            if (atBottom) {
+                QScrollBar *v = verticalScrollBar();
+                if (v && v->value() != v->maximum())
+                    v->setValue(v->maximum());
+            }
+        }, Qt::SingleShotConnection);
         scrollAnimation->start();
     } else if (vbar) {
         vbar->setValue(vbar->maximum());
@@ -393,6 +407,7 @@ void ChatView::setModel(QAbstractItemModel *model)
         // state so history top-insertion never re-glides, then settle to the
         // bottom smoothly.
         atBottom = false;
+        bottomGlidePending_ = false;
         QTimer::singleShot(0, this, &ChatView::animateScrollToBottom);
         // A reset with no rows means a channel switch with a fetch in flight
         // (requestLoadChannel runs right after); say so instead of showing a
@@ -425,6 +440,17 @@ void ChatView::setModel(QAbstractItemModel *model)
                 viewport()->update(dirty);
             else
                 viewport()->update();
+        }
+        // A row's height can change after insertion (embed/GIF settled, upload
+        // progress). If the user is pinned to the bottom, keep them pinned so
+        // the newest message stays fully in view; defer so the scrollbar range
+        // reflects the new size. GIF frame ticks emit only Attachments/Embeds,
+        // so this doesn't fight per-frame repaints.
+        if (roles.contains(ChatModel::CachedSizeRole) && atBottom) {
+            QTimer::singleShot(0, this, [this]() {
+                if (atBottom)
+                    animateScrollToBottom();
+            });
         }
     }));
 }
@@ -863,7 +889,14 @@ void ChatView::onRowsAboutToBeInserted(const QModelIndex &parent, int start, int
     }
 
     QScrollBar *vbar = verticalScrollBar();
-    atBottom = (vbar->value() + vbar->pageStep() >= vbar->maximum());
+    // A scroll-to-bottom glide that is still running — or queued but not yet
+    // started — means the user is (or just was) pinned to the bottom, even
+    // though the value hasn't caught up with the new maximum yet. Treat it as
+    // at-bottom so a second batch of messages arriving mid-glide keeps the
+    // view pinned instead of stalling.
+    atBottom = (scrollAnimation && scrollAnimation->state() == QAbstractAnimation::Running) ||
+                       bottomGlidePending_ ||
+                       (vbar->value() + vbar->pageStep() >= vbar->maximum());
 
     if (start == 0) {
         QPoint topPoint(5, 5);
@@ -889,6 +922,7 @@ bool ChatView::scrollToMessage(Core::Snowflake messageId)
     if (row >= 0) {
         cancelPendingJump();
         atBottom = false;
+        bottomGlidePending_ = false;
         const QModelIndex target = chatModel->index(row, 0);
         scrollTo(target, QAbstractItemView::PositionAtCenter);
         setCurrentIndex(target);
@@ -915,6 +949,10 @@ void ChatView::cancelPendingJump()
 
     pendingJumpMessageId = Core::Snowflake::Invalid;
     emit messageJumpLoadFinished(false);
+    // The jump fetch showed the "Loading message…" placeholder; abandoning the
+    // fetch must hide it, or the overlay lingers until the abandoned request
+    // eventually fails with a misleading "Message not found".
+    hidePlaceholder();
 }
 
 void ChatView::onMessageJumpReady(Core::Snowflake channelId, Core::Snowflake messageId)
@@ -937,6 +975,7 @@ void ChatView::onMessageJumpReady(Core::Snowflake channelId, Core::Snowflake mes
         const int row = chatModel->rowForMessage(messageId);
         if (row >= 0) {
             atBottom = false;
+            bottomGlidePending_ = false;
             const QModelIndex target = chatModel->index(row, 0);
             scrollTo(target, QAbstractItemView::PositionAtCenter);
             setCurrentIndex(target);
@@ -982,7 +1021,20 @@ void ChatView::onRowsInserted(const QModelIndex &parent, int start, int end)
     }
 
     if (atBottom) {
-        animateScrollToBottom();
+        // Defer the glide until the next event-loop pass. The scrollbar range
+        // is not guaranteed to include the inserted rows synchronously inside
+        // rowsInserted (a ScrollPerPixel view settles its geometry after the
+        // model signal returns), so animating to maximum() right now would
+        // target the pre-insertion bottom and leave the new message below the
+        // fold. Mirrors the deferred scroll used by the modelReset handler.
+        // Re-check atBottom at fire time so a user who scrolls away in the
+        // same event-loop turn isn't pulled back to the bottom.
+        bottomGlidePending_ = true;
+        QTimer::singleShot(0, this, [this]() {
+            bottomGlidePending_ = false;
+            if (atBottom)
+                animateScrollToBottom();
+        });
     } else if (start == 0 && anchorIndex.isValid()) {
         if (!pendingScroll_) {
             pendingScroll_ = true;
@@ -1014,6 +1066,13 @@ void ChatView::onRowsInserted(const QModelIndex &parent, int start, int end)
             setUpdatesEnabled(true);
         });
     }
+
+    // History pagination prepends rows at the top, shifting every stored
+    // search-match row index (highlight, count label, and next/prev jumps would
+    // target the wrong messages). Re-scan through the debounce so bursts
+    // coalesce.
+    if (searchPanel && searchPanel->isVisible() && start == 0)
+        searchDebounceTimer->start();
 }
 
 void ChatView::onScrollBarValueChanged(int value)
@@ -1021,10 +1080,24 @@ void ChatView::onScrollBarValueChanged(int value)
     QScrollBar *vbar = verticalScrollBar();
     bool atBottomNow = (vbar->maximum() - value <= 200);
 
+    // Keep the at-bottom flag live so size-change re-pins (dataChanged with
+    // CachedSizeRole) only act while the user is actually pinned to the bottom.
+    atBottom = (value + vbar->pageStep() >= vbar->maximum());
+
     // Rows shift under a stationary cursor during wheel scrolling; drop any
     // stale quick-reaction highlight so the bar repaints cleanly.
     if (m_hoveredQuickReaction != -1) {
         m_hoveredQuickReaction = -1;
+        viewport()->update();
+    }
+
+    // The hovered row's content scrolled out from under the cursor; the
+    // delegate would otherwise keep painting the quick-reaction bar on a row
+    // that now holds a different message (and the invisible bar rect would
+    // swallow clicks meant for the row actually under the cursor).
+    if (hoveredRow != -1 || hoveredChar != -1) {
+        hoveredRow = -1;
+        hoveredChar = -1;
         viewport()->update();
     }
 
@@ -1439,6 +1512,12 @@ void ChatView::copySelectedText()
         QString rowText;
         {
             int altIdx = 0;
+            // Advance the alt pointer over object-replacement chars that sit
+            // before the selection start, so the first emoji in the selection
+            // maps to the correct alt text (not alts[0]).
+            for (int pos = 0; pos < startChar; ++pos)
+                if (doc->characterAt(pos) == QChar(0xFFFC))
+                    altIdx++;
             // One cursor reused across the range instead of allocating a fresh
             // QTextCursor per character.
             QTextCursor c(doc);
@@ -1553,7 +1632,11 @@ bool ChatView::eventFilter(QObject *obj, QEvent *event)
 {
     if (obj == inlineEditWidget && event->type() == QEvent::KeyPress) {
         QKeyEvent *keyEvent = static_cast<QKeyEvent *>(event);
-        if (keyEvent->key() == Qt::Key_Return && !(keyEvent->modifiers() & Qt::ShiftModifier)) {
+        // Numpad Enter (Key_Enter) must commit too, like every other text
+        // input in the app; otherwise it inserts a newline into the edit box.
+        const bool enterPressed = keyEvent->key() == Qt::Key_Return
+                                  || keyEvent->key() == Qt::Key_Enter;
+        if (enterPressed && !(keyEvent->modifiers() & Qt::ShiftModifier)) {
             commitInlineEdit();
             return true;
         }
@@ -1709,21 +1792,30 @@ void ChatView::positionVoicePlayerPanel()
 
 void ChatView::openReactionPicker(Core::Snowflake channelId, Core::Snowflake messageId)
 {
-    EmojiPickerDialog dialog(this);
-    dialog.setWindowTitle(tr("Add Reaction"));
-    dialog.setSearchPlaceholder(tr("Search emoji"));
-    if (!cachedGuildOrder.isEmpty())
-        dialog.setOrderedGuildIds(cachedGuildOrder);
-    if (cachedGuildId.isValid())
-        dialog.setCurrentGuildId(cachedGuildId.toString());
-    if (dialog.exec() != QDialog::Accepted)
-        return;
+    // The picker builds large widget/emoji pools during construction and
+    // exec(). Any allocation failure there must never escape into Qt's event
+    // dispatch (which terminates the whole app); degrade to a no-op click
+    // instead of crashing.
+    try {
+        EmojiPickerDialog dialog(this);
+        dialog.setWindowTitle(tr("Add Reaction"));
+        dialog.setSearchPlaceholder(tr("Search emoji"));
+        if (!cachedGuildOrder.isEmpty())
+            dialog.setOrderedGuildIds(cachedGuildOrder);
+        if (cachedGuildId.isValid())
+            dialog.setCurrentGuildId(cachedGuildId.toString());
+        if (dialog.exec() != QDialog::Accepted)
+            return;
 
-    const QString emoji = normalizeReactionEmoji(dialog.selectedEmoji());
-    if (emoji.isEmpty())
-        return;
+        const QString emoji = normalizeReactionEmoji(dialog.selectedEmoji());
+        if (emoji.isEmpty())
+            return;
 
-    emit addReactionRequested(channelId, messageId, emoji);
+        emit addReactionRequested(channelId, messageId, emoji);
+    } catch (const std::exception &) {
+        // Out of memory or another unexpected failure while building the
+        // picker: swallow it so the click simply does nothing.
+    }
 }
 
 bool ChatView::handleQuickReactionClick(const QModelIndex &index,

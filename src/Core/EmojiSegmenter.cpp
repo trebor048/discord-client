@@ -163,6 +163,31 @@ int countUnicodeEmojisSegmented(const QString &text)
     if (text.isEmpty())
         return 0;
 
+    // Fast rejection: nearly every emoji-relevant codepoint is >= 0x203C (the
+    // only exceptions are ©®™ = 0xA9/0xAE/0x2122). Scanning for one without
+    // building the categorized arrays short-circuits the common case (a plain
+    // text message with zero emoji) before any allocation or state-machine
+    // work happens. The result must mirror the scanner: entirely-whitespace
+    // strings are 0 emoji (not a disqualifying -1).
+    bool mayContainEmoji = false;
+    bool hasNonWhitespace = false;
+    for (int i = 0; i < text.size(); ++i) {
+        const QChar ch = text[i];
+        const char32_t cp = (ch.isHighSurrogate() && i + 1 < text.size()
+                                     && text[i + 1].isLowSurrogate())
+                ? QChar::surrogateToUcs4(ch, text[++i])
+                : ch.unicode();
+        if (QChar::isSpace(cp))
+            continue;
+        hasNonWhitespace = true;
+        if (cp >= 0x203C || cp == 0xA9 || cp == 0xAE) {
+            mayContainEmoji = true;
+            break;
+        }
+    }
+    if (!mayContainEmoji)
+        return hasNonWhitespace ? -1 : 0;
+
     // Build categorized array: one entry per codepoint (not per UTF-16 unit).
     // Also track which codepoints are whitespace so we can skip them.
     QVarLengthArray<CharacterCategory, 64> categories;

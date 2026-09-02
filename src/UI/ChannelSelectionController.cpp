@@ -58,9 +58,11 @@ void ChannelSelectionController::onChannelSelectionChanged(const QModelIndex &cu
         return;
 
     QModelIndex sourceIndex = m_window->channelFilterProxy->mapToSource(current);
+    if (!sourceIndex.isValid() || !sourceIndex.internalPointer())
+        return;
     auto node = static_cast<ChannelNode *>(sourceIndex.internalPointer());
 
-    if (!node || !node->opensChat())
+    if (!node || node->type == ChannelNode::Type::Root || !node->opensChat())
         return;
 
     ChannelNode *accountNode = m_window->channelTreeModel->getAccountNodeFor(node);
@@ -77,6 +79,11 @@ void ChannelSelectionController::onChannelSelectionChanged(const QModelIndex &cu
         m_window->messageInput->setEnabled(false);
         return;
     }
+
+    // This is a user-driven activation: any startup pending-tab entry must not
+    // yank the view back when READY arrives (the saved tab would override what
+    // the user just clicked while the account was still connecting).
+    pendingActiveEntry.reset();
 
     if (selectedInstance != m_window->currentInstance)
         m_window->switchActiveInstance(selectedInstance);
@@ -115,8 +122,15 @@ void ChannelSelectionController::onChannelSelectionChanged(const QModelIndex &cu
     switchChatChannel(node->id, guildId);
     selectedInstance->messages()->requestLoadChannel(node->id);
 
-    if (node->isUnread && node->lastMessageId.isValid())
-        selectedInstance->readState()->markChannelAsRead(node->id, node->lastMessageId);
+    // Ack with the LIVE last-message id from read state (falling back to the
+    // tree node's value): the node's id can lag behind — history/thread loads
+    // advance read state without updating the tree node — and acking below the
+    // live last message would leave the channel flagged unread after opening.
+    Snowflake lastMessageId = selectedInstance->readState()->getChannelLastMessageId(node->id);
+    if (!lastMessageId.isValid())
+        lastMessageId = node->lastMessageId;
+    if (node->isUnread && lastMessageId.isValid())
+        selectedInstance->readState()->markChannelAsRead(node->id, lastMessageId);
 
     m_window->tabBar->updateCurrentTab(makeTabEntry(node, accountNode));
 
@@ -423,7 +437,11 @@ void ChannelSelectionController::openForumPost(Core::Snowflake threadId, Core::S
     switchChatChannel(threadId, guildId);
     m_window->currentInstance->readState()->setActiveChannel(threadId);
     Snowflake lastMsgId = m_window->currentInstance->readState()->getChannelLastMessageId(threadId);
-    m_window->currentInstance->readState()->markForumPostAsRead(threadId, lastMsgId.isValid() ? lastMsgId : threadId);
+    // Ack only when the post actually has messages: falling back to the thread
+    // id would emit a message-ack whose body contains a CHANNEL id (and store
+    // it as the read cursor). The non-forum path skips the ack the same way.
+    if (lastMsgId.isValid())
+        m_window->currentInstance->readState()->markForumPostAsRead(threadId, lastMsgId);
     m_window->currentInstance->messages()->requestLoadChannel(threadId);
 }
 

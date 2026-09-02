@@ -1,12 +1,14 @@
 #include "HttpClient.hpp"
 #include "RequestWorker.hpp"
 
+#include "Core/NetUtils.hpp"
+
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QPointer>
 #include <QTimer>
-#include <QUrlQuery>
+#include <QUrl>
 
 namespace Acheron {
 namespace Discord {
@@ -20,6 +22,22 @@ HttpClient::HttpClient(const QString &baseUrl, const QString &token, ClientIdent
 
 HttpClient::~HttpClient()
 {
+    // Fail any 429-retry descriptors still parked in their timers so their
+    // callbacks are never left hanging (the timer's context-object teardown
+    // would otherwise drop them silently).
+    for (auto &pending : m_retryTimers) {
+        if (pending.timer)
+            pending.timer->stop();
+        if (pending.descriptor && pending.descriptor->callback) {
+            HttpResponse response;
+            response.success = false;
+            response.statusCode = 0;
+            response.error = QStringLiteral("Request aborted: client is shutting down");
+            pending.descriptor->callback(response);
+        }
+    }
+    m_retryTimers.clear();
+
     if (worker)
         worker->shutdown();
 }
@@ -109,6 +127,16 @@ void HttpClient::putExternalFile(const QString &absoluteUrl, const QString &file
                                  std::function<void(qint64, qint64)> progress,
                                  std::shared_ptr<std::atomic<bool>> cancelFlag)
 {
+    QUrl u(absoluteUrl);
+    if (u.scheme() != QStringLiteral("https") || u.host().isEmpty()) {
+        if (callback) { HttpResponse r; r.success=false; r.statusCode=0; r.error=QStringLiteral("invalid external URL: wrong scheme"); callback(r); }
+        return;
+    }
+    // SSRF: block private/loopback/ULA even if scheme is https (shared guard).
+    if (Core::NetUtils::isPrivateHost(u.host())) {
+        if (callback) { HttpResponse r; r.success=false; r.statusCode=0; r.error=QStringLiteral("blocked private host"); callback(r); }
+        return;
+    }
     RequestDescriptor descriptor;
     descriptor.method = Method::PUT;
     descriptor.url = absoluteUrl.toStdString();
@@ -125,6 +153,15 @@ void HttpClient::putExternal(const QString &absoluteUrl, const QByteArray &data,
                              std::function<void(qint64, qint64)> progress,
                              std::shared_ptr<std::atomic<bool>> cancelFlag)
 {
+    QUrl u(absoluteUrl);
+    if (u.scheme() != QStringLiteral("https") || u.host().isEmpty()) {
+        if (callback) { HttpResponse r; r.success=false; r.statusCode=0; r.error=QStringLiteral("invalid external URL: wrong scheme"); callback(r); }
+        return;
+    }
+    if (Core::NetUtils::isPrivateHost(u.host())) {
+        if (callback) { HttpResponse r; r.success=false; r.statusCode=0; r.error=QStringLiteral("blocked private host"); callback(r); }
+        return;
+    }
     RequestDescriptor descriptor;
     descriptor.method = Method::PUT;
     descriptor.url = absoluteUrl.toStdString();
@@ -195,16 +232,40 @@ void HttpClient::onRequestComplete(RequestDescriptor descriptor, HttpResponse re
     if (response.statusCode == 429 && response.retryAfterMs > 0 &&
         descriptor.retryCount < kMaxRateLimitRetries && !descriptor.external) {
         descriptor.retryCount += 1;
-        QTimer::singleShot(response.retryAfterMs, this, [this, descriptor = std::move(descriptor)]() mutable {
-            worker->submit(std::move(descriptor));
+
+        // Track the parked descriptor so ~HttpClient can still fail it back to
+        // its callback (see m_retryTimers). The timer is parented to this so
+        // Qt cleans it up on destruction after we've dispatched. The lambda
+        // captures its own copy: the parked one may be moved-from by the
+        // destructor's failure dispatch on the shutdown path.
+        auto *timer = new QTimer(this);
+        timer->setSingleShot(true);
+        timer->setInterval(response.retryAfterMs);
+        const QPointer<HttpClient> self(this);
+        auto parked = std::make_unique<RequestDescriptor>(std::move(descriptor));
+        RequestDescriptor forTimer = *parked;
+        connect(timer, &QTimer::timeout, this, [this, self, timer,
+                                                forTimer = std::move(forTimer)]() mutable {
+            if (!self)
+                return;
+            for (auto it = m_retryTimers.begin(); it != m_retryTimers.end(); ++it) {
+                if (it->timer == timer) {
+                    m_retryTimers.erase(it);
+                    break;
+                }
+            }
+            worker->submit(std::move(forTimer));
         });
+        m_retryTimers.push_back({ timer, std::move(parked) });
+        timer->start();
         return;
     }
 
     if (!challenge || descriptor.captchaAttempt >= kMaxCaptchaAttempts || !captchaResolver) {
         if (captchaResolver && descriptor.captchaAttempt > 0)
             captchaResolver->notifyConcluded();
-        descriptor.callback(response);
+        if (descriptor.callback)
+            descriptor.callback(response);
         return;
     }
 

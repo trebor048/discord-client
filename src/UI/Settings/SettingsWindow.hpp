@@ -4,6 +4,7 @@
 
 #include <QWidget>
 #include <QListWidget>
+#include <QPointer>
 #include <QStackedWidget>
 #include <QString>
 #include <QStringList>
@@ -57,7 +58,7 @@ private:
 
     QListWidget *categoryList;
     QStackedWidget *pages;
-    Discord::Client *client = nullptr;
+    QPointer<Discord::Client> client;
 };
 
 } // namespace UI

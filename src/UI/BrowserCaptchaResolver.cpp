@@ -369,8 +369,14 @@ void BrowserCaptchaResolver::handleSocket(QTcpSocket *socket)
         const QJsonObject obj = QJsonDocument::fromJson(body).object();
         const QString token = obj.value("token").toString();
         if (token.isEmpty()) {
+            // The harness reported an error; it treats any 2xx as "done" and
+            // tells the user to close the tab, so resolve the pending request
+            // immediately instead of leaving the resolver stuck in Waiting
+            // until the 2-minute TTL cancels it (the user would be told
+            // "finished" while Acheron silently waits).
             qCWarning(LogUI) << "Captcha harness reported an error:"
                              << obj.value("error").toString();
+            cancelCurrent();
             return;
         }
 

@@ -35,11 +35,13 @@
 #include <QScrollBar>
 #include <QSet>
 #include <QSettings>
+#include <QShowEvent>
 #include <QTabWidget>
 #include <QToolButton>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <exception>
 
 namespace Acheron {
 namespace UI {
@@ -119,6 +121,18 @@ QIcon renderUnicodeEmojiIcon(const QString &emojiText, int size)
 
 EmojiPickerDialog::~EmojiPickerDialog()
 {
+    // Persist the picker's last position and size so the next open returns to
+    // the same spot (mirrors the MainWindow layout/geometry pattern). Runs for
+    // every construction site — stack dialogs in ChatView/pickEmoji and the
+    // WA_DeleteOnClose dialog in CustomStatusEdit — because they all funnel
+    // through this destructor. Only save when the dialog was actually shown:
+    // an unshown dialog still has a default geometry that would overwrite the
+    // user's saved spot.
+    if (wasShown) {
+        QSettings settings;
+        settings.setValue(QStringLiteral("emojiPicker/geometry"), saveGeometry());
+    }
+
     // Clean up hover state before member destruction to prevent eventFilter
     // from accessing destroyed hashes during widget teardown.
     for (auto it = hoveredMovies.begin(); it != hoveredMovies.end(); ++it) {
@@ -135,6 +149,12 @@ EmojiPickerDialog::~EmojiPickerDialog()
         reply->deleteLater();
     }
     pendingIconRequests.clear();
+}
+
+void EmojiPickerDialog::showEvent(QShowEvent *event)
+{
+    wasShown = true;
+    QDialog::showEvent(event);
 }
 
 void EmojiPickerDialog::fadeInWidget(QWidget *w, int durationMs)
@@ -323,6 +343,16 @@ EmojiPickerDialog::EmojiPickerDialog(QWidget *parent) : QDialog(parent)
     connect(useButton, &QAbstractButton::clicked, this, &EmojiPickerDialog::acceptCurrent);
     connect(buttonBox, &QDialogButtonBox::rejected, this, &QDialog::reject);
     connect(favoriteButton, &QAbstractButton::clicked, this, &EmojiPickerDialog::toggleFavorite);
+
+    // Reopen where the user last left the picker: restore the saved position
+    // and size (saved in the destructor). Must happen before the dialog is
+    // shown, so restoring here in the constructor covers every construction
+    // site.
+    QSettings settings;
+    const QByteArray savedGeometry =
+            settings.value(QStringLiteral("emojiPicker/geometry")).toByteArray();
+    if (!savedGeometry.isEmpty())
+        restoreGeometry(savedGeometry);
 
     nam = new QNetworkAccessManager(this);
     rebuildResults();
@@ -866,8 +896,13 @@ void EmojiPickerDialog::startCustomIconFetch(const Core::EmojiCatalogItem &item,
             gifCache[value] = data;
         } else {
             QPixmap pix;
-            if (!pix.loadFromData(data))
+            if (!pix.loadFromData(data)) {
+                // Decode failure must also drop the value from the pending
+                // set (like the network-error path above), or the cell stays
+                // stuck on the placeholder until the next rebuild.
+                emojiFetchPending.remove(value);
                 return;
+            }
             // The static icon cache previously grew without bound; cap it so
             // long sessions in emoji-heavy guilds don't accumulate icons.
             if (staticEmojiIconCache.size() >= kStaticIconCacheMaxEntries
@@ -1104,6 +1139,30 @@ void EmojiPickerDialog::rebuildServerGrid(const QList<Core::EmojiCatalogItem> &i
 
 void EmojiPickerDialog::rebuildResults()
 {
+    // Building the section lists, grids and result rows allocates heavily
+    // (registry copies, section hashes, button pools). Any failure here —
+    // typically std::bad_alloc under memory pressure — must not escape into
+    // Qt's event dispatch, where an unhandled exception terminates the whole
+    // process. This function runs during the constructor (before the dialog
+    // is even shown), so a failure degrades to an empty picker instead of
+    // aborting before the picker appears.
+    try {
+        rebuildResultsUnchecked();
+    } catch (const std::exception &) {
+        // Degrade to an empty picker: drop the per-build fetch bookkeeping and
+        // leave the currently-visible grid/list empty. The dialog stays open
+        // and usable (the user can still search or close it).
+        emojiFetchPending.clear();
+        pendingEmojiFetches.clear();
+        clearServerGrid();
+        clearCategoryGrid();
+        if (resultsList)
+            resultsList->clear();
+    }
+}
+
+void EmojiPickerDialog::rebuildResultsUnchecked()
+{
     const auto section = static_cast<Section>(sectionTabs->currentIndex());
     // Use the debounced text if available, otherwise use the current text
     const QString query = pendingSearchText.isNull() ? searchEdit->text() : pendingSearchText;
@@ -1146,6 +1205,11 @@ void EmojiPickerDialog::rebuildResults()
             categoryScrollArea->show();
         rebuildCategoryGrid(items);
         updateFavoriteState();
+        // The sticky header was explicitly hidden above when leaving the grid;
+        // re-evaluate it now that the grid is visible again. The scroll
+        // position is preserved across tab switches, so no scroll event fires
+        // to re-show it otherwise — it would stay hidden until a manual scroll.
+        updateCategoryStickyHeader();
         return;
     }
 

@@ -19,6 +19,13 @@ OpusEncoder::~OpusEncoder()
 
 bool OpusEncoder::init(int sampleRate, int channels, int application)
 {
+    // Re-initializing must not leak the previous encoder state (the decoder
+    // mirrors this guard).
+    if (encoder) {
+        opus_encoder_destroy(encoder);
+        encoder = nullptr;
+    }
+
     frameSamples = sampleRate * AUDIO_FRAME_DURATION_MS / 1000;
     frameChannels = channels;
 

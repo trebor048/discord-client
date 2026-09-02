@@ -11,6 +11,12 @@
 namespace Acheron {
 namespace UI {
 
+BasePopup::~BasePopup()
+{
+    if (parentWidget() && parentWidget()->window())
+        parentWidget()->window()->removeEventFilter(this);
+}
+
 BasePopup::BasePopup(QWidget *parent) : QDialog(parent, Qt::FramelessWindowHint | Qt::Dialog)
 {
     setAttribute(Qt::WA_TranslucentBackground);
@@ -102,6 +108,13 @@ void BasePopup::showEvent(QShowEvent *event)
     QDialog::showEvent(event);
     exitAnimating = false;
     Core::AnimationUtils::popupEnter(fadeHost);
+}
+
+void BasePopup::hideEvent(QHideEvent *event)
+{
+    if (parentWidget() && parentWidget()->window())
+        parentWidget()->window()->removeEventFilter(this);
+    QDialog::hideEvent(event);
 }
 
 bool BasePopup::eventFilter(QObject *obj, QEvent *event)

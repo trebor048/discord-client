@@ -40,6 +40,8 @@ private slots:
 private:
     void setupUi();
     void populateList();
+    // Persists the new role order after a drag-and-drop reorder.
+    void persistOrder();
 
     Core::ClientInstance *m_instance;
     Core::Snowflake m_guildId;

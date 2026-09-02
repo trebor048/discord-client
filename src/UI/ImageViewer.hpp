@@ -56,6 +56,9 @@ private:
 
     QWidget *trackedWindow = nullptr;
     QNetworkAccessManager *networkManager;
+    // In-flight full-image fetch; aborted and replaced when a new image is
+    // requested so a stale response can never overwrite the current view.
+    QNetworkReply *m_activeFullReply = nullptr;
 };
 
 } // namespace UI

@@ -15,6 +15,12 @@
 class QMediaPlayer;
 class QAudioOutput;
 
+namespace Acheron {
+namespace Core {
+class SoundManager;
+}
+}
+
 class SoundOverrideWidget : public QWidget
 {
     Q_OBJECT
@@ -30,6 +36,10 @@ public:
     void setCustomFilePath(const QString &path) { m_customFilePath = path; updateCustomFileLabel(); }
     QString customUrl() const { return m_customUrl; }
     void setCustomUrl(const QString &url) { m_customUrl = url; updateCustomFileLabel(); }
+
+    // Enables in-app preview of the built-in sounds ("Test Play"); without a
+    // manager the button only previews custom file/URL sources.
+    void setSoundManager(Acheron::Core::SoundManager *manager) { m_soundManager = manager; }
 
     // Load/save from JSON
     void loadFromJson(const QJsonObject &obj);
@@ -47,6 +57,7 @@ private:
 
     QMediaPlayer *m_testPlayer = nullptr;
     QAudioOutput *m_testOutput = nullptr;
+    Acheron::Core::SoundManager *m_soundManager = nullptr;
 
     QString m_soundId;
     QString m_displayName;

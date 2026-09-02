@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QJsonObject>
+#include <QPointer>
 #include <QWidget>
 
 class QLabel;
@@ -31,7 +32,7 @@ private:
     void addAppEntry(const QJsonObject &app);
     void onRevokeApp(quint64 appId);
 
-    Discord::Client *client = nullptr;
+    QPointer<Discord::Client> client;
     Core::ImageManager *imageManager = nullptr;
     bool pendingRefresh = false;
 

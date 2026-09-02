@@ -11,9 +11,12 @@ private slots:
     void testSingleEmoji();
     void testNoEmoji();
     void testEmptyString();
+    void testWhitespaceOnly();
     void testMixedContent();
     void testZWJSequence();
     void testEmojiModifierSequence();
+    void testKeycapSequence();
+    void testTextPresentationEmoji();
 };
 
 void TestEmojiSegmenter::testSingleEmoji()
@@ -32,6 +35,43 @@ void TestEmojiSegmenter::testEmptyString()
 {
     // Empty string should return 0
     QCOMPARE(countUnicodeEmojisSegmented(QString()), 0);
+}
+
+void TestEmojiSegmenter::testWhitespaceOnly()
+{
+    // All-whitespace content is 0 emoji (NOT -1): a whitespace-only segment
+    // must not disqualify an otherwise emoji-only message. Covers the fast
+    // rejection pre-filter's whitespace handling.
+    QCOMPARE(countUnicodeEmojisSegmented(QStringLiteral("   \n\t  ")), 0);
+}
+
+void TestEmojiSegmenter::testKeycapSequence()
+{
+    // "5️⃣" = U+0035 + U+20E3 (COMBINING ENCLOSING KEYCAP). The keycap itself
+    // is a combining mark < 0x203C, so this also exercises the pre-filter's
+    // threshold scan reaching the full state machine.
+    QString keycap = QString::fromUtf8(
+        "5"            // U+0035 DIGIT FIVE (KEYCAP_BASE)
+        "\xE2\x83\xA3" // U+20E3 COMBINING ENCLOSING KEYCAP
+    );
+    QCOMPARE(countUnicodeEmojisSegmented(keycap), 1);
+}
+
+void TestEmojiSegmenter::testTextPresentationEmoji()
+{
+    // © (U+00A9) is text-presentation: without VS16 it is NOT an emoji segment,
+    // so a lone © in text returns -1...
+    QString copyright = QString::fromUtf8("\xC2\xA9"); // U+00A9
+    QCOMPARE(countUnicodeEmojisSegmented(copyright), -1);
+
+    // ...but ©️ (U+00A9 U+FE0F) is an emoji sequence (counts as one). 0xA9 is
+    // below the pre-filter's 0x203C threshold, so this exercises its explicit
+    // exception check too.
+    QString copyrightVs = QString::fromUtf8(
+        "\xC2\xA9"     // U+00A9 COPYRIGHT SIGN
+        "\xEF\xB8\x8F" // U+FE0F VARIATION SELECTOR-16
+    );
+    QCOMPARE(countUnicodeEmojisSegmented(copyrightVs), 1);
 }
 
 void TestEmojiSegmenter::testMixedContent()

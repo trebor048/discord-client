@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QCache>
+#include <QSet>
 #include <QStyledItemDelegate>
 
 namespace Acheron {
@@ -51,13 +52,7 @@ class ChatDelegate : public QStyledItemDelegate
 {
     Q_OBJECT
 public:
-    explicit ChatDelegate(Core::ImageManager *imageManager, QObject *parent = nullptr)
-        : QStyledItemDelegate(parent), imageManager(imageManager)
-    {
-        // Bound the caches by total pixels (~16 MiB of RGBA per cache).
-        scaledCache.setMaxCost(4 * 1024 * 1024);
-        blurredCache.setMaxCost(4 * 1024 * 1024);
-    }
+    explicit ChatDelegate(Core::ImageManager *imageManager, QObject *parent = nullptr);
 
     void paint(QPainter *painter, const QStyleOptionViewItem &option,
                const QModelIndex &index) const override;
@@ -70,6 +65,14 @@ private:
     // Blur `source` once and reuse; QGraphicsScene blur is very expensive to
     // redo on every paint of a spoiler attachment.
     QPixmap blurredCached(const QPixmap &source, int radius) const;
+
+    // CDN urls (+ requested size) of quick-reaction custom emoji whose pixmaps
+    // are still being fetched. When ImageManager::imageFetched lands for that
+    // exact request, the hovered row repaints so the image appears without
+    // waiting for the next mouse move. Size is part of the key because the
+    // ImageManager cache is keyed by (url, size) — a reaction-pill fetch at
+    // 16px must not clear a pending 28px quick-bar request.
+    mutable QSet<QString> quickReactionPendingUrls;
 
     Core::ImageManager *imageManager;
     mutable QCache<ScaledPixmapKey, QPixmap> scaledCache;

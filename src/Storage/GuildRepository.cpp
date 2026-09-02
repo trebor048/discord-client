@@ -17,9 +17,10 @@ bool GuildRepository::saveGuild(const Discord::Guild &guild, QSqlDatabase &db)
 {
     QSqlQuery q(db);
     q.prepare(R"(
-		INSERT OR REPLACE INTO guilds
+		INSERT INTO guilds
 		(id, name, icon, owner_id)
 		VALUES (:id, :name, :icon, :owner_id)
+		ON CONFLICT(id) DO UPDATE SET name=excluded.name, icon=excluded.icon, owner_id=excluded.owner_id
     )");
 
     q.bindValue(":id", static_cast<qint64>(guild.id.get()));
@@ -34,30 +35,45 @@ void GuildRepository::deleteGuild(Core::Snowflake guildId, QSqlDatabase &db)
 {
     // channels/members/messages have no FK to guilds, so delete them
     // explicitly to avoid orphaning rows. Caller wraps this in a transaction.
+    // Short-circuit on the first failed statement: continuing to delete on a
+    // broken DB would only widen the partial-deletion window.
     QSqlQuery q(db);
+    auto runDelete = [&](const char *sql, const char *what) {
+        q.prepare(QLatin1String(sql));
+        q.bindValue(":guild_id", static_cast<qint64>(guildId));
+        return execLogged(q, what);
+    };
 
-    q.prepare(R"(
-        DELETE FROM attachments WHERE message_id IN
-        (SELECT id FROM messages WHERE channel_id IN
-         (SELECT id FROM channels WHERE guild_id = :guild_id))
-    )");
-    q.bindValue(":guild_id", static_cast<qint64>(guildId));
-    execLogged(q, "GuildRepository: Delete guild attachments");
-
-    q.prepare(R"(
-        DELETE FROM messages WHERE channel_id IN
-        (SELECT id FROM channels WHERE guild_id = :guild_id)
-    )");
-    q.bindValue(":guild_id", static_cast<qint64>(guildId));
-    execLogged(q, "GuildRepository: Delete guild messages");
-
-    q.prepare("DELETE FROM members WHERE guild_id = :guild_id");
-    q.bindValue(":guild_id", static_cast<qint64>(guildId));
-    execLogged(q, "GuildRepository: Delete guild members");
-
-    q.prepare("DELETE FROM channels WHERE guild_id = :guild_id");
-    q.bindValue(":guild_id", static_cast<qint64>(guildId));
-    execLogged(q, "GuildRepository: Delete guild channels");
+    if (!runDelete(R"(
+            DELETE FROM attachments WHERE message_id IN
+            (SELECT id FROM messages WHERE channel_id IN
+             (SELECT id FROM channels WHERE guild_id = :guild_id))
+        )",
+                   "GuildRepository: Delete guild attachments"))
+        return;
+    if (!runDelete(R"(
+            DELETE FROM messages WHERE channel_id IN
+            (SELECT id FROM channels WHERE guild_id = :guild_id)
+        )",
+                   "GuildRepository: Delete guild messages"))
+        return;
+    if (!runDelete("DELETE FROM members WHERE guild_id = :guild_id",
+                   "GuildRepository: Delete guild members"))
+        return;
+    if (!runDelete(
+                "DELETE FROM permission_overwrites WHERE channel_id IN (SELECT id FROM channels WHERE guild_id = :guild_id)",
+                "GuildRepository: Delete guild overwrites"))
+        return;
+    if (!runDelete(
+                "DELETE FROM channel_recipients WHERE channel_id IN (SELECT id FROM channels WHERE guild_id = :guild_id)",
+                "GuildRepository: Delete guild recipients"))
+        return;
+    if (!runDelete("DELETE FROM roles WHERE guild_id = :guild_id",
+                   "GuildRepository: Delete guild roles"))
+        return;
+    if (!runDelete("DELETE FROM channels WHERE guild_id = :guild_id",
+                   "GuildRepository: Delete guild channels"))
+        return;
 
     q.prepare("DELETE FROM guilds WHERE id = :id");
     q.bindValue(":id", static_cast<qint64>(guildId));

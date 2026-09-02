@@ -205,6 +205,10 @@ private:
     Snowflake currentVoiceGuildId;
     QString currentPresenceStatus = QStringLiteral("online");
 
+    // Presences are cached per user with no removal path; cap the map so a
+    // busy server can't grow it without bound (see the overflow eviction in
+    // ClientInstance.cpp).
+    static constexpr int kMaxCachedPresences = 5000;
     QHash<Snowflake, UserPresence> m_presences;
 
     // notFound members are kept in here so we dont ask for them again

@@ -13,7 +13,6 @@
 #include <QMovie>
 
 #include "Core/EmojiCatalog.hpp"
-#include "Core/Markdown/Parser.hpp"
 #include "Core/PendingAttachment.hpp"
 #include "Core/Snowflake.hpp"
 #include "Discord/Entities.hpp"
@@ -22,8 +21,6 @@ class QGraphicsOpacityEffect;
 class QNetworkAccessManager;
 class QParallelAnimationGroup;
 class QPropertyAnimation;
-class QSplitter;
-class QTextBrowser;
 class QTimer;
 class QToolButton;
 
@@ -113,6 +110,11 @@ signals:
     void slashCommandIncomplete(const QString &reason);
     // Debounced slash-command-name prefix for server-side search.
     void slashQueryChanged(const QString &query);
+    // The user is typing in the input: emit once when typing starts and then
+    // periodically (every kTypingSendIntervalMs) while the draft stays
+    // non-empty. The receiver decides whether to actually broadcast it (e.g.
+    // the silent-typing setting) and to which channel.
+    void typingTick();
 
 private:
     ChatTextEdit *textEdit;
@@ -122,12 +124,6 @@ private:
     QToolButton *stickerPickerButton;
     QToolButton *gifPickerButton = nullptr;
     AttachmentPreviewPanel *attachmentPanel;
-    QSplitter *previewSplitter;
-    QTextBrowser *markdownPreview;
-    QToolButton *markdownPreviewToggle;
-    QTimer *markdownPreviewDebounceTimer = nullptr;
-    Core::Markdown::Parser markdownParser;
-    std::optional<QString> lastMarkdownPreviewText;
     EmojiAutocompletePopup *emojiPopup = nullptr;
     SlashCommandPopup *slashPopup = nullptr;
     MentionAutocompletePopup *mentionPopup = nullptr;
@@ -135,6 +131,11 @@ private:
     QList<Discord::ApplicationCommand> m_availableCommands;
     QTimer *slashQueryDebounce = nullptr;
     QString m_pendingSlashQuery;
+    // Re-arms per keystroke while a draft is non-empty; on timeout the input
+    // emits typingTick() one last time and goes quiet (single-shot), so the
+    // indicator stops shortly after the user stops typing.
+    QTimer *typingTimer = nullptr;
+    bool typingActive = false;
     QGraphicsOpacityEffect *replyBarOpacity = nullptr;
     QPropertyAnimation *replyBarFadeAnimation = nullptr;
     QWidget *statusStrip_ = nullptr;
@@ -167,8 +168,6 @@ private:
     QLabel *stickerPreviewLabel = nullptr;
     bool sendBlocked = false;
     bool compactMode = false;
-    bool markdownPreviewVisible = false;
-    int markdownPreviewHeight = 96;
     quint64 replyBarAnimationGeneration = 0;
     quint64 emojiMarkerSequence = 0;
 
@@ -193,13 +192,15 @@ private:
     void hideMentionPopup();
     [[nodiscard]] QString currentMentionPrefix(int *startPosition = nullptr, QChar *trigger = nullptr) const;
     [[nodiscard]] QString currentMentionPrefix(const QString &text, int *startPosition, QChar *trigger) const;
-    void updateMarkdownPreview();
-    void renderMarkdownPreview();
-    void setMarkdownPreviewVisible(bool visible);
     void insertEmojiInline(const Core::EmojiCatalogItem &item);
     [[nodiscard]] int emojiInlineSize() const;
     [[nodiscard]] QString extractMessageText() const;
     void startAnimatedEmoji(const QString &emojiValue, const QByteArray &gifData);
+    // Stops and releases animated-emoji movies whose image no longer appears in
+    // the document (the user deleted the emoji). Looping GIFs never emit
+    // finished(), so without this every typed-and-deleted emoji leaks a live
+    // decoder + full-viewport repaints for the rest of the session.
+    void pruneOrphanedEmojiMovies();
     void showReplyBar();
     void hideReplyBar();
     [[nodiscard]] QString makeEmojiMarker(const QString &emojiValue);

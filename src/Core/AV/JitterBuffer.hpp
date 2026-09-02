@@ -21,6 +21,14 @@ public:
     /// Returns empty QByteArray if the frame is missing (packet loss).
     QByteArray pop();
 
+    /// Fast-forward the play pointer by n frames without touching the hit/miss
+    /// accounting. Use after decoding a packet that carried n>1 Opus frames:
+    /// the extra frames play from the caller's pending buffer, so the sequence
+    /// tracking must skip over them — otherwise each multi-frame packet would
+    /// report n-1 consecutive misses (PLC garbage, spurious prebuffering, and
+    /// eventually a full reset that drops the buffered audio).
+    void advanceFrames(int n);
+
     /// Reset the buffer state.
     void reset();
 

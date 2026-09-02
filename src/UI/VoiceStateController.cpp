@@ -40,10 +40,10 @@ void VoiceStateController::connectInstanceVoice(Core::ClientInstance *instance)
 #ifndef ACHERON_NO_VOICE
     instance->voice()->setPushToTalkEnabled(QSettings().value("voice/push_to_talk", false).toBool());
     connect(pushToTalkListener, &Core::AV::PushToTalkListener::pushToTalkKeyHeld,
-            instance->voice(), &Core::AV::VoiceManager::setPushToTalkKeyHeld);
+            instance->voice(), &Core::AV::VoiceManager::setPushToTalkKeyHeld, Qt::UniqueConnection);
 
     connect(instance->voice(), &Core::AV::VoiceManager::voiceStateChanged,
-            m_window, &MainWindow::updateVoiceStatusLabel);
+            m_window, &MainWindow::updateVoiceStatusLabel, Qt::UniqueConnection);
 
     connect(instance->voice(), &Core::AV::VoiceManager::channelVoiceMemberChanged,
             this, [this, instance](Core::Snowflake channelId, Core::Snowflake userId, bool joined) {
@@ -51,13 +51,13 @@ void VoiceStateController::connectInstanceVoice(Core::ClientInstance *instance)
                 m_window->channelTreeModel->updateVoiceCount(channelId, count, instance->accountId());
                 m_window->channelTreeModel->updateVoiceParticipant(channelId, userId, joined,
                                                                    instance->accountId());
-            });
+            }, Qt::UniqueConnection);
 
     connect(instance->voice(), &Core::AV::VoiceManager::participantVoiceStateChanged,
             this, [this, instance](Core::Snowflake channelId, Core::Snowflake userId) {
                 m_window->channelTreeModel->updateVoiceParticipantState(channelId, userId,
                                                                         instance->accountId());
-            });
+            }, Qt::UniqueConnection);
 #else
     Q_UNUSED(instance);
 #endif
@@ -169,9 +169,13 @@ void VoiceStateController::disconnectActiveVoice()
 void VoiceStateController::joinVoiceChannel(const QModelIndex &proxyIndex)
 {
 #ifndef ACHERON_NO_VOICE
+    if (!proxyIndex.isValid())
+        return;
     QModelIndex sourceIndex = m_window->channelFilterProxy->mapToSource(proxyIndex);
+    if (!sourceIndex.isValid() || !sourceIndex.internalPointer())
+        return;
     auto *node = m_window->channelTreeModel->nodeFromIndex(sourceIndex);
-    if (!node)
+    if (!node || node->type == ChannelNode::Type::Root)
         return;
 
     bool isDM = (node->type == ChannelNode::Type::DMChannel);
@@ -207,9 +211,13 @@ void VoiceStateController::joinVoiceChannel(const QModelIndex &proxyIndex)
 void VoiceStateController::disconnectVoiceChannel(const QModelIndex &proxyIndex)
 {
 #ifndef ACHERON_NO_VOICE
+    if (!proxyIndex.isValid())
+        return;
     QModelIndex sourceIndex = m_window->channelFilterProxy->mapToSource(proxyIndex);
+    if (!sourceIndex.isValid() || !sourceIndex.internalPointer())
+        return;
     auto *node = m_window->channelTreeModel->nodeFromIndex(sourceIndex);
-    if (!node)
+    if (!node || node->type == ChannelNode::Type::Root)
         return;
 
     ChannelNode *accountNode = m_window->channelTreeModel->getAccountNodeFor(node);

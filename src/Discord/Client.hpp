@@ -197,6 +197,12 @@ public:
     // Sticker
     void sendSticker(Core::Snowflake channelId, Core::Snowflake stickerId);
 
+    // Triggers the typing indicator for a channel (POST /channels/{id}/typing).
+    // Discord rate-limits this to roughly one request per 10 seconds per
+    // channel, so callers must throttle (see MessageInput's typing timer).
+    // Best-effort: failures (including expected 429s) are only logged.
+    void triggerTyping(Core::Snowflake channelId);
+
     // Friend / relationship management
     void sendFriendRequest(const QString &username, const QString &tag);
     void acceptFriendRequest(Core::Snowflake userId);

@@ -7,6 +7,7 @@
 #include <QStandardPaths>
 #include <QDir>
 #include <QDebug>
+#include <QThread>
 
 #include "Core/Snowflake.hpp"
 
@@ -27,14 +28,20 @@ public:
     void closeCacheDatabase(Core::Snowflake accountId);
     static QString getCacheConnectionName(Core::Snowflake accountId);
 
+    // Thread that owns the connections created by init()/openCacheDatabase().
+    // Repositories use this to decide whether a call arrives from the owning
+    // thread (safe to reuse the shared handle) or a worker thread (must clone
+    // a per-thread connection — QSqlDatabase handles are thread-affine).
+    static QThread *creationThread();
+
 private:
     void setupPersistentTables();
     void setupCacheTables(const QString &connName);
     void applyPersistentMigrations(QSqlDatabase &db);
     void applyCacheMigrations(QSqlDatabase &db);
 
-    QSqlDatabase persistentDb;
     QString persistentPath;
+    QThread *creationThread_ = nullptr;
     QMutex dbMutex;
 };
 } // namespace Storage

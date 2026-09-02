@@ -45,13 +45,13 @@ VoiceGateway::~VoiceGateway()
 
 void VoiceGateway::start()
 {
-    if (running) {
+    bool expected = false;
+    if (!running.compare_exchange_strong(expected, true)) {
         qCWarning(LogVoice) << "Attempt to start already running voice gateway";
         return;
     }
 
     wantToClose = false;
-    running = true;
     // A fresh join starts with a clean retry budget; otherwise an exhausted
     // session (5/5 attempts) would leave the new join's first-connect retry
     // silently disabled.
@@ -155,8 +155,19 @@ void VoiceGateway::sendDaveInvalidCommitWelcome(int transitionId)
 
 void VoiceGateway::sendPayload(const QJsonObject &obj)
 {
+    // Redact token-bearing Identify/Resume payloads before logging — voice token
+    // equals user token scope and must not hit log files.
+    QJsonObject logObj = obj;
+    if (logObj.contains("d") && logObj["d"].isObject()) {
+        QJsonObject d = logObj["d"].toObject();
+        if (d.contains("token")) {
+            d["token"] = QStringLiteral("[REDACTED]");
+            logObj["d"] = d;
+        }
+    }
     QByteArray json = QJsonDocument(obj).toJson(QJsonDocument::Compact);
-    qCDebug(LogVoice) << "Voice >>>" << json;
+    QByteArray logJson = QJsonDocument(logObj).toJson(QJsonDocument::Compact);
+    qCDebug(LogVoice) << "Voice >>>" << logJson;
     sendPayload(json);
 }
 
@@ -195,10 +206,11 @@ void VoiceGateway::onPayloadReceived(const QJsonObject &root)
         handleResumed();
         break;
     case VoiceOpCode::CLIENT_CONNECT:
-        handleClientsConnected(d.toObject());
+        handleClientConnect(d.toObject());
         break;
     case VoiceOpCode::SESSION_UPDATE:
-        handleClientConnect(d.toObject());
+        // Deprecated opcode (14); ignore rather than mis-parsing as a
+        // single-user connect.
         break;
     case VoiceOpCode::CLIENT_DISCONNECT:
         handleClientDisconnect(d.toObject());
@@ -403,9 +415,10 @@ bool VoiceGateway::isInvalidSessionCloseCode(VoiceCloseCode code) const
 
 void VoiceGateway::interruptibleSleep(int milliseconds)
 {
-    // poll the running flag so hardStop() can join the network thread promptly
+    // poll both running and wantToClose so stop() (which sets wantToClose) can
+    // interrupt the backoff promptly, mirroring Gateway::waitInterruptible.
     static constexpr int stepMs = 50;
-    for (int elapsed = 0; elapsed < milliseconds && running; elapsed += stepMs)
+    for (int elapsed = 0; elapsed < milliseconds && running && !wantToClose; elapsed += stepMs)
         std::this_thread::sleep_for(std::chrono::milliseconds(stepMs));
 }
 
@@ -424,19 +437,20 @@ void VoiceGateway::networkLoop()
                                      .arg(endpoint)
                                      .arg(VOICE_GATEWAY_VERSION);
 
-        curl = curl_easy_init();
-        if (!curl) {
+        CURL *connecting = curl_easy_init();
+        if (!connecting) {
             qCCritical(LogVoice) << "Failed to initialize curl for voice gateway";
             return;
         }
 
-        curl_easy_setopt(curl, CURLOPT_URL, connectUrl.toUtf8().constData());
-        curl_easy_setopt(curl, CURLOPT_CONNECT_ONLY, 2L);
-        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
-        CurlUtils::applyCommonOptions(curl);
+        curl_easy_setopt(connecting, CURLOPT_URL, connectUrl.toUtf8().constData());
+        curl_easy_setopt(connecting, CURLOPT_CONNECT_ONLY, 2L);
+        curl_easy_setopt(connecting, CURLOPT_CONNECTTIMEOUT, 10L);
+        CurlUtils::applyCommonOptions(connecting);
 
-        CURLcode res = curl_easy_perform(curl);
+        CURLcode res = curl_easy_perform(connecting);
         if (res != CURLE_OK) {
+            curl_easy_cleanup(connecting);
             qCWarning(LogVoice) << "Failed to connect to voice gateway:"
                                 << curl_easy_strerror(res);
 
@@ -445,9 +459,6 @@ void VoiceGateway::networkLoop()
             // one during a resume, and previously it tore the voice session
             // down immediately.
             if (reconnectAttempts < maxReconnectAttempts) {
-                std::lock_guard lock(curlMutex);
-                curl_easy_cleanup(curl);
-                curl = nullptr;
 
                 reconnectAttempts++;
                 thread_local std::mt19937 rng(std::random_device{}());
@@ -464,10 +475,18 @@ void VoiceGateway::networkLoop()
                               QString("Failed to connect to voice gateway: ") + curl_easy_strerror(res));
             return;
         }
+        {
+            std::lock_guard lock(curlMutex);
+            curl = connecting;
+        }
 
         qCInfo(LogVoice) << "Voice WebSocket connected to" << endpoint;
 
-        curl_socket_t sock = CurlUtils::getActiveSocket(curl);
+        curl_socket_t sock;
+        {
+            std::lock_guard lock(curlMutex);
+            sock = CurlUtils::getActiveSocket(curl);
+        }
         if (sock != CURL_SOCKET_BAD) {
 #ifdef _WIN32
             u_long mode = 1;

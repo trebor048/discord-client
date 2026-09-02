@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QPointer>
 #include <QWidget>
 
 class QCheckBox;
@@ -35,7 +36,10 @@ protected:
 private:
     void refreshDevices();
 
-    Core::AV::VoiceManager *voiceManager = nullptr;
+    // QPointer: the voice manager dies with its ClientInstance (account switch
+    // / disconnect) while this modal window can stay open; auto-nulls on
+    // destruction so the handlers below never deref freed memory.
+    QPointer<Core::AV::VoiceManager> voiceManager = nullptr;
     QComboBox *inputDeviceCombo;
     QComboBox *outputDeviceCombo;
     QDoubleSpinBox *inputSensitivitySpin;

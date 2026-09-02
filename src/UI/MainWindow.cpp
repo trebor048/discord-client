@@ -92,7 +92,6 @@ MainWindow::MainWindow(Session *session, QWidget *parent) : QMainWindow(parent),
     session->setCaptchaResolver(captchaResolver);
 
     chatModel = new ChatModel(session->getImageManager(), this);
-    notificationSoundsEnabled = QSettings().value("notifications/sounds", true).toBool();
     channelTreeModel = new ChannelTreeModel(session, this);
     channelFilterProxy = new ChannelFilterProxyModel(session, this);
     channelFilterProxy->setSourceModel(channelTreeModel);
@@ -102,7 +101,9 @@ MainWindow::MainWindow(Session *session, QWidget *parent) : QMainWindow(parent),
     serverRailModel = new ServerRailModel(session, channelTreeModel, this);
 
     chatModel->setAvatarUrlResolver([](const Discord::User &user) -> QUrl {
-        return Discord::Cdn::userAvatar(user.id.get(), user.avatar.get(), 64);
+        if (!user.id.hasValue())
+            return {};
+        return Discord::Cdn::userAvatar(user.id.get(), user.avatar.getOr(QString()), 64);
     });
 
     chatModel->setDisplayNameResolver([this](Snowflake userId, Snowflake guildId) -> QString {
@@ -214,6 +215,12 @@ MainWindow::MainWindow(Session *session, QWidget *parent) : QMainWindow(parent),
     }
 
     restoreWindowState();
+
+    // Persist tabs eagerly: every tab mutation saves to QSettings so the
+    // exact open-tab set survives a crash and is restored on next launch.
+    // Detached windows skip this (they must not clobber the primary window's
+    // saved tabs); saveTabs() itself guards on isDetachedWindow.
+    connect(tabBar, &TabBar::tabsChanged, this, &MainWindow::saveTabs);
 
     // Apply the persisted member-list mode AFTER the splitter layout is
     // restored: switchMemberListMode captures the splitter sizes and builds
@@ -799,6 +806,22 @@ void MainWindow::setupPermanentConnections(Core::ClientInstance *instance)
                 memberListModel->setManager(nullptr);
                 if (mePanel)
                     mePanel->setInstance(nullptr, session->getImageManager());
+                // The instance also owned the MessageManager, ForumManager and
+                // UserManager that the chat view, forum model, typing tracker
+                // and notification controller still hold raw pointers to.
+                // Without clearing them, any late UI action (jump-to-message,
+                // toast reply, forum refresh) derefs freed memory — the
+                // non-null guard passes because the pointer is stale.
+                // Null-check the widgets: a teardown racing setupUi must not
+                // deref half-built members.
+                if (chatView)
+                    chatView->setMessageManager(nullptr);
+                if (forumModel)
+                    forumModel->setManager(nullptr);
+                if (typingTracker)
+                    typingTracker->setUserManager(nullptr);
+                if (notificationController)
+                    notificationController->teardown();
             });
 
     // Refresh the member list when a user's presence changes.
@@ -1287,7 +1310,7 @@ void MainWindow::setupUi()
 
     threadPane = new QWidget(rightSideWidget);
     auto *threadPaneLayout = new QVBoxLayout(threadPane);
-    threadPaneLayout->setContentsMargins(0, 0, 0, 0);
+    threadPaneLayout->setContentsMargins(0, 0, 0, 8);
     threadPaneLayout->setSpacing(0);
     threadPaneLayout->addWidget(threadHeader, 0);
     threadPaneLayout->addWidget(chatView, 1);
@@ -1516,6 +1539,21 @@ void MainWindow::setupUi()
         }
 
         QTimer::singleShot(0, messageInput, &MessageInput::clear);
+    });
+
+    // Typing indicators: the input paces the ticks; the window decides whether
+    // to broadcast (honoring the silent-typing setting) and to which channel.
+    connect(messageInput, &MessageInput::typingTick, this, [this]() {
+        if (!currentInstance || !currentInstance->discord())
+            return;
+        // "Silent typing": never tell the server (and thus other users) that
+        // we are typing. Read live so the toggle applies without a restart.
+        if (QSettings().value(QStringLiteral("chat/silentTyping"), false).toBool())
+            return;
+        Snowflake channelId = chatModel->getActiveChannelId();
+        if (!channelId.isValid())
+            return;
+        currentInstance->discord()->triggerTyping(channelId);
     });
 
     connect(messageInput, &MessageInput::slashCommandSend, this,
@@ -2212,14 +2250,14 @@ void MainWindow::maybeActivatePendingChannel(Core::Snowflake accountId)
     channelController->maybeActivatePendingChannel(accountId);
 }
 
-void MainWindow::saveWindowState()
+void MainWindow::saveTabs()
 {
+    if (windowManager && windowManager->isDetachedWindow)
+        return;
+    if (!tabBar)
+        return;
+
     QSettings settings;
-
-    settings.setValue("layout/geometry", saveGeometry());
-    if (mainSplitter)
-        settings.setValue("layout/splitter", mainSplitter->saveState());
-
     const QList<TabEntry> all = tabBar->tabEntries();
     int activeIndex = tabBar->activeTabIndex();
     QList<TabEntry> valid;
@@ -2248,6 +2286,21 @@ void MainWindow::saveWindowState()
     }
     settings.endArray();
     settings.setValue("layout/activeTab", newActive);
+    settings.sync();
+}
+
+void MainWindow::saveWindowState()
+{
+    if (windowManager && windowManager->isDetachedWindow)
+        return;
+
+    QSettings settings;
+
+    settings.setValue("layout/geometry", saveGeometry());
+    if (mainSplitter)
+        settings.setValue("layout/splitter", mainSplitter->saveState());
+
+    saveTabs();
 
     QStringList expanded, collapsed, collapsedCategories;
     QSet<QString> presentAccounts;
@@ -2301,8 +2354,35 @@ void MainWindow::restoreWindowState()
 {
     QSettings settings;
 
-    if (settings.contains("layout/geometry"))
+    if (settings.contains("layout/geometry")) {
         restoreGeometry(settings.value("layout/geometry").toByteArray());
+
+        // Qt's restoreGeometry restores the saved size verbatim, even when it
+        // came from a larger or since-removed monitor (or a stale maximized
+        // frame). That stretches every panel — most visibly the channel list,
+        // whose rows stay top-aligned while the viewport grows — and can push
+        // the window's top edge off-screen where it can't be grabbed. Clamp
+        // the size to the current screen's available geometry and pull the
+        // window back on-screen. A saved maximized state (already re-applied
+        // by restoreGeometry) fills the screen by definition and needs none of
+        // this.
+        if (!isMaximized() && !isFullScreen()) {
+            if (QScreen *screen = QGuiApplication::screenAt(frameGeometry().center())) {
+                const QRect avail = screen->availableGeometry();
+                QRect geo = frameGeometry();
+                if (geo.width() > avail.width() || geo.height() > avail.height()) {
+                    geo.setSize(geo.size().boundedTo(avail.size()));
+                    const int minX = avail.left();
+                    const int minY = avail.top();
+                    const int maxX = avail.right() - qMin(geo.width(), 200);
+                    const int maxY = avail.bottom() - qMin(geo.height(), 100);
+                    geo.moveTopLeft(QPoint(qBound(minX, geo.left(), qMax(minX, maxX)),
+                                           qBound(minY, geo.top(), qMax(minY, maxY))));
+                    setGeometry(geo);
+                }
+            }
+        }
+    }
     if (mainSplitter && settings.contains("layout/splitter"))
         mainSplitter->restoreState(settings.value("layout/splitter").toByteArray());
 

@@ -94,6 +94,15 @@ QByteArray JitterBuffer::pop()
     return data;
 }
 
+void JitterBuffer::advanceFrames(int n)
+{
+    if (!initialized || n <= 0)
+        return;
+    // uint16 arithmetic wraps naturally; seqNewer() compares signed deltas, so
+    // wraparound stays correct.
+    nextSequence = static_cast<uint16_t>(nextSequence + n);
+}
+
 void JitterBuffer::reset()
 {
     frames.clear();

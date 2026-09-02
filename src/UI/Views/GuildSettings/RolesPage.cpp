@@ -68,7 +68,16 @@ void RolesPage::onRoleCreated()
 
 void RolesPage::onRoleDeleted(Core::Snowflake roleId)
 {
-    m_roleEditor->clearRole();
+    // Deleting a role is destructive with no undo; ask first (sticker/emoji
+    // deletes do the same). The editor stays populated until the server's
+    // GUILD_ROLE_DELETE confirms — clearing it here would leave the editor
+    // blank while the list still shows the role if the delete is rejected.
+    const QMessageBox::StandardButton choice = QMessageBox::question(
+            this, tr("Delete Role"), tr("Delete this role? This cannot be undone."),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (choice != QMessageBox::Yes)
+        return;
+
     m_instance->discord()->deleteRole(m_guildId, roleId);
     emit statusMessage(QStringLiteral("Deleting role..."));
 }

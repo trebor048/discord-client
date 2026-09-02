@@ -336,8 +336,14 @@ bool ChannelQuickSwitch::eventFilter(QObject *obj, QEvent *event)
             keyEvent->key() == Qt::Key_PageDown || keyEvent->key() == Qt::Key_PageUp) {
             if (QTreeWidget *tree = activeTree()) {
                 tree->setFocus();
-                if (!tree->currentItem())
+                if (!tree->currentItem()) {
+                    // Setting the current item selects the first row but does
+                    // NOT consume the key — re-delivering the same Down/Up
+                    // would then move one row PAST it (index 0 unreachable via
+                    // Down). Consume the press here.
                     setFirstSelectableItemCurrent();
+                    return true;
+                }
                 QCoreApplication::sendEvent(tree, event);
                 return true;
             }
@@ -407,8 +413,12 @@ QString ChannelQuickSwitch::guildKey(Core::Snowflake accountId, Core::Snowflake 
 
 bool ChannelQuickSwitch::isChannelItem(const QTreeWidgetItem *item) const
 {
-    return item && item->childCount() == 0 &&
-           item->data(0, ItemKindRole).toInt() == static_cast<int>(ItemKind::Channel);
+    // ItemKind::Channel is 0, and a missing ItemKindRole also reads as 0 —
+    // require the role to be actually present so the empty-state placeholder
+    // items (which carry no roles) can never be treated as real channels.
+    return item && item->childCount() == 0
+           && item->data(0, ItemKindRole).isValid()
+           && item->data(0, ItemKindRole).toInt() == static_cast<int>(ItemKind::Channel);
 }
 
 TabEntry ChannelQuickSwitch::entryForItem(const QTreeWidgetItem *item) const
@@ -422,6 +432,13 @@ TabEntry ChannelQuickSwitch::entryForItem(const QTreeWidgetItem *item) const
     entry.accountId = Core::Snowflake(item->data(0, AccountIdRole).toULongLong());
     entry.isDm = item->data(0, IsDmRole).toBool();
     entry.name = item->text(0);
+
+    // Snowflake(0) is "valid" per Snowflake::isValid (only -1ULL is Invalid);
+    // a channel id of 0 can only come from a malformed/placeholder row and must
+    // never be activated.
+    if (static_cast<quint64>(entry.channelId) == 0
+        || static_cast<quint64>(entry.accountId) == 0)
+        return {};
     return entry;
 }
 

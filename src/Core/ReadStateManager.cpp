@@ -168,10 +168,13 @@ bool ReadStateManager::isThreadRelevant(const Discord::Channel &thread) const
     if (!thread.threadMetadata.hasValue() || !thread.threadMetadata->autoArchiveDuration.hasValue())
         return false;
     const auto &meta = thread.threadMetadata.get();
-    qint64 base = thread.effectiveLastMessageId().toDateTime().toMSecsSinceEpoch();
+    // archive_timestamp is already the computed archive time (last activity +
+    // auto_archive_duration); do not add the duration again or a thread stays
+    // "relevant" for ~2x its real archive period.
     if (meta.archiveTimestamp.hasValue())
-        base = qMax(base, meta.archiveTimestamp.get().toMSecsSinceEpoch());
-    const qint64 expiry = base + static_cast<qint64>(meta.autoArchiveDuration.get()) * 60000;
+        return meta.archiveTimestamp.get().toMSecsSinceEpoch() > QDateTime::currentMSecsSinceEpoch();
+    const qint64 expiry = thread.effectiveLastMessageId().toDateTime().toMSecsSinceEpoch()
+                          + static_cast<qint64>(meta.autoArchiveDuration.get()) * 60000;
     return expiry > QDateTime::currentMSecsSinceEpoch();
 }
 
@@ -392,10 +395,18 @@ void ReadStateManager::onMessageAck(const Discord::MessageAck &ack)
         entry.mentionCount = ack.mentionCount.hasValue() ? ack.mentionCount.get() : 0;
         channelReadStates.insert(channelId, entry);
     } else {
-        it->lastMessageId = ack.messageId.get();
+        // Apply the ack monotonically: the 10s debounce may have acked a newer
+        // message before this echo returns, and regressing to the echoed (older)
+        // id would re-flag the channel unread until the next ack.
+        if (ack.messageId.get() > it->lastMessageId)
+            it->lastMessageId = ack.messageId.get();
         if (ack.mentionCount.hasValue())
             it->mentionCount = ack.mentionCount.get();
     }
+
+    // A server/remote-device ack means the channel is read; clear the local
+    // unread counter that only local reads were clearing.
+    unreadMessageCounts.remove(channelId);
 
     emit readStateUpdated(channelId);
 }
@@ -503,8 +514,25 @@ void ReadStateManager::handleMessageCreated(Snowflake channelId, Snowflake messa
     }
 
     // The user's own messages sent from another channel never count as unread.
-    if (ownMessage)
+    // Advance the read state's lastMessageId so the channel is not left flagged
+    // unread (bold) via the stale ack comparison, but leave other messages'
+    // unread/mention counts intact.
+    if (ownMessage) {
+        auto it = channelReadStates.find(channelId);
+        if (it == channelReadStates.end()) {
+            Discord::ReadStateEntry entry;
+            entry.id = channelId;
+            entry.lastMessageId = messageId;
+            entry.mentionCount = 0;
+            channelReadStates.insert(channelId, entry);
+        } else {
+            it->lastMessageId = messageId;
+        }
+        // The read cursor advanced; the UI must refresh the channel's
+        // read/unread state (the other branches emit readStateUpdated).
+        emit readStateUpdated(channelId);
         return;
+    }
 
     if (!unreadMessageCounts.contains(channelId))
         unreadMessageCounts.insert(channelId, 1);

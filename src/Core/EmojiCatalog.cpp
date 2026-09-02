@@ -4,6 +4,7 @@
 #include <QRegularExpression>
 
 #include <algorithm>
+#include <new>
 
 namespace Acheron {
 namespace Core {
@@ -73,6 +74,17 @@ static QHash<QString, EmojiCatalogItem> &customEmojiRegistry()
     return registry;
 }
 
+static quint64 &customEmojiGenerationCounter()
+{
+    static quint64 counter = 0;
+    return counter;
+}
+
+quint64 EmojiCatalog::customEmojiGeneration()
+{
+    return customEmojiGenerationCounter();
+}
+
 static bool &combinedEmojiDirty()
 {
     static bool dirty = true;
@@ -84,30 +96,42 @@ static const QVector<EmojiCatalogItem> &combinedEmojiData()
     static QVector<EmojiCatalogItem> combined;
     const QMutexLocker locker(&customEmojiMutex());
     if (combinedEmojiDirty()) {
-        combined = unicodeEmojiData();
-        combined.reserve(combined.size() + customEmojiRegistry().size());
-        for (const auto &item : customEmojiRegistry())
-            combined.push_back(item);
+        try {
+            // Build the new catalog and its search index off to the side, then
+            // commit both only after the whole rebuild succeeded, so callers
+            // never observe a partially built catalog or an index that is out
+            // of sync with the data it indexes.
+            QVector<EmojiCatalogItem> fresh = unicodeEmojiData();
+            fresh.reserve(fresh.size() + customEmojiRegistry().size());
+            for (const auto &item : customEmojiRegistry())
+                fresh.push_back(item);
 
-        // Rebuild the folded-name index in the same locked pass so it always
-        // matches the combined data exactly.
-        EmojiSearchIndex &index = emojiSearchIndex();
-        index.exactAny.clear();
-        index.exactUnicode.clear();
-        index.foldedNames.resize(combined.size());
-        index.foldedCategories.resize(combined.size());
-        for (int i = 0; i < combined.size(); ++i) {
-            const EmojiCatalogItem &item = combined[i];
-            const QString foldedName = item.name.toCaseFolded();
-            index.foldedNames[i] = foldedName;
-            index.foldedCategories[i] = item.category.toCaseFolded();
-            if (!index.exactAny.contains(foldedName))
-                index.exactAny.insert(foldedName, i);
-            if (!item.isCustom() && !index.exactUnicode.contains(foldedName))
-                index.exactUnicode.insert(foldedName, i);
+            // Rebuild the folded-name index in the same locked pass so it
+            // always matches the combined data exactly.
+            EmojiSearchIndex freshIndex;
+            freshIndex.foldedNames.resize(fresh.size());
+            freshIndex.foldedCategories.resize(fresh.size());
+            for (int i = 0; i < fresh.size(); ++i) {
+                const EmojiCatalogItem &item = fresh[i];
+                const QString foldedName = item.name.toCaseFolded();
+                freshIndex.foldedNames[i] = foldedName;
+                freshIndex.foldedCategories[i] = item.category.toCaseFolded();
+                if (!freshIndex.exactAny.contains(foldedName))
+                    freshIndex.exactAny.insert(foldedName, i);
+                if (!item.isCustom() && !freshIndex.exactUnicode.contains(foldedName))
+                    freshIndex.exactUnicode.insert(foldedName, i);
+            }
+
+            combined = std::move(fresh);
+            emojiSearchIndex() = std::move(freshIndex);
+            combinedEmojiDirty() = false;
+        } catch (const std::bad_alloc &) {
+            // Out of memory while rebuilding: leave the previous (still valid)
+            // data in place and keep the dirty flag set so a later call
+            // retries. Degrade gracefully instead of letting the allocation
+            // failure escape into Qt's event dispatch, which would terminate
+            // the whole process.
         }
-
-        combinedEmojiDirty() = false;
     }
     return combined;
 }
@@ -217,6 +241,16 @@ std::optional<EmojiSelectionValue> EmojiCatalog::parseCustomEmoji(const QString 
     return selection;
 }
 
+QString EmojiCatalog::cdnUrlForSelection(const QString &value, int size)
+{
+    const auto parsed = parseCustomEmoji(value);
+    if (!parsed)
+        return {};
+    return QStringLiteral("https://cdn.discordapp.com/emojis/%1.%2?size=%3&quality=lossless")
+            .arg(parsed->customId, parsed->animated ? QStringLiteral("gif") : QStringLiteral("png"))
+            .arg(size);
+}
+
 bool EmojiCatalog::isSupportedSelection(const QString &value)
 {
     if (value.isEmpty())
@@ -280,6 +314,7 @@ void EmojiCatalog::registerCustomEmoji(const EmojiCatalogItem &item)
     const QMutexLocker locker(&customEmojiMutex());
     customEmojiRegistry().insert(item.customId, item);
     combinedEmojiDirty() = true;
+    ++customEmojiGenerationCounter();
 }
 
 void EmojiCatalog::registerCustomEmojis(const QVector<EmojiCatalogItem> &items)
@@ -291,6 +326,7 @@ void EmojiCatalog::registerCustomEmojis(const QVector<EmojiCatalogItem> &items)
         customEmojiRegistry().insert(item.customId, item);
     }
     combinedEmojiDirty() = true;
+    ++customEmojiGenerationCounter();
 }
 
 void EmojiCatalog::unregisterCustomEmoji(const QString &customId)
@@ -298,6 +334,7 @@ void EmojiCatalog::unregisterCustomEmoji(const QString &customId)
     const QMutexLocker locker(&customEmojiMutex());
     customEmojiRegistry().remove(customId);
     combinedEmojiDirty() = true;
+    ++customEmojiGenerationCounter();
 }
 
 void EmojiCatalog::unregisterCustomEmojisByGuild(const QString &guildId)
@@ -315,6 +352,7 @@ void EmojiCatalog::unregisterCustomEmojisByGuild(const QString &guildId)
     for (const auto &key : toRemove)
         registry.remove(key);
     combinedEmojiDirty() = true;
+    ++customEmojiGenerationCounter();
 }
 
 void EmojiCatalog::clearCustomEmojis()
@@ -322,12 +360,23 @@ void EmojiCatalog::clearCustomEmojis()
     const QMutexLocker locker(&customEmojiMutex());
     customEmojiRegistry().clear();
     combinedEmojiDirty() = true;
+    ++customEmojiGenerationCounter();
 }
 
 QVector<EmojiCatalogItem> EmojiCatalog::customEmojis()
 {
     const QMutexLocker locker(&customEmojiMutex());
-    return customEmojiRegistry().values().toVector();
+    try {
+        return customEmojiRegistry().values().toVector();
+    } catch (const std::bad_alloc &) {
+        // Copying the registry (a QHash<QString, EmojiCatalogItem>) into a
+        // QVector allocates a contiguous buffer that can fail under memory
+        // pressure — and the emoji picker's Server tab does this during dialog
+        // construction. Return an empty list so the picker degrades to an
+        // empty grid instead of letting the exception escape into Qt's event
+        // dispatch, which terminates the whole process.
+        return {};
+    }
 }
 
 std::optional<EmojiSelectionValue> EmojiSelectionValue::fromRaw(const QString &raw)

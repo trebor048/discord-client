@@ -232,8 +232,14 @@ struct ThreadMemberUpdate : Core::JsonUtils::JsonObject
     static ThreadMemberUpdate fromJson(const QJsonObject &obj)
     {
         ThreadMemberUpdate event;
-        event.member = ThreadMember::fromJson(obj);
-        get(obj, "user_id", event.userId);
+        // Discord nests the member object: {id, guild_id, member: {id,
+        // user_id, join_timestamp, flags}}. There is no top-level "user_id" —
+        // parsing the outer object directly left event.userId Undefined and
+        // the caller's "is this the current account" guard dead (any user
+        // joining a cached thread was treated as the account itself).
+        event.member = ThreadMember::fromJson(obj.value(QLatin1String("member")).toObject());
+        if (event.member.userId.hasValue())
+            event.userId = event.member.userId.get();
         get(obj, "guild_id", event.guildId);
         return event;
     }
@@ -670,11 +676,11 @@ struct VoiceStateUpdateBatch : Core::JsonUtils::JsonObject
 struct RelationshipPartial : Core::JsonUtils::JsonObject
 {
     Field<Core::Snowflake> id;
-    Field<RelationshipType> type;
-    Field<QString, false, true> nickname;
+    Field<RelationshipType, true> type;
+    Field<QString, true, true> nickname;
     Field<QDateTime, true> since;
     Field<bool, true> strangerRequest;
-    Field<bool> userIgnored;
+    Field<bool, true> userIgnored;
 
     static RelationshipPartial fromJson(const QJsonObject &obj)
     {

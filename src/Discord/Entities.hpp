@@ -305,6 +305,42 @@ struct Channel : Core::JsonUtils::JsonObject
         return channel;
     }
 
+    /// Merge a partial channel update (e.g. THREAD_UPDATE) into this channel:
+    /// only copy fields that are present in `other`, preserving any locally
+    /// cached state the gateway omitted. Required fields (id/type) are always
+    /// copied.
+    void mergeFrom(const Channel &other)
+    {
+        if (other.id.hasValue()) id = other.id;
+        if (other.type.hasValue()) type = other.type;
+        if (other.name.hasValue()) name = other.name;
+        if (other.position.hasValue()) position = other.position;
+        if (other.guildId.hasValue()) guildId = other.guildId;
+        if (other.parentId.hasValue()) parentId = other.parentId;
+        if (other.permissionOverwrites.hasValue()) permissionOverwrites = other.permissionOverwrites;
+        if (other.recipients.hasValue()) recipients = other.recipients;
+        if (other.recipientIds.hasValue()) recipientIds = other.recipientIds;
+        if (other.lastMessageId.hasValue()) lastMessageId = other.lastMessageId;
+        if (other.icon.hasValue()) icon = other.icon;
+        if (other.ownerId.hasValue()) ownerId = other.ownerId;
+        if (other.rateLimitPerUser.hasValue()) rateLimitPerUser = other.rateLimitPerUser;
+        if (other.userLimit.hasValue()) userLimit = other.userLimit;
+        if (other.threadMetadata.hasValue()) threadMetadata = other.threadMetadata;
+        if (other.member.hasValue()) member = other.member;
+        if (other.availableTags.hasValue()) availableTags = other.availableTags;
+        if (other.appliedTags.hasValue()) appliedTags = other.appliedTags;
+        if (other.messageCount.hasValue()) messageCount = other.messageCount;
+        if (other.memberCount.hasValue()) memberCount = other.memberCount;
+        if (other.totalMessageSent.hasValue()) totalMessageSent = other.totalMessageSent;
+        if (other.flags.hasValue()) flags = other.flags;
+        if (other.defaultSortOrder.hasValue()) defaultSortOrder = other.defaultSortOrder;
+        if (other.defaultAutoArchiveDuration.hasValue()) defaultAutoArchiveDuration = other.defaultAutoArchiveDuration;
+        if (other.defaultReactionEmoji.hasValue()) defaultReactionEmoji = other.defaultReactionEmoji;
+        if (other.defaultForumLayout.hasValue()) defaultForumLayout = other.defaultForumLayout;
+        if (other.defaultThreadRateLimitPerUser.hasValue()) defaultThreadRateLimitPerUser = other.defaultThreadRateLimitPerUser;
+        if (!other.availableTagsJson.isEmpty()) availableTagsJson = other.availableTagsJson;
+    }
+
     Core::Snowflake effectiveLastMessageId() const
     {
         if (lastMessageId.hasValue() && lastMessageId->isValid())
@@ -469,7 +505,11 @@ struct GatewayGuild : Core::JsonUtils::JsonObject
     static GatewayGuild fromJson(const QJsonObject &obj)
     {
         GatewayGuild guild;
-        get(obj, "properties", guild.properties);
+        // Discord sends the guild object FLAT in GUILD_CREATE / GUILD_UPDATE /
+        // READY.guilds — id, name, icon, owner_id, ... sit at the top level
+        // next to channels/roles/members. There is no "properties" wrapper key;
+        // parse the same object into the guild fields AND the child collections.
+        guild.properties = Guild::fromJson(obj);
         get(obj, "channels", guild.channels);
         get(obj, "threads", guild.threads);
         get(obj, "roles", guild.roles);
@@ -868,6 +908,7 @@ struct Message : Core::JsonUtils::JsonObject
     Field<QList<Embed>, true> embeds;
     Field<QList<User>, true> mentions;
     Field<QList<Core::Snowflake>, true> mentionRoles;
+    Field<bool, true> mentionEveryone;
     Field<QList<Reaction>, true> reactions;
     Field<QList<Sticker>, true> stickerItems;
 
@@ -930,6 +971,7 @@ struct Message : Core::JsonUtils::JsonObject
         get(obj, "embeds", message.embeds);
         get(obj, "mentions", message.mentions);
         get(obj, "mention_roles", message.mentionRoles);
+        get(obj, "mention_everyone", message.mentionEveryone);
         get(obj, "reactions", message.reactions);
         get(obj, "sticker_items", message.stickerItems);
         get(obj, "message_reference", message.messageReference);
@@ -948,14 +990,25 @@ struct Message : Core::JsonUtils::JsonObject
             }
         }
 
+        // Re-serialize embeds/reactions for DB storage only when they are
+        // actually non-empty: an empty array round-trips to an empty list on
+        // read (readMessageFromQuery skips empty strings), so skipping the
+        // QJsonDocument wrap + compact serialize per message is pure savings on
+        // the common embed-less MESSAGE_CREATE path.
         if (obj.contains("embeds")) {
-            QJsonDocument doc(obj.value("embeds").toArray());
-            message.embedsJson = QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
+            const QJsonArray arr = obj.value("embeds").toArray();
+            if (!arr.isEmpty()) {
+                QJsonDocument doc(arr);
+                message.embedsJson = QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
+            }
         }
 
         if (obj.contains("reactions")) {
-            QJsonDocument doc(obj.value("reactions").toArray());
-            message.reactionsJson = QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
+            const QJsonArray arr = obj.value("reactions").toArray();
+            if (!arr.isEmpty()) {
+                QJsonDocument doc(arr);
+                message.reactionsJson = QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
+            }
         }
 
         return message;
@@ -981,6 +1034,8 @@ struct Message : Core::JsonUtils::JsonObject
             mentions = update.mentions;
         if (present.contains(QStringLiteral("mention_roles")))
             mentionRoles = update.mentionRoles;
+        if (present.contains(QStringLiteral("mention_everyone")))
+            mentionEveryone = update.mentionEveryone;
         if (present.contains(QStringLiteral("attachments")))
             attachments = update.attachments;
         if (present.contains(QStringLiteral("message_reference")))

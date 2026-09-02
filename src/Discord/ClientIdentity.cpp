@@ -14,6 +14,11 @@ ClientIdentity::ClientIdentity()
     regenerateClientHeartbeatSessionId();
 }
 
+ClientIdentity::~ClientIdentity()
+{
+    CurlUtils::evictSuperProperties(this);
+}
+
 void ClientIdentity::regenerateClientHeartbeatSessionId()
 {
     QMutexLocker locker(&mutex);

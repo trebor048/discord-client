@@ -128,10 +128,23 @@ private:
             requested.remove(threadId);
             pending.removeOne(threadId);
         }
+        // Clears the in-flight markers for the batch most recently handed out
+        // by take(). Called when the request completes (success or failure) so
+        // threads answered with nothing — or never answered at all (permission
+        // denied, empty payload) — can be re-requested later instead of being
+        // stuck in `requested` forever, and so `requested` never grows
+        // unboundedly across a session.
+        void forgetTaken()
+        {
+            for (Snowflake id : lastTaken)
+                requested.remove(id);
+            lastTaken.clear();
+        }
 
     private:
         QSet<Snowflake> requested; // asked but not yet answered
         QList<Snowflake> pending;
+        QList<Snowflake> lastTaken; // handed out by the last take()
         Snowflake forumId;
         bool flushScheduled = false;
     };

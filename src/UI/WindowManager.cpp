@@ -103,11 +103,6 @@ void WindowManager::openSettingsWindow()
                 dialog->exec();
             }
         });
-        if (auto *notificationsPage = settingsWindow->findChild<NotificationsPage *>()) {
-            connect(notificationsPage, &NotificationsPage::settingsChanged, m_window, [this]() {
-                m_window->notificationController->reloadSettings();
-            });
-        }
         connect(settingsWindow, &SettingsWindow::pushToTalkToggled, m_window, [this](bool enabled) {
             m_window->voiceController->setPushToTalkEnabledForAll(enabled);
         });
@@ -289,9 +284,12 @@ void WindowManager::openChannelInNewWindow(const TabEntry &entry, bool tileToSid
     // one MainWindow per "open in new window" for the whole session. closeEvent
     // still runs first, so window-state persistence happens before destruction.
     window->setAttribute(Qt::WA_DeleteOnClose);
+    // Mark as detached _before_ mutating tabs so the new window's
+    // tabsChanged -> saveTabs path does not clobber the primary window's
+    // persisted tabs (saveTabs guards on isDetachedWindow).
+    window->setDetachedWindow(true);
     window->tabBar->restoreTabs({entry}, 0);
     window->activateChannel(entry);
-    window->setDetachedWindow(true);
     window->show();
     window->raise();
     window->activateWindow();

@@ -265,7 +265,7 @@ private:
     void failRequest(const ImageRequestKey &k, const QUrl &url, const QSize &size,
                      const QString &reason);
     void storeFetchedPixmap(const ImageRequestKey &k, const QUrl &url, const QSize &size,
-                            const QByteArray &data, QPixmap pixmap, PinGroup pin, bool proxy,
+                            const QByteArray &data, QPixmap pixmap, bool proxy,
                             qreal dpr);
     void onDiskCacheWritten(const ImageRequestKey &k, const QString &path, bool ok);
     void onDiskCachePruned(const QStringList &removedPaths);
@@ -290,7 +290,7 @@ private:
 
     QSet<ImageRequestKey> requests;
     QSet<ImageRequestKey> failedRequests;
-    QHash<ImageRequestKey, PinGroup> pendingPins;
+    QMultiHash<ImageRequestKey, PinGroup> pendingPins;
     QCache<ImageRequestKey, QPixmap> cache;
     QHash<ImageRequestKey, QPixmap> pinnedImages;
     QMultiHash<PinGroup, ImageRequestKey> pinGroupKeys;

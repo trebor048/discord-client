@@ -57,7 +57,7 @@ private:
     void scheduleRebuild();
     void applyPendingRelationshipChanges();
     bool updateRowInPlace(QListWidget *list, Tab tab, Core::Snowflake userId);
-    bool relationshipMatchesTab(Tab tab, Discord::RelationshipType type) const;
+    bool relationshipMatchesTab(Tab tab, const Discord::Relationship &rel) const;
     QString labelFor(const Discord::Relationship &rel) const;
     QString statusText(const Discord::Relationship &rel) const;
     void addFriendRow(QVBoxLayout *layout, const Discord::Relationship &rel);

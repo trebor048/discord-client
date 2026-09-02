@@ -7,6 +7,8 @@
 #include <QSettings>
 #include <QTimer>
 
+#include <cmath>
+
 #include "Enums.hpp"
 #include "Core/Logging.hpp"
 #include "Proto/ProtoReader.hpp"
@@ -126,6 +128,12 @@ Client::Client(const QString &token, const QString &gatewayUrl, const QString &b
 
 Client::~Client()
 {
+    // Stop gateway network thread before destroying identity/HttpClient
+    // (gateway thread calls identity.buildClientProperties and HttpClient
+    // callbacks; destroying them first causes UAF).
+    if (gateway) {
+        gateway->hardStop();
+    }
     // join and delete the http clients thread before everything else
     delete httpClient;
     httpClient = nullptr;
@@ -584,7 +592,9 @@ void runThreadSearch(HttpClient *http, Core::Snowflake channelId, const QUrlQuer
             QJsonObject obj = QJsonDocument::fromJson(response.body).object();
             ResultT result;
             result.indexNotReady = true;
-            result.retryAfterSeconds = qMax(1, qRound(obj.value("retry_after").toDouble(1.0)));
+            const double ra = obj.value("retry_after").toDouble(1.0);
+            result.retryAfterSeconds =
+                    qMax(1, qRound(std::isfinite(ra) ? qBound(1.0, ra, 60.0) : 1.0));
             callback(Core::Result<ResultT>::makeOk(result));
             return;
         }
@@ -776,7 +786,7 @@ void Client::onConnected()
 
 void Client::onDisconnected(CloseCode code, const QString &reason)
 {
-    qWarning() << "Disconnected from gateway: " << code << reason;
+    qCWarning(LogDiscord) << "Disconnected from gateway: " << code << reason;
 
     // Fatal close codes — no reconnection, transition straight to Disconnected
     if (code == CloseCode::AUTHENTICATION_FAILED ||
@@ -1008,6 +1018,23 @@ void Client::sendSticker(Snowflake channelId, Snowflake stickerId)
         if (!response.success)
             qCWarning(LogDiscord) << "Failed to send sticker to channel" << channelId
                                   << ":" << response.error;
+    });
+}
+
+void Client::triggerTyping(Snowflake channelId)
+{
+    if (!channelId.isValid())
+        return;
+
+    QString endpoint = "/channels/" + QString::number(channelId) + "/typing";
+    httpClient->post(endpoint, QJsonObject(), [this, channelId](const HttpResponse &response) {
+        if (!response.success) {
+            // Best-effort: rapid typing trips Discord's per-channel rate limit
+            // (429) regularly, and the indicator is purely cosmetic, so this is
+            // debug-level noise rather than a warning.
+            qCDebug(LogDiscord) << "Failed to send typing indicator for channel" << channelId
+                                << ":" << response.error << "Status:" << response.statusCode;
+        }
     });
 }
 

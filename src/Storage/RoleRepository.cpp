@@ -1,5 +1,6 @@
 #include "RoleRepository.hpp"
 #include "DatabaseManager.hpp"
+#include "Transaction.hpp"
 #include "Core/Logging.hpp"
 
 #include <QSqlQuery>
@@ -37,11 +38,15 @@ RoleRepository::RoleRepository(Core::Snowflake accountId)
 }
 
 static const char *ROLE_UPSERT_SQL = R"(
-    INSERT OR REPLACE INTO roles
+    INSERT INTO roles
     (id, guild_id, name, permissions, position, color, hoist, icon,
      unicode_emoji, managed, mentionable)
     VALUES (:id, :guild_id, :name, :permissions, :position, :color, :hoist,
             :icon, :unicode_emoji, :managed, :mentionable)
+    ON CONFLICT(id, guild_id) DO UPDATE SET
+        name=excluded.name, permissions=excluded.permissions, position=excluded.position,
+        color=excluded.color, hoist=excluded.hoist, icon=excluded.icon,
+        unicode_emoji=excluded.unicode_emoji, managed=excluded.managed, mentionable=excluded.mentionable
 )";
 
 void RoleRepository::bindRole(QSqlQuery &q, Core::Snowflake guildId, const Discord::Role &role)
@@ -73,13 +78,27 @@ bool RoleRepository::saveRoles(Core::Snowflake guildId, const QList<Discord::Rol
     if (roles.isEmpty())
         return true;
 
+    bool ownsTransaction = !Transaction::isActive(db.connectionName());
+    if (ownsTransaction && !db.transaction()) {
+        qCWarning(LogDB) << "RoleRepository: failed to start transaction";
+        return false;
+    }
+
     QSqlQuery q(db);
     q.prepare(ROLE_UPSERT_SQL);
 
     for (const auto &role : roles) {
         bindRole(q, guildId, role);
-        if (!execLogged(q, "RoleRepository: Save role"))
+        if (!execLogged(q, "RoleRepository: Save role")) {
+            if (ownsTransaction)
+                db.rollback();
             return false;
+        }
+    }
+    if (ownsTransaction && !db.commit()) {
+        qCWarning(LogDB) << "RoleRepository: failed to commit transaction" << db.lastError().text();
+        db.rollback();
+        return false;
     }
     return true;
 }

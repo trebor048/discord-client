@@ -95,6 +95,9 @@ QVector<Core::AccountInfo> AccountRepository::getAllAccounts()
         FROM accounts ORDER BY display_order ASC
     )", db);
 
+    if (query.lastError().isValid())
+        qCWarning(LogDB) << "AccountRepository: getAllAccounts failed:" << query.lastError().text();
+
     while (query.next()) {
         Core::AccountInfo acc;
 

@@ -71,15 +71,27 @@ bool ChannelRepository::saveChannel(const Discord::Channel &channel, QSqlDatabas
     QSqlQuery q(db);
 
     q.prepare(R"(
-		INSERT OR REPLACE INTO channels
+		INSERT INTO channels
 		(id, type, position, name, guild_id, parent_id, last_message_id, icon, owner_id, rate_limit_per_user, available_tags, default_sort_order, flags)
 		VALUES (:id, :type, :position, :name, :guild_id, :parent_id, :last_message_id, :icon, :owner_id, :rate_limit_per_user, :available_tags, :default_sort_order, :flags)
+		ON CONFLICT(id) DO UPDATE SET
+		    type=excluded.type, position=excluded.position, name=excluded.name,
+		    guild_id=excluded.guild_id, parent_id=excluded.parent_id,
+		    last_message_id=excluded.last_message_id, icon=excluded.icon,
+		    owner_id=excluded.owner_id,
+		    -- Optional "configuration" columns: a payload that simply omits them
+		    -- (READY guild channels, partial CHANNEL_UPDATEs) must not NULL-clobber
+		    -- previously cached values (forum tags, slowmode, sort order, flags).
+		    rate_limit_per_user=COALESCE(excluded.rate_limit_per_user, rate_limit_per_user),
+		    available_tags=COALESCE(excluded.available_tags, available_tags),
+		    default_sort_order=COALESCE(excluded.default_sort_order, default_sort_order),
+		    flags=COALESCE(excluded.flags, flags)
     )");
 
     q.bindValue(":id", static_cast<qint64>(channel.id.get()));
     q.bindValue(":type", static_cast<qint64>(channel.type.get()));
-    q.bindValue(":position", static_cast<qint64>(channel.position.get()));
-    q.bindValue(":name", channel.name);
+    bindOptional(q, ":position", channel.position);
+    bindOptional(q, ":name", channel.name);
     bindOptional(q, ":guild_id", channel.guildId);
     bindOptional(q, ":parent_id", channel.parentId);
     bindOptional(q, ":last_message_id", channel.lastMessageId);
@@ -110,6 +122,17 @@ bool ChannelRepository::deleteChannel(Core::Snowflake channelId, QSqlDatabase &d
     bool ok = false;
     do {
         QSqlQuery q(db);
+        // Delete orphaned attachments/messages for this channel (no FK cascade).
+        q.prepare("DELETE FROM attachments WHERE message_id IN (SELECT id FROM messages WHERE channel_id = :cid)");
+        q.bindValue(":cid", static_cast<qint64>(channelId));
+        if (!execLogged(q, "ChannelRepository: Delete orphan attachments"))
+            break;
+
+        q.prepare("DELETE FROM messages WHERE channel_id = :channel_id");
+        q.bindValue(":channel_id", static_cast<qint64>(channelId));
+        if (!execLogged(q, "ChannelRepository: Delete messages"))
+            break;
+
         q.prepare("DELETE FROM permission_overwrites WHERE channel_id = :channel_id");
         q.bindValue(":channel_id", static_cast<qint64>(channelId));
         if (!execLogged(q, "ChannelRepository: Delete overwrites"))
@@ -326,31 +349,36 @@ QHash<Core::Snowflake, QList<Discord::PermissionOverwrite>> ChannelRepository::
     if (channelIds.isEmpty())
         return result;
 
-    QString placeholders;
-    for (int i = 0; i < channelIds.size(); ++i) {
-        if (i > 0)
-            placeholders += ",";
-        placeholders += QString(":id%1").arg(i);
-    }
+    // Chunk IN clause to avoid SQLite 999 variable limit.
+    constexpr int chunkSize = 500;
+    for (int offset = 0; offset < channelIds.size(); offset += chunkSize) {
+        const int count = qMin(chunkSize, channelIds.size() - offset);
+        QString placeholders;
+        for (int i = 0; i < count; ++i) {
+            if (i > 0)
+                placeholders += ",";
+            placeholders += QString(":id%1").arg(i);
+        }
 
-    // clang-format off
-    QSqlQuery q(db);
-    q.prepare(QString(R"(
-        SELECT channel_id, target_id, type, allow, deny
-        FROM permission_overwrites
-        WHERE channel_id IN (%1)
-    )").arg(placeholders));
-    // clang-format on
+        QSqlQuery q(db);
+        q.prepare(QString(R"(
+            SELECT channel_id, target_id, type, allow, deny
+            FROM permission_overwrites
+            WHERE channel_id IN (%1)
+        )").arg(placeholders));
 
-    for (int i = 0; i < channelIds.size(); ++i)
-        q.bindValue(QString(":id%1").arg(i), static_cast<qint64>(channelIds[i]));
+        for (int i = 0; i < count; ++i)
+            q.bindValue(QString(":id%1").arg(i), static_cast<qint64>(channelIds[offset + i]));
 
-    if (!q.exec())
-        return result;
+        if (!q.exec()) {
+            qCWarning(LogDB) << "getPermissionOverwritesForGuild: chunk query failed" << q.lastError().text();
+            continue;
+        }
 
-    while (q.next()) {
-        Core::Snowflake channelId = static_cast<Core::Snowflake>(q.value(0).toLongLong());
-        result[channelId].append(readOverwrite(q, 1));
+        while (q.next()) {
+            Core::Snowflake channelId = static_cast<Core::Snowflake>(q.value(0).toLongLong());
+            result[channelId].append(readOverwrite(q, 1));
+        }
     }
 
     return result;

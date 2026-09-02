@@ -720,6 +720,12 @@ static void applyReactionAdd(QList<Discord::Reaction> &reactions,
                 else
                     r.countDetails->normal = *r.countDetails->normal + 1;
             }
+            // Keep the persisted burst_count in sync with countDetails->burst;
+            // both are stored in the reactions JSON and would otherwise diverge
+            // (the serialized cache would carry a stale burst total after a
+            // live burst add on an existing reaction).
+            if (isBurst && r.burstCount.hasValue())
+                r.burstCount = *r.burstCount + 1;
             if (isMe) {
                 if (isBurst)
                     r.meBurst = true;
@@ -859,6 +865,10 @@ static void applyReactionRemove(QList<Discord::Reaction> &reactions,
                 else
                     r.countDetails->normal = qMax(0, *r.countDetails->normal - 1);
             }
+            // Mirror the decrement in the persisted burst_count (see
+            // applyReactionAdd).
+            if (isBurst && r.burstCount.hasValue())
+                r.burstCount = qMax(0, *r.burstCount - 1);
             if (isMe) {
                 if (isBurst)
                     r.meBurst = false;

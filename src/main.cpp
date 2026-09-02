@@ -1,6 +1,7 @@
 #include "App.hpp"
 #include "UI/MainWindow.hpp"
 #include "UI/Dialogs/EmojiPickerDialog.hpp"
+#include "UI/Dialogs/VirtualEmojiGrid.hpp"
 #include "Storage/DatabaseManager.hpp"
 #include "Core/Session.hpp"
 #include "Core/Logging.hpp"
@@ -20,6 +21,8 @@
 #include <QStyleFactory>
 #include <QTabWidget>
 #include <QTimer>
+#include <QEventLoop>
+#include <QEvent>
 
 #include <cstdio>
 #include <cstring>
@@ -61,6 +64,14 @@ static int runRuntimeSmoke(int argc, char *argv[])
     }
 
     QApplication app(argc, argv);
+    // The smoke opens/closes dialogs in cycles; without this, closing the
+    // dialog (the only window) quits the application, poisoning every later
+    // nested event loop (QEventLoop::exec returns immediately).
+    app.setQuitOnLastWindowClosed(false);
+    // Isolate the smoke's QSettings from the real app's ("ouwou"/"Acheron") so
+    // geometry persistence tests can't clobber a user's saved picker spot.
+    app.setOrganizationName(QStringLiteral("acheron-smoke"));
+    app.setApplicationName(QStringLiteral("runtime-smoke"));
     std::fputs("ACHERON_RUNTIME_SMOKE_READY\n", stdout);
     std::fflush(stdout);
 
@@ -99,6 +110,10 @@ static int runRuntimeSmoke(int argc, char *argv[])
         // the guild ordering like ChatView does, resize through a range of
         // widths (exercising the grid's responsive column relayout), switch
         // tabs, and tear down.
+        // Fits within the offscreen platform's default 800x600 virtual screen
+        // (the dialog's minimum is 720x520) so no clamping skews the round-trip.
+        const QSize kSavedSize(730, 530);
+        QPoint savedPos(10, 10); // filled from the dialog's actual settled pos
         for (int cycle = 0; cycle < 4; ++cycle) {
             std::fprintf(stderr, "SMOKE cycle %d: construct\n", cycle);
             auto *dlg = new UI::EmojiPickerDialog(nullptr);
@@ -111,10 +126,60 @@ static int runRuntimeSmoke(int argc, char *argv[])
             }
             std::fprintf(stderr, "SMOKE cycle %d: show\n", cycle);
             dlg->show();
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 25);
+            if (cycle > 0) {
+                // Regression guard: the previous cycle closed the dialog at a
+                // distinctive geometry, so a freshly shown picker must have
+                // restored it from QSettings. The exact size match is the
+                // strong assertion (default min size is 720x520, so 730x530 can
+                // only come from restoreGeometry); the position is compared
+                // loosely because the offscreen platform emulates a window
+                // frame that offsets the client origin a few px.
+                const bool sizeOk = dlg->size() == kSavedSize;
+                const bool posOk = qAbs(dlg->frameGeometry().x() - savedPos.x()) <= 2
+                                && qAbs(dlg->frameGeometry().y() - savedPos.y()) <= 25;
+                if (!sizeOk || !posOk) {
+                    std::fprintf(stderr,
+                                 "SMOKE cycle %d: geometry restore FAILED: size=%dx%d "
+                                 "frame=%d,%d (expected %dx%d frame at %d,%d)\n",
+                                 cycle, dlg->width(), dlg->height(), dlg->frameGeometry().x(),
+                                 dlg->frameGeometry().y(), kSavedSize.width(), kSavedSize.height(),
+                                 savedPos.x(), savedPos.y());
+                    std::fputs("ACHERON_SMOKE_FAIL_GEOMETRY\n", stdout);
+                    std::fflush(stdout);
+                    QCoreApplication::exit(4);
+                    return;
+                }
+                std::fprintf(stderr, "SMOKE cycle %d: geometry restored OK\n", cycle);
+            }
             for (int width : { 720, 840, 960, 780, 1100, 720 }) {
                 std::fprintf(stderr, "SMOKE cycle %d: resize %d\n", cycle, width);
                 dlg->resize(width, 560);
                 QCoreApplication::processEvents(QEventLoop::AllEvents, 25);
+            }
+            // The Server tab is the default and its grid starts its fade-in
+            // during construction, before show. Regression guard for the bug
+            // where DialogAnimator's show-time dialog fade killed that
+            // in-flight animation, leaving the grid at opacity 0.01 until a
+            // tab switch. Spin a real nested event loop (like the app's exec()
+            // would) so the 200ms fade actually runs to completion, then assert
+            // the fade removed its effect.
+            {
+                QEventLoop spin;
+                QTimer::singleShot(600, &spin, &QEventLoop::quit);
+                spin.exec();
+                const auto grids = dlg->findChildren<UI::VirtualEmojiGrid *>();
+                bool fadeCleaned = true;
+                for (auto *grid : grids) {
+                    if (grid->graphicsEffect())
+                        fadeCleaned = false;
+                }
+                if (!fadeCleaned) {
+                    std::fputs("ACHERON_SMOKE_FAIL_GRID_FADE\n", stdout);
+                    std::fflush(stdout);
+                    QCoreApplication::exit(3);
+                    return;
+                }
             }
             // All-tab category grid (sticky header path), then back to Server.
             if (auto tabs = dlg->findChild<QTabWidget *>(QStringLiteral("emojiCategoryTabs"))) {
@@ -126,10 +191,20 @@ static int runRuntimeSmoke(int argc, char *argv[])
                 QCoreApplication::processEvents(QEventLoop::AllEvents, 25);
             }
             std::fprintf(stderr, "SMOKE cycle %d: close\n", cycle);
+            // Position the dialog at a distinctive geometry so the next cycle
+            // can assert the position+size were persisted and restored. Record
+            // the frame top-left, which is what saveGeometry() round-trips.
+            dlg->move(savedPos);
+            dlg->resize(kSavedSize);
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 25);
+            savedPos = dlg->frameGeometry().topLeft();
             dlg->close();
             std::fprintf(stderr, "SMOKE cycle %d: deleteLater\n", cycle);
             dlg->deleteLater();
-            QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+            // processEvents() alone does not drain the DeferredDelete queue,
+            // so the dialog's destructor (which persists the geometry) would
+            // not have run before the next cycle constructs its dialog.
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
             std::fprintf(stderr, "SMOKE cycle %d: done\n", cycle);
         }
         QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
@@ -224,6 +299,12 @@ int main(int argc, char *argv[])
     if (!Storage::DatabaseManager::instance().init()) {
         QMessageBox::critical(nullptr, "Fatal error",
                               "Could not initialize the database. Acheron will now close.");
+        // Run the same teardown as the success path: the logger's writer thread
+        // is still parked on its mutex/CV, and skipping cleanup here would let
+        // it outlive the static synchronization objects at process exit (hang
+        // / UB), and leave curl's global state un-finalized.
+        curl_global_cleanup();
+        Core::Logger::cleanup();
         return -1;
     }
 

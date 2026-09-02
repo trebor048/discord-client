@@ -72,22 +72,25 @@ Discord::Permissions PermissionComputer::computeOverwrites(
         }
     }
 
-    // Apply role overwrites sequentially (deny first, then allow per role).
-    // This approximates Discord's role-hierarchy order — higher-positioned
-    // roles should be processed first, but without role positions here we
-    // process in memberRoleIds order, which is at least sequential rather
-    // than flat OR (which would let a lower role's allow cancel a higher
-    // role's deny).
+    // Apply role overwrites per Discord's documented algorithm: OR all role
+    // `allow`s together and all role `deny`s together, then apply deny first
+    // and allow second ONCE. Role overwrites do NOT follow the role hierarchy
+    // (a lower role's allow still beats a higher role's deny), so the previous
+    // sequential per-role application was wrong.
+    Discord::Permissions roleAllow = Discord::NO_PERMISSIONS;
+    Discord::Permissions roleDeny = Discord::NO_PERMISSIONS;
     for (const auto &roleId : memberRoleIds) {
         for (const auto &ow : overwrites) {
             if (ow.type.get() == Discord::PermissionOverwrite::Type::Role &&
                 ow.id.get() == roleId) {
-                permissions &= ~ow.deny.get();
-                permissions |= ow.allow.get();
+                roleDeny |= ow.deny.get();
+                roleAllow |= ow.allow.get();
                 break;
             }
         }
     }
+    permissions &= ~roleDeny;
+    permissions |= roleAllow;
 
     for (const auto &ow : overwrites) {
         if (ow.type.get() == Discord::PermissionOverwrite::Type::Member && ow.id.get() == userId) {

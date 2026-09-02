@@ -2,6 +2,7 @@
 
 #include <QJsonObject>
 #include <QList>
+#include <QPointer>
 #include <QWidget>
 
 class QLabel;
@@ -33,7 +34,7 @@ private:
     void onRemoveConnection(const QString &type, const QString &id);
     void addConnectionEntry(const QJsonObject &conn);
 
-    Discord::Client *client = nullptr;
+    QPointer<Discord::Client> client;
 
     QListWidget *connectionsList;
     QPushButton *refreshButton;

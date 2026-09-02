@@ -36,6 +36,7 @@ int getBuildNumber();
 void applyCommonOptions(CURL *curl);
 
 void appendDiscordHeaders(curl_slist **headers, const ClientIdentity &identity, const QString &referer);
+void evictSuperProperties(const ClientIdentity *identity);
 
 // CURLOPT_WRITEFUNCTION for QByteArray
 size_t writeToByteArray(char *ptr, size_t size, size_t nmemb, void *userdata);

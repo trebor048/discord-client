@@ -22,8 +22,16 @@ static constexpr uint32_t OPUS_FRAME_SAMPLES = 960;
 
 static QString formatDisplayableCode(const std::vector<uint8_t> &data, int bytesToConsume = 30, int groupSize = 5)
 {
+    if (data.empty())
+        return {};
+
+    // Clamp to the largest whole group of groupSize bytes that fits instead of
+    // bailing when the fingerprint is shorter than requested: MLS pairwise
+    // fingerprints are commonly 32 bytes, so a fixed 45-byte request would
+    // otherwise render an empty code (the DAVE verification UI shows nothing).
+    bytesToConsume = std::min(bytesToConsume, static_cast<int>(data.size()));
     int numGroups = bytesToConsume / groupSize;
-    if (static_cast<int>(data.size()) < bytesToConsume)
+    if (numGroups <= 0)
         return {};
 
     uint64_t modulus = 1;
@@ -146,8 +154,14 @@ void VoiceClient::start()
 
 void VoiceClient::stop()
 {
-    if (currentState == State::Disconnected)
+    if (currentState == State::Disconnected) {
+        // A terminal gateway disconnect already ran the gateway teardown, but
+        // the transport (UDP socket, timers, DAVE session) may still be live —
+        // release it here so stop() is always a full teardown, not just a
+        // state flip.
+        cleanupTransport();
         return;
+    }
 
     if (gateway) {
         gateway->hardStop();
@@ -403,7 +417,9 @@ void VoiceClient::onDatagram(const QByteArray &data)
         return;
 
     // too small to contain meaningful audio after encryption overhead
-    if (data.size() < 44)
+    // Minimal valid packet: RTP header (12) + AEAD tag (16) + nonce (4) + 1 byte payload
+    static constexpr int kMinDecryptableSize = RtpHeader::FIXED_SIZE + 16 + 4 + 1;
+    if (data.size() < kMinDecryptableSize)
         return;
 
     // The RTP header (fixed header + CSRC list + full extension header) is
@@ -412,7 +428,7 @@ void VoiceClient::onDatagram(const QByteArray &data)
     // extension prefix was included, which broke decryption of packets that
     // carry an extension (and wrongly fed the extension data into the cipher).
     const int headerSize = rtpHeaderSize(data);
-    if (headerSize < RtpHeader::FIXED_SIZE || data.size() <= headerSize + 4)
+    if (headerSize < RtpHeader::FIXED_SIZE || data.size() < headerSize + 16 + 4 + 1)
         return;
 
     RtpHeader header = RtpHeader::parse(data);
@@ -527,7 +543,7 @@ void VoiceClient::onSpeaking(const SpeakingData &data)
         std::string uid = std::to_string(data.userId.get());
         connectedUserIds.insert(uid);
         if (data.ssrc.get() != 0)
-            ssrcToUserIdMap.insert(data.ssrc, data.userId.get());
+            ssrcToUserIdMap[data.ssrc] = data.userId.get();
         if (daveSession) {
             daveSession->addConnectedUser(uid);
             if (data.ssrc.get() != 0)
@@ -553,7 +569,7 @@ void VoiceClient::onClientConnect(const ClientConnectData &data)
         std::string uid = std::to_string(data.userId.get());
         connectedUserIds.insert(uid);
         if (data.audioSsrc.get() != 0)
-            ssrcToUserIdMap.insert(data.audioSsrc, data.userId.get());
+            ssrcToUserIdMap[data.audioSsrc] = data.userId.get();
         if (daveSession)
             daveSession->addConnectedUser(uid);
     }

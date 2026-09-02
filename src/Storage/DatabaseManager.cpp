@@ -13,7 +13,11 @@ namespace {
 bool columnExists(QSqlDatabase &db, const QString &table, const QString &column)
 {
     QSqlQuery query(db);
-    if (!query.exec(QString("PRAGMA table_info(%1)").arg(table)))
+    // Table is an identifier: quote it to prevent SQL injection and avoid
+    // unquoted interpolation (still only called with literal table names).
+    QString safeTable = table;
+    safeTable.replace(QLatin1Char('"'), QStringLiteral("\"\""));
+    if (!query.exec(QStringLiteral("PRAGMA table_info(\"%1\")").arg(safeTable)))
         return false;
 
     while (query.next()) {
@@ -53,7 +57,8 @@ bool DatabaseManager::init()
         dir.mkpath(".");
 
     persistentPath = dir.filePath("acheron.sqlite");
-    persistentDb = QSqlDatabase::addDatabase("QSQLITE", PERSISTENT_CONN_NAME);
+    creationThread_ = QThread::currentThread();
+    QSqlDatabase persistentDb = QSqlDatabase::addDatabase("QSQLITE", PERSISTENT_CONN_NAME);
     persistentDb.setDatabaseName(persistentPath);
 
     if (!persistentDb.open()) {
@@ -63,22 +68,89 @@ bool DatabaseManager::init()
 
     {
         QSqlQuery config(persistentDb);
-        config.exec("PRAGMA foreign_keys = ON");
-        config.exec("PRAGMA journal_mode = WAL");
-        config.exec("PRAGMA synchronous = NORMAL");
-        config.exec("PRAGMA busy_timeout = 5000");
+        if (!config.exec("PRAGMA foreign_keys = ON"))
+            qCWarning(LogDB) << "PRAGMA foreign_keys ON failed:" << config.lastError().text();
+        if (!config.exec("PRAGMA journal_mode = WAL"))
+            qCWarning(LogDB) << "PRAGMA journal_mode=WAL failed:" << config.lastError().text();
+        else {
+            // Verify WAL actually enabled (fails on :memory:, RO FS, network share)
+            if (config.exec("PRAGMA journal_mode") && config.next()) {
+                QString mode = config.value(0).toString().toLower();
+                if (mode != "wal")
+                    qCWarning(LogDB) << "journal_mode not wal, got" << mode;
+            }
+        }
+        if (!config.exec("PRAGMA synchronous = NORMAL"))
+            qCWarning(LogDB) << "PRAGMA synchronous failed:" << config.lastError().text();
+        if (!config.exec("PRAGMA busy_timeout = 5000"))
+            qCWarning(LogDB) << "PRAGMA busy_timeout failed:" << config.lastError().text();
+        // Verify foreign_keys
+        if (config.exec("PRAGMA foreign_keys") && config.next() && config.value(0).toInt() != 1)
+            qCWarning(LogDB) << "foreign_keys not enabled";
+    }
+    // Integrity check on startup (detect SQLITE_CORRUPT from prior crash)
+    {
+        QSqlDatabase db = QSqlDatabase::database(PERSISTENT_CONN_NAME);
+        QSqlQuery q(db);
+        if (q.exec("PRAGMA integrity_check") && q.next()) {
+            QString result = q.value(0).toString().toLower();
+            if (result != "ok")
+                qCCritical(LogDB) << "Persistent DB integrity_check failed:" << result;
+        }
     }
 
     setupPersistentTables();
     return true;
 }
 
+QThread *DatabaseManager::creationThread()
+{
+    return instance().creationThread_;
+}
+
 void DatabaseManager::shutdown()
 {
     QMutexLocker locker(&dbMutex);
-    if (persistentDb.isOpen())
-        persistentDb.close();
-    persistentDb = QSqlDatabase();
+    // Checkpoint and close all cache connections first (avoid WAL orphan + fd leak).
+    // Worker-thread clones (named "..._t<tid>") are closed here too: by the time
+    // shutdown() runs, gateway/ingest threads have been joined, so no live worker
+    // can be using them.
+    const QStringList allConns = QSqlDatabase::connectionNames();
+    for (const QString &name : allConns) {
+        if (!name.startsWith("Acheron_Cache_"))
+            continue;
+        {
+            QSqlDatabase db = QSqlDatabase::database(name);
+            if (db.isOpen()) {
+                QSqlQuery(db).exec("PRAGMA wal_checkpoint(TRUNCATE)");
+                db.close();
+            }
+        }
+        QSqlDatabase::removeDatabase(name);
+    }
+    // Persistent connection clones (file-based) were previously never closed,
+    // leaking the fd + WAL handles per thread. Close them here as well (the
+    // main persistent connection is handled below, so skip it here).
+    for (const QString &name : allConns) {
+        if (!name.startsWith(QStringLiteral("Acheron_Persistent"))
+            || name == QLatin1String(PERSISTENT_CONN_NAME))
+            continue;
+        {
+            QSqlDatabase db = QSqlDatabase::database(name);
+            if (db.isOpen()) {
+                QSqlQuery(db).exec("PRAGMA wal_checkpoint(TRUNCATE)");
+                db.close();
+            }
+        }
+        QSqlDatabase::removeDatabase(name);
+    }
+    {
+        QSqlDatabase db = QSqlDatabase::database(PERSISTENT_CONN_NAME);
+        if (db.isValid() && db.isOpen()) {
+            QSqlQuery(db).exec("PRAGMA wal_checkpoint(TRUNCATE)");
+            db.close();
+        }
+    }
     QSqlDatabase::removeDatabase(PERSISTENT_CONN_NAME);
 }
 
@@ -87,14 +159,25 @@ QString DatabaseManager::openCacheDatabase(Core::Snowflake accountId)
     QMutexLocker locker(&dbMutex);
     QString connName = getCacheConnectionName(accountId);
 
-    if (QSqlDatabase::contains(connName))
-        return connName;
+    if (QSqlDatabase::contains(connName)) {
+        QSqlDatabase existing = QSqlDatabase::database(connName);
+        if (existing.isOpen() && existing.isValid())
+            return connName;
+        // Stale handle (closed by external code / race) — drop and recreate.
+        QSqlDatabase::removeDatabase(connName);
+    }
 
     QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", connName);
 
     bool inMemory = QSettings().value("general/in_memory_cache", false).toBool();
     if (inMemory) {
-        db.setDatabaseName(":memory:");
+        // Shared-cache memory database: every connection to the SAME URI name
+        // sees the same in-memory DB. Plain ":memory:" would give each
+        // per-thread clone its own private empty database (writes from worker
+        // threads would go to a DB nobody reads).
+        db.setConnectOptions(QStringLiteral("QSQLITE_OPEN_URI"));
+        db.setDatabaseName(QStringLiteral("file:acheron_cache_%1?mode=memory&cache=shared")
+                                   .arg(accountId.toString()));
     } else {
         QString dirPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
         QString dbPath = QDir(dirPath).filePath(QString("cache_%1.sqlite").arg(accountId.toString()));
@@ -112,7 +195,7 @@ QString DatabaseManager::openCacheDatabase(Core::Snowflake accountId)
         config.exec("PRAGMA foreign_keys = ON");
         if (!inMemory) {
             config.exec("PRAGMA journal_mode = WAL");
-            config.exec("PRAGMA synchronous = OFF");
+            config.exec("PRAGMA synchronous = NORMAL");
             config.exec("PRAGMA busy_timeout = 5000");
         }
     }
@@ -134,8 +217,10 @@ void DatabaseManager::closeCacheDatabase(Core::Snowflake accountId)
     if (QSqlDatabase::contains(connName)) {
         {
             QSqlDatabase db = QSqlDatabase::database(connName);
-            if (db.isOpen())
+            if (db.isOpen()) {
+                QSqlQuery(db).exec("PRAGMA wal_checkpoint(TRUNCATE)");
                 db.close();
+            }
         }
         QSqlDatabase::removeDatabase(connName);
     }
@@ -151,7 +236,12 @@ void DatabaseManager::setupPersistentTables()
     QSqlDatabase db = QSqlDatabase::database(PERSISTENT_CONN_NAME);
     QSqlQuery query(db);
 
-    query.exec(R"(
+    auto execChecked = [&](const QString &sql, const char *ctx) {
+        if (!query.exec(sql))
+            qCWarning(LogDB) << ctx << "failed:" << query.lastError().text();
+    };
+
+    execChecked(R"(
         CREATE TABLE IF NOT EXISTS accounts (
             id INTEGER PRIMARY KEY,
             username TEXT,
@@ -163,7 +253,8 @@ void DatabaseManager::setupPersistentTables()
             display_order INTEGER DEFAULT 0,
             auto_connect INTEGER NOT NULL DEFAULT 0
         )
-    )");
+    )",
+                "setupPersistentTables: accounts");
 
     applyPersistentMigrations(db);
 }
@@ -176,12 +267,18 @@ void DatabaseManager::applyPersistentMigrations(QSqlDatabase &db)
         return;
 
     QSqlQuery query(db);
+    bool ok = true;
 
     // Migration 1: accounts.auto_connect
-    if (version < 1 && !columnExists(db, "accounts", "auto_connect"))
-        query.exec("ALTER TABLE accounts ADD COLUMN auto_connect INTEGER NOT NULL DEFAULT 0");
+    if (version < 1 && !columnExists(db, "accounts", "auto_connect")) {
+        if (!query.exec("ALTER TABLE accounts ADD COLUMN auto_connect INTEGER NOT NULL DEFAULT 0")) {
+            qCWarning(LogDB) << "Migration 1 failed:" << query.lastError().text();
+            ok = false;
+        }
+    }
 
-    setSchemaVersion(db, latestSchemaVersion);
+    if (ok)
+        setSchemaVersion(db, latestSchemaVersion);
 }
 
 void DatabaseManager::setupCacheTables(const QString &connName)
@@ -189,7 +286,12 @@ void DatabaseManager::setupCacheTables(const QString &connName)
     QSqlDatabase db = QSqlDatabase::database(connName);
     QSqlQuery query(db);
 
-    query.exec(R"(
+    auto execLogged = [&](const QString &sql) {
+        if (!query.exec(sql))
+            qCWarning(LogDB) << "setupCacheTables failed:" << query.lastError().text() << sql.left(80);
+    };
+
+    execLogged(R"(
         CREATE TABLE IF NOT EXISTS "guilds" (
 	        "id" INTEGER NOT NULL,
 	        "name" TEXT NOT NULL,
@@ -199,7 +301,7 @@ void DatabaseManager::setupCacheTables(const QString &connName)
         )
     )");
 
-    query.exec(R"(
+    execLogged(R"(
         CREATE TABLE IF NOT EXISTS "channels" (
 	        "id" INTEGER NOT NULL,
 	        "type" INTEGER NOT NULL,
@@ -218,7 +320,7 @@ void DatabaseManager::setupCacheTables(const QString &connName)
         );
     )");
 
-    query.exec(R"(
+    execLogged(R"(
         CREATE TABLE IF NOT EXISTS "messages" (
 	        "id" INTEGER NOT NULL,
 	        "author_id" INTEGER NOT NULL,
@@ -238,7 +340,7 @@ void DatabaseManager::setupCacheTables(const QString &connName)
         );
     )");
 
-    query.exec(R"(
+    execLogged(R"(
         CREATE TABLE IF NOT EXISTS "users" (
 	        "id" INTEGER NOT NULL,
 	        "username" TEXT NOT NULL,
@@ -249,7 +351,7 @@ void DatabaseManager::setupCacheTables(const QString &connName)
         );
     )");
 
-    query.exec(R"(
+    execLogged(R"(
         CREATE TABLE IF NOT EXISTS "members" (
             "user_id" INTEGER NOT NULL,
             "guild_id" INTEGER NOT NULL,
@@ -267,7 +369,7 @@ void DatabaseManager::setupCacheTables(const QString &connName)
         );
     )");
 
-    query.exec(R"(
+    execLogged(R"(
         CREATE TABLE IF NOT EXISTS "attachments" (
             "id" INTEGER NOT NULL,
             "message_id" INTEGER NOT NULL,
@@ -282,12 +384,12 @@ void DatabaseManager::setupCacheTables(const QString &connName)
         );
     )");
 
-    query.exec("CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, id);");
-    query.exec("CREATE INDEX IF NOT EXISTS idx_messages_ref_msg ON messages(referenced_message_id);");
+    execLogged("CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, id);");
+    execLogged("CREATE INDEX IF NOT EXISTS idx_messages_ref_msg ON messages(referenced_message_id);");
 
-    query.exec("CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments(message_id);");
+    execLogged("CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments(message_id);");
 
-    query.exec(R"(
+    execLogged(R"(
         CREATE TABLE IF NOT EXISTS "roles" (
             "id" INTEGER NOT NULL,
             "guild_id" INTEGER NOT NULL,
@@ -305,11 +407,11 @@ void DatabaseManager::setupCacheTables(const QString &connName)
         );
     )");
 
-    query.exec("CREATE INDEX IF NOT EXISTS idx_roles_guild_id ON roles(guild_id);");
-    query.exec("CREATE INDEX IF NOT EXISTS idx_roles_position ON roles(guild_id, position);");
-    query.exec("CREATE INDEX IF NOT EXISTS idx_roles_lookup ON roles(guild_id, id);");
+    execLogged("CREATE INDEX IF NOT EXISTS idx_roles_guild_id ON roles(guild_id);");
+    execLogged("CREATE INDEX IF NOT EXISTS idx_roles_position ON roles(guild_id, position);");
+    execLogged("CREATE INDEX IF NOT EXISTS idx_roles_lookup ON roles(guild_id, id);");
 
-    query.exec(R"(
+    execLogged(R"(
         CREATE TABLE IF NOT EXISTS "permission_overwrites" (
             "channel_id" INTEGER NOT NULL,
             "target_id" INTEGER NOT NULL,
@@ -321,12 +423,12 @@ void DatabaseManager::setupCacheTables(const QString &connName)
         );
     )");
 
-    query.exec("CREATE INDEX IF NOT EXISTS idx_overwrites_channel_id ON permission_overwrites(channel_id);");
-    query.exec("CREATE INDEX IF NOT EXISTS idx_members_lookup ON members(guild_id, user_id);");
-    query.exec("CREATE INDEX IF NOT EXISTS idx_members_guild_joined ON members(guild_id, joined_at);");
-    query.exec("CREATE INDEX IF NOT EXISTS idx_channels_guild ON channels(guild_id);");
+    execLogged("CREATE INDEX IF NOT EXISTS idx_overwrites_channel_id ON permission_overwrites(channel_id);");
+    execLogged("CREATE INDEX IF NOT EXISTS idx_members_lookup ON members(guild_id, user_id);");
+    execLogged("CREATE INDEX IF NOT EXISTS idx_members_guild_joined ON members(guild_id, joined_at);");
+    execLogged("CREATE INDEX IF NOT EXISTS idx_channels_guild ON channels(guild_id);");
 
-    query.exec(R"(
+    execLogged(R"(
         CREATE TABLE IF NOT EXISTS "channel_recipients" (
             "channel_id" INTEGER NOT NULL,
             "user_id" INTEGER NOT NULL,
@@ -336,8 +438,8 @@ void DatabaseManager::setupCacheTables(const QString &connName)
         );
     )");
 
-    query.exec("CREATE INDEX IF NOT EXISTS idx_channel_recipients_channel ON channel_recipients(channel_id);");
-    query.exec("CREATE INDEX IF NOT EXISTS idx_channel_recipients_user ON channel_recipients(user_id);");
+    execLogged("CREATE INDEX IF NOT EXISTS idx_channel_recipients_channel ON channel_recipients(channel_id);");
+    execLogged("CREATE INDEX IF NOT EXISTS idx_channel_recipients_user ON channel_recipients(user_id);");
 }
 
 void DatabaseManager::applyCacheMigrations(QSqlDatabase &db)
@@ -356,6 +458,7 @@ void DatabaseManager::applyCacheMigrations(QSqlDatabase &db)
     // Migration 2: persist the rendered markdown (`parsed_content`) so a disk
     // reload doesn't re-parse every message on the UI thread. Fresh databases
     // already get the column from CREATE TABLE, so only add it when missing.
+    bool migrateOk = true;
     if (version < 2) {
         QSqlQuery check(db);
         check.exec("PRAGMA table_info(messages)");
@@ -366,11 +469,16 @@ void DatabaseManager::applyCacheMigrations(QSqlDatabase &db)
                 break;
             }
         }
-        if (!hasParsed)
-            query.exec("ALTER TABLE messages ADD COLUMN parsed_content TEXT");
+        if (!hasParsed) {
+            if (!query.exec("ALTER TABLE messages ADD COLUMN parsed_content TEXT")) {
+                qCWarning(LogDB) << "Migration 2 failed:" << query.lastError().text();
+                migrateOk = false;
+            }
+        }
     }
 
-    setSchemaVersion(db, latestCacheSchemaVersion);
+    if (migrateOk)
+        setSchemaVersion(db, latestCacheSchemaVersion);
 }
 
 } // namespace Storage

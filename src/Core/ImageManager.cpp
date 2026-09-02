@@ -17,6 +17,8 @@
 #include <QSettings>
 
 #include "Logging.hpp"
+#include "NetUtils.hpp"
+#include <QHostAddress>
 
 namespace Acheron {
 namespace Core {
@@ -540,10 +542,13 @@ void ImageManager::assign(QLabel *label, const QUrl &url, const QSize &size)
     label->setPixmap(pixmap);
 
     if (!isCached(url, size)) {
+        QPointer<QLabel> safeLabel = label;
         connect(this, &ImageManager::imageFetched, label,
-                [=](const QUrl &u, const QSize &s, const QPixmap &p) {
+                [safeLabel, url, size](const QUrl &u, const QSize &s, const QPixmap &p) {
+                    if (!safeLabel)
+                        return;
                     if (u == url && s == size)
-                        label->setPixmap(p);
+                        safeLabel->setPixmap(p);
                 });
     }
 }
@@ -668,12 +673,10 @@ void ImageManager::request(const QUrl &url, const QSize &size, PinGroup pin)
         return;
 
     if (requests.contains(k)) {
-        // promote
-        if (pin != PinGroup::None) {
-            auto it = pendingPins.find(k);
-            if (it == pendingPins.end() || it.value() == PinGroup::None)
-                pendingPins.insert(k, pin);
-        }
+        // promote: record every distinct pin group that requests this in-flight
+        // key so the image is pinned for all of them, not just the first.
+        if (pin != PinGroup::None && !pendingPins.values(k).contains(pin))
+            pendingPins.insert(k, pin);
         return;
     }
 
@@ -686,6 +689,12 @@ void ImageManager::request(const QUrl &url, const QSize &size, PinGroup pin)
 
 void ImageManager::fetchFromNetwork(const QUrl &url, const QSize &size, PinGroup pin)
 {
+    if (NetUtils::isPrivateHost(url.host())) {
+        qCWarning(LogCore) << "Blocked private-IP fetch" << url.host();
+        ImageRequestKey k{ url, size };
+        failRequest(k, url, size, "private host blocked");
+        return;
+    }
     qreal dpr = qApp->devicePixelRatio();
     bool proxy = isDiscordProxyUrl(url);
 
@@ -694,10 +703,16 @@ void ImageManager::fetchFromNetwork(const QUrl &url, const QSize &size, PinGroup
     request.setTransferTimeout(kTransferTimeoutMs);
     QNetworkReply *reply = networkManager->get(request);
     guardReply(reply);
+    // SSRF via redirect: validate target of HTTP 302 before following
+    connect(reply, &QNetworkReply::redirected, reply, [reply](const QUrl &redirectUrl) {
+        if (NetUtils::isPrivateHost(redirectUrl.host())) {
+            qCWarning(LogCore) << "Blocked private-IP redirect" << redirectUrl.host();
+            reply->abort();
+        }
+    });
 
     connect(reply, &QNetworkReply::finished, this, [this, reply, url, size, proxy, dpr]() {
         ImageRequestKey k{ url, size };
-        PinGroup pin = pendingPins.value(k, PinGroup::None);
         // Keep pendingPins until the fallback chain is fully resolved so that
         // overlapping requests don't lose their pin promotion.
 
@@ -734,10 +749,6 @@ void ImageManager::fetchRawProxyUrl(const ImageRequestKey &k, const QUrl &url,
     guardReply(rawReply);
     connect(rawReply, &QNetworkReply::finished, this,
             [this, rawReply, k, url, size, dpr]() {
-        // Read the latest pin promotion (it may have been upgraded by an
-        // overlapping request while the fallback fetch was in flight).
-        PinGroup pin = pendingPins.value(k, PinGroup::None);
-
         if (rawReply->error() != QNetworkReply::NoError) {
             const QString reason = rawReply->errorString();
             rawReply->deleteLater();
@@ -785,8 +796,6 @@ void ImageManager::onImageDecoded(const ImageRequestKey &k, const QUrl &url, con
                                   bool proxy, bool allowProxyFallback, qreal dpr,
                                   const QByteArray &data, DecodeResult result)
 {
-    PinGroup pin = pendingPins.value(k, PinGroup::None);
-
     if (!result.ok) {
         // The optimized URL (format/width params) was rejected or undecodable.
         // Fall back to the raw proxy URL, which Discord serves without resize
@@ -800,21 +809,30 @@ void ImageManager::onImageDecoded(const ImageRequestKey &k, const QUrl &url, con
     }
 
     QPixmap pixmap = QPixmap::fromImage(result.image);
-    storeFetchedPixmap(k, url, size, data, pixmap, pin, proxy, dpr);
+    storeFetchedPixmap(k, url, size, data, pixmap, proxy, dpr);
 }
 
 void ImageManager::guardReply(QNetworkReply *reply)
 {
     // Abort oversized downloads instead of buffering them unboundedly: check
     // the advertised Content-Length as soon as headers arrive, then the
-    // accumulated bytes on every read.
+    // accumulated bytes via downloadProgress/readyRead (QNetworkReply::size()
+    // is 0 for sequential devices, so the old check never fired for chunked
+    // streams). Both signals report the TOTAL buffered bytes; do not sum them
+    // (that doubled the effective limit and aborted legitimate ~30MB images).
     QObject::connect(reply, &QNetworkReply::metaDataChanged, reply, [reply]() {
         const QVariant len = reply->header(QNetworkRequest::ContentLengthHeader);
         if (len.isValid() && len.toLongLong() > kMaxDownloadBytes)
             reply->abort();
     });
+    QObject::connect(reply, &QNetworkReply::downloadProgress, reply,
+                     [reply](qint64 bytesReceived, qint64) {
+                         if (bytesReceived > kMaxDownloadBytes)
+                             reply->abort();
+                     });
     QObject::connect(reply, &QNetworkReply::readyRead, reply, [reply]() {
-        if (reply->size() > kMaxDownloadBytes)
+        // Fallback for backends that don't emit downloadProgress timely.
+        if (reply->bytesAvailable() > kMaxDownloadBytes)
             reply->abort();
     });
 }
@@ -837,7 +855,7 @@ void ImageManager::pruneDiskCache()
         // Bound the session disk cache: delete oldest files until back under
         // the byte and file-count budgets.
         const QDir dir(dirPath);
-        const QFileInfoList files = dir.entryInfoList(QDir::Files, QDir::Time); // oldest first
+        const QFileInfoList files = dir.entryInfoList(QDir::Files, QDir::Time | QDir::Reversed); // oldest first
 
         qint64 totalBytes = 0;
         for (const QFileInfo &fi : files)
@@ -876,7 +894,7 @@ void ImageManager::onDiskCachePruned(const QStringList &removedPaths)
     }
 }
 void ImageManager::storeFetchedPixmap(const ImageRequestKey &k, const QUrl &url, const QSize &size,
-                                      const QByteArray &data, QPixmap pixmap, PinGroup pin, bool proxy,
+                                      const QByteArray &data, QPixmap pixmap, bool proxy,
                                       qreal dpr)
 {
     if (proxy) {
@@ -893,12 +911,20 @@ void ImageManager::storeFetchedPixmap(const ImageRequestKey &k, const QUrl &url,
         pixmap.setDevicePixelRatio(dpr);
     }
 
-    if (pin != PinGroup::None) {
-        pinnedImages.insert(k, pixmap);
-        pinGroupKeys.insert(pin, k);
-        ++pinRefCounts[k];
-    } else {
+    const auto pins = pendingPins.values(k);
+    if (pins.isEmpty()) {
         cache.insert(k, new QPixmap(pixmap), pixmapCost(pixmap));
+    } else {
+        // Pin for every group that requested this image while it was in flight
+        // (previously only the first group was pinned, under-pinning multi-view
+        // images and allowing premature eviction).
+        for (PinGroup g : pins) {
+            if (!pinGroupKeys.contains(g, k)) {
+                pinnedImages.insert(k, pixmap);
+                pinGroupKeys.insert(g, k);
+                ++pinRefCounts[k];
+            }
+        }
     }
 
     requests.remove(k);

@@ -138,13 +138,22 @@ void AttachmentPreviewPanel::addFiles(const QList<QUrl> &urls)
             continue;
         }
 
+        // Only stop the batch when we're truly out of room; a per-file
+        // rejection (e.g. over the size limit) must not silently drop the
+        // remaining valid files.
+        if (items.size() >= MaxFiles) {
+            showError(tr("You can attach up to %1 files per message").arg(MaxFiles));
+            break;
+        }
+
         Core::PendingAttachment attachment;
         attachment.filePath = info.absoluteFilePath();
         attachment.filename = info.fileName();
         attachment.size = info.size();
         attachment.mimeType = QMimeDatabase().mimeTypeForFile(info.absoluteFilePath()).name();
-        if (!appendAttachment(attachment))
-            break; // no more
+        // appendAttachment returns false (and shows its own error) on a
+        // size-limit rejection; continue to the next file in that case.
+        appendAttachment(attachment);
     }
 }
 

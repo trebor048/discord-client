@@ -24,6 +24,17 @@ void MemberRepository::deleteMembersForGuild(Core::Snowflake guildId, QSqlDataba
     execLogged(q, "MemberRepository: Delete members for guild");
 }
 
+void MemberRepository::deleteMember(Core::Snowflake guildId, Core::Snowflake userId)
+{
+    auto db = getDb();
+    QSqlQuery q(db);
+    q.prepare("DELETE FROM members WHERE guild_id = :guild_id AND user_id = :user_id");
+    q.bindValue(":guild_id", static_cast<qint64>(guildId));
+    q.bindValue(":user_id", static_cast<qint64>(userId));
+
+    execLogged(q, "MemberRepository: Delete member");
+}
+
 QString MemberRepository::rolesToJson(const QList<Core::Snowflake> &roles)
 {
     QJsonArray arr;
@@ -58,11 +69,16 @@ bool MemberRepository::saveMember(Core::Snowflake guildId, Core::Snowflake userI
 {
     QSqlQuery q(db);
     q.prepare(R"(
-        INSERT OR REPLACE INTO members
+        INSERT INTO members
         (user_id, guild_id, nick, avatar, roles, joined_at, premium_since,
          deaf, mute, flags, pending, communication_disabled_until)
         VALUES (:user_id, :guild_id, :nick, :avatar, :roles, :joined_at, :premium_since,
                 :deaf, :mute, :flags, :pending, :communication_disabled_until)
+        ON CONFLICT(user_id, guild_id) DO UPDATE SET
+            nick=excluded.nick, avatar=excluded.avatar, roles=excluded.roles,
+            joined_at=excluded.joined_at, premium_since=excluded.premium_since,
+            deaf=excluded.deaf, mute=excluded.mute, flags=excluded.flags,
+            pending=excluded.pending, communication_disabled_until=excluded.communication_disabled_until
     )");
 
     q.bindValue(":user_id", static_cast<qint64>(userId));
@@ -162,8 +178,10 @@ QList<Core::Snowflake> MemberRepository::getMemberUserIds(Core::Snowflake guildI
     auto db = getDb();
     QList<Core::Snowflake> ids;
     QSqlQuery q(db);
+    // NULL joined_at (members whose join time was never cached) must not sort
+    // first — that silently shifted which members the hard 200-row limit picks.
     q.prepare("SELECT user_id FROM members WHERE guild_id = :guild_id "
-              "ORDER BY joined_at LIMIT 200");
+              "ORDER BY joined_at IS NULL, joined_at LIMIT 200");
     q.bindValue(":guild_id", static_cast<qint64>(guildId));
     if (!q.exec()) {
         qCWarning(LogDB) << "MemberRepository: failed to fetch member ids";

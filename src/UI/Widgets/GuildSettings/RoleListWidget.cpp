@@ -57,6 +57,29 @@ void RoleListWidget::setupUi()
             &RoleListWidget::onCurrentItemChanged);
     connect(m_createButton, &QPushButton::clicked, this, &RoleListWidget::onCreateRole);
     connect(m_deleteButton, &QPushButton::clicked, this, &RoleListWidget::onDeleteRole);
+    // InternalMove lets the user drag roles to reorder, but without this the
+    // new order was purely cosmetic — it vanished on the next refreshRoles()
+    // (which re-sorts by server position) and was never sent to Discord.
+    connect(m_roleList->model(), &QAbstractItemModel::rowsMoved, this,
+            [this](const QModelIndex &, int, int, const QModelIndex &, int) { persistOrder(); });
+}
+
+void RoleListWidget::persistOrder()
+{
+    // The list shows the highest-position role at the top (see populateList's
+    // descending sort); send the full new order with normalized positions so
+    // the server reflects the drag exactly.
+    QList<QPair<Core::Snowflake, int>> positions;
+    const int count = m_roleList->count();
+    for (int i = 0; i < count; ++i) {
+        if (QListWidgetItem *item = m_roleList->item(i)) {
+            const Snowflake roleId(item->data(Qt::UserRole).toULongLong());
+            if (roleId.isValid())
+                positions.append({ roleId, count - 1 - i });
+        }
+    }
+    if (!positions.isEmpty())
+        m_instance->discord()->reorderRoles(m_guildId, positions);
 }
 
 void RoleListWidget::refreshRoles()

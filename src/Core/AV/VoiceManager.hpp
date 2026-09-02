@@ -162,6 +162,7 @@ private:
     int cachedOpusPacketLossPercent = 0;
     bool cachedNoiseSuppression = true;
     float cachedVadSensitivity = 30.0f;
+    float cachedVadThreshold = 100.0f;
     bool cachedPushToTalk = false;
     bool pushToTalkKeyHeld = false;
 #ifdef ACHERON_HAVE_RNNOISE

@@ -17,6 +17,7 @@
 #include <QUrl>
 
 #include <algorithm>
+#include <cmath>
 #include <random>
 
 namespace Acheron {
@@ -41,12 +42,41 @@ Gateway::~Gateway()
 
 void Gateway::start()
 {
-    if (running) {
+    // A previous stop() deliberately does not join the network thread (it may
+    // still be draining the close handshake), so a restart can hit one of two
+    // failure modes: assigning over a still-joinable std::thread (which calls
+    // std::terminate), or running.compare_exchange_strong failing because the
+    // old loop has not flipped `running` off yet (silently leaving the gateway
+    // dead). Force both loops down and join before (re)starting.
+    if (networkThread.joinable()) {
+        running = false;
+        heartbeatCv.notify_all();
+        networkThread.join(); // networkLoop joins the heartbeat thread in its cleanup
+    }
+    {
+        std::lock_guard lock(heartbeatThreadMutex);
+        if (heartbeatThread.joinable()) {
+            heartbeatCv.notify_all();
+            heartbeatThread.join();
+        }
+    }
+
+    bool expected = false;
+    if (!running.compare_exchange_strong(expected, true)) {
         qCWarning(LogDiscord) << "Attempt to start already running gateway";
         return;
     }
 
     wantToClose = false;
+
+    // A previous stop() left the old IngestThread alive (child of this) with
+    // its signal connections still wired; restarting would stack a duplicate
+    // connection set per cycle. Its worker thread was joined by stop(), so
+    // deleting here is safe.
+    if (ingest) {
+        delete ingest;
+        ingest = nullptr;
+    }
 
     ingest = new IngestThread(this);
     connect(ingest, &IngestThread::payloadReceived, this, &Gateway::onPayloadReceived);
@@ -62,7 +92,6 @@ void Gateway::start()
 
     ingest->start();
 
-    running = true;
     networkThread = std::thread(&Gateway::networkLoop, this);
 }
 
@@ -122,12 +151,26 @@ void Gateway::sendPayload(const QByteArray &data)
     const bool ok =
             CurlUtils::wsSend(curl, curlMutex, data.constData(), data.size(), CURLWS_TEXT, "gateway");
     if (!ok) {
-        // A blocked/partial frame leaves the outbound WS stream corrupt: the
-        // peer either closes it (decode error) or the connection hangs until
-        // the heartbeat zombie detector fires. Reconnect immediately instead —
-        // the inbound session is untouched, so the reconnect resumes cleanly.
-        qCWarning(LogDiscord) << "Gateway send failed — forcing reconnect";
-        shouldReconnect = true;
+        bool hadConnection;
+        {
+            std::lock_guard lock(curlMutex);
+            hadConnection = (curl != nullptr);
+        }
+        if (hadConnection) {
+            // A blocked/partial frame leaves the outbound WS stream corrupt: the
+            // peer either closes it (decode error) or the connection hangs until
+            // the heartbeat zombie detector fires. Reconnect immediately instead —
+            // the inbound session is untouched, so the reconnect resumes cleanly.
+            qCWarning(LogDiscord) << "Gateway send failed — forcing reconnect";
+            shouldReconnect = true;
+        } else {
+            // Not connected (still in the connect phase or between reconnects):
+            // the payload never left, so there is no corrupt stream to fix. Do
+            // NOT set shouldReconnect here — a send attempted while the connect
+            // was in flight would otherwise tear down the freshly established
+            // connection on its very first recv iteration (reconnect livelock).
+            qCDebug(LogDiscord) << "Gateway send skipped (not connected)";
+        }
     }
 }
 
@@ -996,7 +1039,7 @@ void Gateway::networkLoop()
                             QJsonDocument::fromJson(closeReason.toUtf8(), &parseError);
                     if (parseError.error == QJsonParseError::NoError && doc.isObject()) {
                         const double retryAfterMs = doc.object().value("retry_after").toDouble();
-                        if (retryAfterMs > 0)
+                        if (std::isfinite(retryAfterMs) && retryAfterMs > 0)
                             nextReconnectDelayMs = qMin(static_cast<int>(retryAfterMs), 120'000);
                     }
                 } else if (cc == CloseCode::TOO_MANY_SESSIONS) {
@@ -1044,7 +1087,11 @@ void Gateway::networkLoop()
         // with capped exponential backoff until the session is restored, a
         // fatal close code stops us, or the gateway is explicitly stopped.
         if (shouldReconnect && running) {
-            reconnectAttempts++;
+            // Snapshot after incrementing: the UI thread resets
+            // reconnectAttempts on READY, and loading it again later (as a
+            // separate statement) could observe 0 and compute an invalid
+            // backoff (collapsed to ~1s, defeating the capped backoff).
+            const int attempt = reconnectAttempts.fetch_add(1) + 1;
             isResuming.store(canResume.load());
 
             // Join the heartbeat thread if it exited (e.g. zombie detection broke the loop)
@@ -1061,7 +1108,8 @@ void Gateway::networkLoop()
             // zlib context, so the old stream state would corrupt decompression
             ingest->reset();
 
-            const int attempt = reconnectAttempts.load();
+            // Reuse the attempt snapshot taken above; never re-read or
+            // re-increment the atomic here (the UI thread may reset it on READY).
             int delay = reconnectBackoffMs(attempt);
             const int overrideMs = nextReconnectDelayMs.exchange(0);
             if (overrideMs > 0)
@@ -1099,7 +1147,10 @@ void Gateway::heartbeatLoop()
     qCDebug(LogDiscord) << "Heartbeat loop started, interval:" << heartbeatInterval;
 
     while (running) {
-        if (!heartbeatAckReceived) {
+        // Atomically consume the ACK flag: a plain read-then-clear pair could
+        // wipe an ACK that lands between the two operations, inflating the
+        // missed counter and triggering a spurious zombie reconnect.
+        if (!heartbeatAckReceived.exchange(false)) {
             int missed = ++missedHeartbeatAcks;
             if (missed >= maxMissedHeartbeatAcks) {
                 qCWarning(LogDiscord) << "No heartbeat ACK after" << missed
@@ -1112,7 +1163,6 @@ void Gateway::heartbeatLoop()
         } else {
             missedHeartbeatAcks = 0;
         }
-        heartbeatAckReceived = false;
 
         QoSHeartbeat heartbeat;
         heartbeat.seq = lastReceivedSequence;
@@ -1271,8 +1321,10 @@ void Gateway::handleChannelPinsUpdate(const Inbound &data)
 int Gateway::reconnectBackoffMs(int attempt) const
 {
     // Exponential backoff: 1s, 2s, 4s, ... capped at 30s, plus up to 1s jitter
-    // to avoid thundering-herd reconnects.
-    int base = std::min(1000 << (attempt - 1), 30000);
+    // to avoid thundering-herd reconnects. Use 64-bit shift to avoid UB when
+    // attempt >= 31 (1 << 31 overflows signed int).
+    const int clampedAttempt = std::clamp(attempt, 1, 16);
+    int base = std::min(1000 * (1 << (clampedAttempt - 1)), 30000);
     thread_local std::mt19937 rng(std::random_device{}());
     std::uniform_int_distribution<int> jitter(0, 999);
     return base + jitter(rng);

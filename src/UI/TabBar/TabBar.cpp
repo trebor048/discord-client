@@ -100,7 +100,9 @@ void TabBar::updateCurrentTab(const TabEntry &entry)
     if (tab.history.size() == 1 && !tab.history[0].channelId.isValid()) {
         tab.history[0] = stored;
         tab.historyIndex = 0;
+        layoutDirty = true; // the tab's label/badge width changes with the channel
         update();
+        emit tabsChanged();
         return;
     }
 
@@ -114,6 +116,7 @@ void TabBar::updateCurrentTab(const TabEntry &entry)
 
     tab.history.append(stored);
     tab.historyIndex = tab.history.size() - 1;
+    layoutDirty = true; // the tab's label/badge width changes with the channel
 
     constexpr static int MaxHistory = 50;
     if (tab.history.size() > MaxHistory) {
@@ -123,6 +126,7 @@ void TabBar::updateCurrentTab(const TabEntry &entry)
     }
 
     update();
+    emit tabsChanged();
 }
 
 void TabBar::openNewTab(const TabEntry &entry)
@@ -147,6 +151,7 @@ void TabBar::openNewTab(const TabEntry &entry)
     updateVisibility();
     update();
     emit tabChanged(entry);
+    emit tabsChanged();
 }
 
 QList<TabEntry> TabBar::tabEntries() const
@@ -176,6 +181,7 @@ void TabBar::restoreTabs(const QList<TabEntry> &entries, int activeIndex)
 
     updateVisibility();
     update();
+    emit tabsChanged();
 }
 
 void TabBar::setTabPinned(int index, bool pinned)
@@ -218,8 +224,11 @@ void TabBar::pinTabInternal(int index, bool pinned)
 
     layoutDirty = true;
     update();
-    if (currentTabIndex >= 0 && currentTabIndex < tabs.size())
-        emit tabChanged(tabs[currentTabIndex].current());
+    // Note: deliberately NO tabChanged() emit here. Pinning only moves the tab;
+    // the active tab's current entry is unchanged, so re-activating the channel
+    // (MainWindow::switchToTabEntry -> activateChannel) would reset the current
+    // channel's view state (scroll position, selection) for no reason.
+    emit tabsChanged();
 }
 
 int TabBar::lastPinnedIndex() const
@@ -240,6 +249,7 @@ void TabBar::navigateBack()
     tab.historyIndex--;
     update();
     emit tabChanged(tab.current());
+    emit tabsChanged();
 }
 
 void TabBar::navigateForward()
@@ -251,6 +261,7 @@ void TabBar::navigateForward()
     tab.historyIndex++;
     update();
     emit tabChanged(tab.current());
+    emit tabsChanged();
 }
 
 bool TabBar::canNavigateBack() const
@@ -275,6 +286,9 @@ void TabBar::updateChannelReadState(Core::Snowflake channelId, bool unread, int 
         return;
 
     channelReadStates[channelId] = { unread, mentionCount, unreadCount };
+    // A new badge or an unread flag changes the tab's rendered width; the
+    // cached layout must be recomputed or labels/badges overflow their rects.
+    layoutDirty = true;
     if (isVisible())
         update();
 }
@@ -503,6 +517,12 @@ void TabBar::closeTab(int index)
 
     bool wasActive = (index == currentTabIndex);
 
+    // Drop the read-state entry for the closed tab's channel so the map
+    // doesn't grow unboundedly across a session (one entry per visited
+    // channel, never pruned otherwise).
+    if (closed.channelId.isValid())
+        channelReadStates.remove(closed.channelId);
+
     tabs.removeAt(index);
 
     if (currentTabIndex >= tabs.size())
@@ -515,6 +535,7 @@ void TabBar::closeTab(int index)
 
     if (wasActive)
         emit tabChanged(tabs[currentTabIndex].current());
+    emit tabsChanged();
 }
 
 void TabBar::switchToTab(int index)
@@ -525,6 +546,7 @@ void TabBar::switchToTab(int index)
     currentTabIndex = index;
     update();
     emit tabChanged(tabs[currentTabIndex].current());
+    emit tabsChanged();
 }
 
 void TabBar::updateVisibility()
@@ -676,6 +698,7 @@ void TabBar::reopenLastClosedTab()
         currentTabIndex = 0;
         update();
         emit tabChanged(entry);
+        emit tabsChanged();
         return;
     }
 
@@ -1076,6 +1099,7 @@ void TabBar::mouseMoveEvent(QMouseEvent *event)
                     currentTabIndex++;
                 dragSourceIndex = targetIdx;
                 update();
+                emit tabsChanged();
             }
         }
     }

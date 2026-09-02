@@ -248,7 +248,13 @@ void MemberListManager::handleRoleDeleted(Snowflake guildId, Snowflake roleId)
         ListData &ld = lit.value();
         for (auto iit = ld.items.begin(); iit != ld.items.end(); ++iit) {
             auto &item = iit.value();
-            if (item.type == MemberListItem::Type::Member && !item.member.roles.isUndefined()) {
+            if (item.type == MemberListItem::Type::Group && item.groupId == roleId.toString()) {
+                // A deleted role may appear as a member-list group header;
+                // re-resolve it so the stale name/color is replaced with
+                // "Unknown Role" instead of lingering until the next sync.
+                resolveGroupInfo(item, gs, ld);
+                changed = true;
+            } else if (item.type == MemberListItem::Type::Member && !item.member.roles.isUndefined()) {
                 for (const auto &rid : item.member.roles.get()) {
                     if (rid == roleId) {
                         resolveMemberInfo(item, gs);
@@ -291,7 +297,7 @@ void MemberListManager::handleMemberListUpdate(const Discord::GuildMemberListUpd
     // update and the user's scroll position is lost each time.
     const auto oldGroups = ld.groups;
 
-    if (hasGroups && !update.groups->isEmpty())
+    if (hasGroups)
         ld.groups = update.groups;
 
     bool isActiveList = (update.guildId == activeGuildId && update.id == listId);
@@ -467,27 +473,18 @@ void MemberListManager::handleMemberRemoved(Snowflake guildId, Snowflake userId)
         if (removedKeys.isEmpty())
             continue;
 
-        std::sort(removedKeys.begin(), removedKeys.end());
         changed = true;
 
-        // Rebuild the materialized map with indices shifted down for every
-        // removed row, keeping the model consistent instead of leaving holes.
-        // Iterate keys in ascending order: QHash iteration order is arbitrary
-        // (and per-process seeded), so the monotonic removedIndex shift is only
-        // correct when keys are visited sorted.
-        QHash<int, MemberListItem> newItems;
-        newItems.reserve(ld.items.size() - removedKeys.size());
-        QList<int> sortedKeys = ld.items.keys();
-        std::sort(sortedKeys.begin(), sortedKeys.end());
-        int removedIndex = 0;
-        for (int key : sortedKeys) {
-            while (removedIndex < removedKeys.size() && removedKeys[removedIndex] < key)
-                ++removedIndex;
-            if (removedIndex < removedKeys.size() && removedKeys[removedIndex] == key)
-                continue;
-            newItems[key - removedIndex] = ld.items.value(key);
-        }
-        ld.items = std::move(newItems);
+        // Just drop the materialized rows and leave placeholder holes. The
+        // virtual layout (rowCount, group boundaries) is derived from
+        // ld.groups, which is NOT adjusted by a GUILD_MEMBER_REMOVE — so
+        // compacting the indices here would shift every row above the removal
+        // point and make itemAt(row) return the member belonging at row+1
+        // (wrong member rendered from the removal point to the group's end).
+        // The model already renders missing rows as placeholders, and the
+        // next GUILD_MEMBER_LIST_UPDATE re-syncs the materialized rows.
+        for (int idx : removedKeys)
+            ld.items.remove(idx);
     }
 
     if (changed && guildId == this->activeGuildId) {
@@ -596,10 +593,24 @@ void MemberListManager::flushPendingRanges()
 {
     awaitingResponse = false;
 
-    if (hasPendingRanges && pendingRanges != ranges)
+    if (hasPendingRanges && pendingRanges != ranges) {
         applyAndSendRanges(pendingRanges);
-    else
-        hasPendingRanges = false;
+        return;
+    }
+    hasPendingRanges = false;
+
+    // The 5s response timer fired with no pending range change: the gateway
+    // never answered the current subscription (connection hiccup, RESUME lost
+    // the subscription state). Re-request the active ranges so the member
+    // list repopulates instead of staying empty until the user scrolls or
+    // switches channels.
+    if (activeGuildId.isValid() && activeChannelId.isValid() && !ranges.isEmpty()) {
+        qCDebug(LogCore) << "[ML] subscription response timeout — re-requesting"
+                         << ranges.size() << "range(s)";
+        awaitingResponse = true;
+        responseTimer.start();
+        emit subscriptionRequested(activeGuildId, activeChannelId, ranges);
+    }
 }
 
 void MemberListManager::evictUnsubscribedItems(const QList<QPair<int, int>> &,
@@ -830,11 +841,17 @@ void MemberListManager::processBatchDeletes(const QList<int> &indices, ListData 
     if (indices.isEmpty())
         return;
 
+    // Sort ascending so index-shift logic is deterministic. Discord does not
+    // guarantee DELETE ops arrive sorted; without sorting, deleting 50 then
+    // 10 would shift the wrong suffix.
+    QList<int> sorted = indices;
+    std::sort(sorted.begin(), sorted.end());
+
     QMap<int, MemberListItem> map;
     for (auto it = listData.items.constBegin(); it != listData.items.constEnd(); ++it)
         map.insert(it.key(), it.value());
 
-    for (int deleteIdx : indices) {
+    for (int deleteIdx : sorted) {
         ML_LOG << "[ML]  DELETE idx:" << deleteIdx;
 
         auto it = map.find(deleteIdx);
@@ -872,15 +889,21 @@ void MemberListManager::processInvalidate(const Discord::GuildMemberListUpdate::
 
 QString MemberListManager::computeListId(const QList<Discord::PermissionOverwrite> &overwrites, Discord::Permissions everyonePermissions)
 {
-    bool hasDenyRules = false;
+    // Any view-affecting overwrite — ALLOW or DENY — changes which roles can
+    // see the channel, and therefore the member list's role groups. The
+    // "everyone" shortcut is only valid when NO such overwrite exists;
+    // otherwise two channels with different overwrite sets would collapse
+    // into one list id and share a stale member list.
+    bool hasViewOverwrites = false;
     for (const auto &ow : overwrites) {
-        if (ow.deny.hasValue() && ow.deny->testFlag(Discord::Permission::VIEW_CHANNEL)) {
-            hasDenyRules = true;
+        if ((ow.allow.hasValue() && ow.allow->testFlag(Discord::Permission::VIEW_CHANNEL)) ||
+            (ow.deny.hasValue() && ow.deny->testFlag(Discord::Permission::VIEW_CHANNEL))) {
+            hasViewOverwrites = true;
             break;
         }
     }
 
-    if (!hasDenyRules && everyonePermissions.testFlag(Discord::Permission::VIEW_CHANNEL))
+    if (!hasViewOverwrites && everyonePermissions.testFlag(Discord::Permission::VIEW_CHANNEL))
         return QStringLiteral("everyone");
 
     QStringList hashInputs;

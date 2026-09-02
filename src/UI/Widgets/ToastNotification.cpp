@@ -511,11 +511,20 @@ void ToastNotification::setReplyState(ReplyState state)
                                              .arg(m_highlightColor.name()));
         m_replyStatus->show();
         m_replyEdit->clear();
-        // Brief confirmation, then let the toast go away on its own.
-        QTimer::singleShot(900, this, [this]() {
-            if (m_replyState == ReplyState::Sent)
-                dismiss();
-        });
+        // Brief confirmation, then let the toast go away on its own. The timer
+        // is a member so mergeData() can cancel it: a new message merging into
+        // this toast restarts the real countdown and must not be dismissed by
+        // this stale one-shot.
+        if (!m_replyDismissTimer) {
+            m_replyDismissTimer = new QTimer(this);
+            m_replyDismissTimer->setSingleShot(true);
+            m_replyDismissTimer->setInterval(900);
+            connect(m_replyDismissTimer, &QTimer::timeout, this, [this]() {
+                if (m_replyState == ReplyState::Sent)
+                    dismiss();
+            });
+        }
+        m_replyDismissTimer->start();
         return;
     case ReplyState::Failed:
         m_replyStatus->setText(tr("Failed to send"));
@@ -602,6 +611,10 @@ void ToastNotification::mergeData(const Core::Notification::ToastNotificationDat
     // the toast dismisses earlier than configured.
     m_remainingMs = m_data.timeout * 1000;
     m_progress = 1.0;
+    // A "Sent ✓" confirmation armed for this toast must not fire after a new
+    // message merged in and reset the countdown.
+    if (m_replyDismissTimer)
+        m_replyDismissTimer->stop();
     if (!m_hovered && !m_groupExpanded && m_replyRow->isHidden()) {
         stopTimeout();
         startTimeout();

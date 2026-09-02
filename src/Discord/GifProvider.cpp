@@ -300,7 +300,11 @@ QString GifProvider::providerDisplayName(Provider provider)
 
 bool GifProvider::providerNeedsKey(Provider provider)
 {
-    return provider == Provider::Giphy || provider == Provider::Klipy;
+    // Tenor (v2 API) also requires an API key on every request — without it
+    // every call 400s and the picker silently shows "No GIFs found" for a
+    // configuration error, with no warning pointing the user at the key.
+    return provider == Provider::Giphy || provider == Provider::Klipy ||
+           provider == Provider::Tenor;
 }
 
 GifProvider::Provider GifProvider::defaultProvider()
@@ -326,13 +330,18 @@ void GifProvider::setProvider(Provider provider)
 
 void GifProvider::cancelAll()
 {
-    for (auto *reply : m_pending) {
+    // Detach the set before iterating: reply->abort() emits finished()
+    // synchronously, whose handler removes the reply from m_pending — erasing
+    // the element the range-for iterator is about to advance past (UB on a
+    // QSet). Iterating a moved-out copy keeps the handler's remove() harmless.
+    const QSet<QNetworkReply *> pending = std::move(m_pending);
+    m_pending.clear();
+    for (auto *reply : pending) {
         if (reply) {
             reply->abort();
             reply->deleteLater();
         }
     }
-    m_pending.clear();
 }
 
 void GifProvider::executeRequest(const QUrl &url,
@@ -340,6 +349,10 @@ void GifProvider::executeRequest(const QUrl &url,
 {
     QNetworkRequest request(url);
     request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("Acheron/1.0"));
+    // A hung GIF backend must not wedge the picker: the dialog sets m_loading
+    // before the request and only clears it in the callback, so without a
+    // timeout every later search/loadMore would early-return forever.
+    request.setTransferTimeout(15'000);
     QNetworkReply *reply = m_nam->get(request);
     m_pending.insert(reply);
 
@@ -389,7 +402,10 @@ void GifProvider::search(const QString &query, int offset, GifSearchCallback cal
                 m_nextPageToken = obj.value(QStringLiteral("next")).toString();
                 items = parseTenorResults(obj.value(QStringLiteral("results")).toArray());
                 m_nextOffset = offset + items.size();
-                hasMore = !m_nextPageToken.isEmpty() && !items.isEmpty();
+                // hasMore is driven by the next-page token alone: a valid-but-
+                // empty page (rate limit, filtered results) must not silently
+                // stop pagination just because it returned zero items.
+                hasMore = !m_nextPageToken.isEmpty();
             }
 
             cb(items, hasMore);
@@ -439,13 +455,16 @@ void GifProvider::search(const QString &query, int offset, GifSearchCallback cal
         q.addQueryItem(QStringLiteral("limit"), QString::number(kDefaultLimit));
         url.setQuery(q);
 
-        executeRequest(url, [this, cb = std::move(callback), offset](const QJsonDocument &doc) {
+        executeRequest(url, [this, cb = std::move(callback)](const QJsonDocument &doc) {
             const auto obj = doc.isObject() ? doc.object() : QJsonObject{};
             QList<GifItem> items = parseKlipyResults(obj.value(QStringLiteral("data")));
-            const bool hasMore = items.size() >= kDefaultLimit;
-            m_nextOffset = offset + items.size();
+            // This Klipy endpoint accepts no pagination parameter, so claiming
+            // "has more" and advancing m_nextOffset would re-request the same
+            // first page forever and fill the grid with duplicates. Report a
+            // single page only.
+            m_nextOffset = 0;
             m_nextPageToken.clear();
-            cb(items, hasMore);
+            cb(items, false);
         });
         break;
     }
@@ -478,7 +497,10 @@ void GifProvider::trending(int offset, GifSearchCallback callback)
                 m_nextPageToken = obj.value(QStringLiteral("next")).toString();
                 items = parseTenorResults(obj.value(QStringLiteral("results")).toArray());
                 m_nextOffset = offset + items.size();
-                hasMore = !m_nextPageToken.isEmpty() && !items.isEmpty();
+                // hasMore is driven by the next-page token alone: a valid-but-
+                // empty page (rate limit, filtered results) must not silently
+                // stop pagination just because it returned zero items.
+                hasMore = !m_nextPageToken.isEmpty();
             }
 
             cb(items, hasMore);
@@ -526,13 +548,14 @@ void GifProvider::trending(int offset, GifSearchCallback callback)
         q.addQueryItem(QStringLiteral("limit"), QString::number(kDefaultLimit));
         url.setQuery(q);
 
-        executeRequest(url, [this, cb = std::move(callback), offset](const QJsonDocument &doc) {
+        executeRequest(url, [this, cb = std::move(callback)](const QJsonDocument &doc) {
             const auto obj = doc.isObject() ? doc.object() : QJsonObject{};
             QList<GifItem> items = parseKlipyResults(obj.value(QStringLiteral("data")));
-            const bool hasMore = items.size() >= kDefaultLimit;
-            m_nextOffset = offset + items.size();
+            // Single page only: no pagination parameter is supported by this
+            // endpoint, so offset-based loading would duplicate the first page.
+            m_nextOffset = 0;
             m_nextPageToken.clear();
-            cb(items, hasMore);
+            cb(items, false);
         });
         break;
     }

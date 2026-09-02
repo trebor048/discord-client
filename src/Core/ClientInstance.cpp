@@ -247,9 +247,21 @@ ClientInstance::ClientInstance(const AccountInfo &info,
                     const auto &guild = data.guilds->at(i);
                     const auto &members = data.mergedMembers->at(i);
 
-                    for (const auto &member : members)
-                        if (!memberRepo.saveMember(guild.id, member.userId.get(), member))
+                    for (const auto &member : members) {
+                        // READY_SUPPLEMENTAL merged_members are standard member
+                        // objects (user embedded, no top-level "user_id" key),
+                        // so member.userId is Undefined; fall back to the
+                        // embedded user's id like the READY path does.
+                        Snowflake uid = member.userId.hasValue()
+                                                ? member.userId.get()
+                                        : (member.user.hasValue() && member.user->id.hasValue())
+                                                ? member.user->id.get()
+                                                : Snowflake::Invalid;
+                        if (!uid.isValid())
+                            continue;
+                        if (!memberRepo.saveMember(guild.id, uid, member))
                             return;
+                    }
                 }
 
                 if (!txn.commit()) {
@@ -401,6 +413,13 @@ ClientInstance::ClientInstance(const AccountInfo &info,
                 auto existing = m_presences.constFind(userId);
                 if (existing != m_presences.constEnd() && existing.value() == presence)
                     return; // no change; skip the expensive refresh
+                // Bound the cache: presences are keyed only by user id with no
+                // removal path, so a busy server would grow this map for every
+                // distinct user ever seen. Presence is transient UI state —
+                // dropping the whole cache on overflow is safe (it repopulates
+                // from the next events) and simpler than per-user eviction.
+                if (m_presences.size() >= kMaxCachedPresences)
+                    m_presences.clear();
                 m_presences.insert(userId, presence);
                 emit userPresenceChanged(userId);
             });
@@ -885,7 +904,7 @@ void ClientInstance::fetchThreadListAttempt(Snowflake channelId, bool archived, 
                         callback(Result<ThreadListPage>::makeError("Thread list is not ready yet"));
                         return;
                     }
-                    int delayMs = qMax(1, data.retryAfterSeconds) * 1000;
+                    int delayMs = qBound(1000, data.retryAfterSeconds * 1000, 60000);
                     QTimer::singleShot(delayMs, this,
                                        [this, channelId, archived, offset, attempt, callback]() {
                                            fetchThreadListAttempt(channelId, archived, offset, attempt + 1, callback);
@@ -1067,8 +1086,9 @@ void ClientInstance::onGuildMemberAdd(const Discord::GuildMemberUpdate &event)
 
     if (member.user.hasValue())
         userManager->saveUser(member.user.get());
+    // saveMember persists to memberRepo itself; the explicit second call below
+    // would duplicate the DB write on every join.
     userManager->saveMember(guildId, userId, member);
-    memberRepo.saveMember(guildId, userId, member);
     memberListManager->handleMemberAdded(guildId, member);
 
     emit membersUpdated(guildId, { userId });
@@ -1082,6 +1102,9 @@ void ClientInstance::onGuildMemberRemove(const Discord::GuildMemberRemove &event
     Snowflake guildId = event.guildId.get();
     Snowflake userId = event.user->id.get();
 
+    // A kicked/left user must not keep resolving with their stale nick/roles
+    // (or reappear on next reload): purge the cached member and its DB row.
+    userManager->removeGuildMember(guildId, userId);
     memberListManager->handleMemberRemoved(guildId, userId);
 
     emit membersUpdated(guildId, { userId });

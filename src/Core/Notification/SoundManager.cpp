@@ -225,6 +225,16 @@ void SoundManager::playNotificationSound(const QString &soundId, int volume)
         // Try to load from resources as fallback
         QUrl url = getSoundUrl(soundId);
         if (url.isValid()) {
+            // Stop current playback and release any buffer source first,
+            // mirroring the buffer path below: leaving m_currentBuffer alive
+            // while switching to a URL source would keep a stale buffer
+            // attached (and its EndOfMedia cleanup lambda armed for a source
+            // that no longer plays it).
+            m_player->stop();
+            if (m_currentBuffer) {
+                m_currentBuffer->deleteLater();
+                m_currentBuffer = nullptr;
+            }
             m_player->setSource(url);
             m_audioOutput->setVolume((m_globalVolume * volume) / 10000.0);
             m_player->play();
@@ -271,6 +281,9 @@ void SoundManager::playUrl(const QUrl &url, int volume)
 
     ensurePlayer();
 
+    // Stop current playback and release any buffer source before switching to
+    // a URL source (see playNotificationSound's URL path for the same reason).
+    m_player->stop();
     if (m_currentBuffer) {
         m_currentBuffer->deleteLater();
         m_currentBuffer = nullptr;

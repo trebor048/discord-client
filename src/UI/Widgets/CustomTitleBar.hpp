@@ -24,7 +24,7 @@ class CustomTitleBar : public QWidget
     Q_OBJECT
 public:
     static constexpr int kHeight = 32;
-    static constexpr int kButtonDiameter = 12;
+    static constexpr int kButtonDiameter = 14;
     static constexpr int kButtonSpacing = 8;
     static constexpr int kRightMargin = 12;
     static constexpr int kLeftMargin = 8;       // hamburger inset
@@ -54,6 +54,7 @@ protected:
     void leaveEvent(QEvent *event) override;
     void mouseDoubleClickEvent(QMouseEvent *event) override;
     void changeEvent(QEvent *event) override;
+    void showEvent(QShowEvent *event) override;
 
 private:
     void activateButton(Button button);

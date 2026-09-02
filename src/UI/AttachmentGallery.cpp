@@ -360,6 +360,11 @@ void AttachmentGallery::saveAttachment(const AttachmentData &att, QWidget *paren
                                     : att.filename;
     if (suggestedName.isEmpty())
         suggestedName = tr("attachment");
+    // Sanitize attacker-controlled filename (Discord CDN Content-Disposition).
+    suggestedName = QFileInfo(suggestedName).fileName();
+    suggestedName.replace(QRegularExpression(R"([\\/:*?"<>|])"), "_");
+    if (suggestedName.contains("..") || suggestedName.isEmpty())
+        suggestedName = tr("attachment");
 
     QString startDir = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
     if (startDir.isEmpty())
@@ -434,6 +439,13 @@ void AttachmentGallery::saveAll()
                                               : att.filename;
         if (name.isEmpty())
             name = tr("attachment");
+        // Sanitize: attacker can craft filename with path traversal or illegal
+        // characters (e.g. "../../.ssh/authorized_keys"). Strip directory
+        // components, replace separators, and reject "..".
+        name = QFileInfo(name).fileName();
+        name.replace(QRegularExpression(R"([\\/:*?"<>|])"), "_");
+        if (name.contains("..") || name.isEmpty())
+            name = tr("attachment");
 
         QString base = QFileInfo(name).completeBaseName();
         QString suffix = QFileInfo(name).suffix();
@@ -445,7 +457,17 @@ void AttachmentGallery::saveAll()
         }
         usedNames.insert(candidate.toCaseFolded());
 
-        saveAttachmentTo(att, targetDir.filePath(candidate), this);
+        // Ensure the resolved path stays inside the chosen directory (defence
+        // in depth after sanitisation). QFileInfo::fileName above already
+        // stripped separators, but verify canonical containment.
+        const QString destPath = targetDir.filePath(candidate);
+        const QString canonicalDest = QFileInfo(destPath).absoluteFilePath();
+        const QString canonicalDir = QDir(dir).absolutePath();
+        if (!canonicalDest.startsWith(canonicalDir + QLatin1Char('/'))
+            && canonicalDest != canonicalDir) {
+            continue;
+        }
+        saveAttachmentTo(att, destPath, this);
     }
 }
 

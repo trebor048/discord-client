@@ -12,6 +12,8 @@
 #include <QSemaphore>
 #include <QTimer>
 
+#include <exception>
+
 #include "Core/EmojiCatalog.hpp"
 #include "Core/Snowflake.hpp"
 
@@ -54,6 +56,7 @@ signals:
 
 protected:
     void keyPressEvent(QKeyEvent *event) override;
+    void showEvent(QShowEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private slots:
@@ -64,6 +67,10 @@ private slots:
     void toggleFavorite();
 
 private:
+    // Allocation-heavy part of rebuildResults(), called under a guard so an
+    // out-of-memory failure degrades to an empty picker instead of escaping
+    // into Qt's event dispatch and aborting the process.
+    void rebuildResultsUnchecked();
     enum class Section {
         All = 0,
         Recents = 1,
@@ -136,6 +143,11 @@ private:
 
     QString currentGuildId;
     void fadeInWidget(QWidget *w, int durationMs = 150);
+
+    // Set the first time the dialog becomes visible; the destructor only
+    // persists geometry when the picker was actually shown (an unshown dialog
+    // has a default geometry that would otherwise clobber the saved one).
+    bool wasShown = false;
 };
 
 // Modal helper: run the emoji picker and return the chosen emoji, or an empty
@@ -144,16 +156,23 @@ inline QString pickEmoji(QWidget *parent, const QString &title, const QString &p
                          const QStringList &orderedGuildIds = {},
                          const Core::Snowflake &currentGuildId = {})
 {
-    EmojiPickerDialog dialog(parent);
-    dialog.setWindowTitle(title);
-    dialog.setSearchPlaceholder(prompt);
-    if (!orderedGuildIds.isEmpty())
-        dialog.setOrderedGuildIds(orderedGuildIds);
-    if (currentGuildId.isValid())
-        dialog.setCurrentGuildId(currentGuildId.toString());
-    if (dialog.exec() != QDialog::Accepted)
+    // The picker allocates large widget/emoji pools while it opens; an
+    // out-of-memory failure must not escape into Qt's event dispatch and
+    // terminate the whole app — return "cancel" instead.
+    try {
+        EmojiPickerDialog dialog(parent);
+        dialog.setWindowTitle(title);
+        dialog.setSearchPlaceholder(prompt);
+        if (!orderedGuildIds.isEmpty())
+            dialog.setOrderedGuildIds(orderedGuildIds);
+        if (currentGuildId.isValid())
+            dialog.setCurrentGuildId(currentGuildId.toString());
+        if (dialog.exec() != QDialog::Accepted)
+            return {};
+        return dialog.selectedEmoji();
+    } catch (const std::exception &) {
         return {};
-    return dialog.selectedEmoji();
+    }
 }
 
 } // namespace UI

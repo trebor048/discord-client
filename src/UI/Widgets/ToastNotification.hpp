@@ -130,6 +130,10 @@ private:
     QLineEdit *m_replyEdit = nullptr;
     QLabel *m_replyStatus = nullptr;
     ReplyState m_replyState = ReplyState::Idle;
+    // 900ms "Sent ✓" confirmation timer; stopped when a new message merges
+    // into the toast (which restarts the real countdown) so a stale dismissal
+    // can't kill a freshly-merged toast.
+    QTimer *m_replyDismissTimer = nullptr;
 
     // Expandable group list
     QWidget *m_groupPanel = nullptr;

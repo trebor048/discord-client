@@ -85,6 +85,11 @@ PrivacySettingsPage::PrivacySettingsPage(QWidget *parent)
         QSettings().value("privacy/friend_req_server", true).toBool());
     friendLayout->addWidget(friendRequestFromServerMembers);
 
+    // The checkboxes are mirrors of the single friend_add_policy combo value;
+    // sync them to the stored policy so a fresh profile shows exactly one box
+    // checked instead of the all-true defaults above.
+    syncFriendRequestControls(QSettings().value("privacy/friend_add_policy", 0).toInt());
+
     layout->addWidget(friendGroup);
 
     // === Safety section ===
@@ -148,28 +153,47 @@ PrivacySettingsPage::PrivacySettingsPage(QWidget *parent)
         }
         emit privacyChanged();
     });
-    connect(friendRequestFromEveryone, &QCheckBox::toggled, this, [this](bool checked) {
+    // The checkboxes edit the same allow_friend_requests_from policy as the
+    // combo; syncFriendRequestControls blocks the combo's signal, so the
+    // checkboxes must push the resulting policy to the server themselves.
+    // The policy is derived from the checkbox state on every toggle: checking
+    // a box selects that policy (unchecking the others), unchecking all three
+    // means "No one". This keeps the three boxes consistent with the single
+    // combo value — an uncheck never silently drops the change.
+    auto pushFriendPolicy = [this]() {
+        int policy;
+        if (friendRequestFromEveryone->isChecked())
+            policy = 0;
+        else if (friendRequestFromFriendsOfFriends->isChecked())
+            policy = 1;
+        else if (friendRequestFromServerMembers->isChecked())
+            policy = 2;
+        else
+            policy = 3;
+
+        QSettings().setValue("privacy/friend_add_policy", policy);
+        syncFriendRequestControls(policy);
+        if (client) {
+            QJsonObject payload;
+            payload["allow_friend_requests_from"] = policy;
+            client->updatePrivacySettings(payload, [](const Core::Result<QJsonObject> &result) {
+                logPrivacyUpdateResult("allow_friend_requests_from", result);
+            });
+        }
+    };
+    connect(friendRequestFromEveryone, &QCheckBox::toggled, this, [this, pushFriendPolicy](bool checked) {
         QSettings().setValue("privacy/friend_req_everyone", checked);
-        if (checked)
-            syncFriendRequestControls(0);
-        else if (!friendRequestFromFriendsOfFriends->isChecked() && !friendRequestFromServerMembers->isChecked())
-            syncFriendRequestControls(3);
+        pushFriendPolicy();
         emit privacyChanged();
     });
-    connect(friendRequestFromFriendsOfFriends, &QCheckBox::toggled, this, [this](bool checked) {
+    connect(friendRequestFromFriendsOfFriends, &QCheckBox::toggled, this, [this, pushFriendPolicy](bool checked) {
         QSettings().setValue("privacy/friend_req_fof", checked);
-        if (checked)
-            syncFriendRequestControls(1);
-        else if (!friendRequestFromEveryone->isChecked() && !friendRequestFromServerMembers->isChecked())
-            syncFriendRequestControls(3);
+        pushFriendPolicy();
         emit privacyChanged();
     });
-    connect(friendRequestFromServerMembers, &QCheckBox::toggled, this, [this](bool checked) {
+    connect(friendRequestFromServerMembers, &QCheckBox::toggled, this, [this, pushFriendPolicy](bool checked) {
         QSettings().setValue("privacy/friend_req_server", checked);
-        if (checked)
-            syncFriendRequestControls(2);
-        else if (!friendRequestFromEveryone->isChecked() && !friendRequestFromFriendsOfFriends->isChecked())
-            syncFriendRequestControls(3);
+        pushFriendPolicy();
         emit privacyChanged();
     });
     connect(explicitImageFilterCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
@@ -213,18 +237,30 @@ void PrivacySettingsPage::fetchSettings()
 
         if (obj.contains("default_scope_of_dms")) {
             int dmScope = obj.value("default_scope_of_dms").toInt();
-            QSignalBlocker blocker(guard->dmFilterCombo);
-            guard->dmFilterCombo->setCurrentIndex(dmScope);
+            if (dmScope >= 0 && dmScope < guard->dmFilterCombo->count()) {
+                QSignalBlocker blocker(guard->dmFilterCombo);
+                guard->dmFilterCombo->setCurrentIndex(dmScope);
+                QSettings().setValue("privacy/dm_filter", dmScope);
+            }
         }
         if (obj.contains("allow_friend_requests_from")) {
             int friendPolicy = obj.value("allow_friend_requests_from").toInt();
-            guard->syncFriendRequestControls(friendPolicy);
+            if (friendPolicy >= 0 && friendPolicy < guard->friendAddCombo->count())
+                guard->syncFriendRequestControls(friendPolicy);
+        }
+        if (obj.contains("default_allow_dms_from_server_members")) {
+            bool allowServerMembers = obj.value("default_allow_dms_from_server_members").toBool();
+            QSignalBlocker blocker(guard->allowDmFromServerMembers);
+            guard->allowDmFromServerMembers->setChecked(allowServerMembers);
+            QSettings().setValue("privacy/allow_dm_server_members", allowServerMembers);
         }
         if (obj.contains("explicit_image_filter")) {
             int filter = obj.value("explicit_image_filter").toInt();
-            QSignalBlocker blocker(guard->explicitImageFilterCombo);
-            guard->explicitImageFilterCombo->setCurrentIndex(filter);
-            QSettings().setValue("privacy/explicit_filter", filter);
+            if (filter >= 0 && filter < guard->explicitImageFilterCombo->count()) {
+                QSignalBlocker blocker(guard->explicitImageFilterCombo);
+                guard->explicitImageFilterCombo->setCurrentIndex(filter);
+                QSettings().setValue("privacy/explicit_filter", filter);
+            }
         }
     });
 }
@@ -241,6 +277,7 @@ void PrivacySettingsPage::syncFriendRequestControls(int policy)
     friendRequestFromFriendsOfFriends->setChecked(policy == 1);
     friendRequestFromServerMembers->setChecked(policy == 2);
 
+    QSettings().setValue("privacy/friend_add_policy", policy);
     QSettings().setValue("privacy/friend_req_everyone", policy == 0);
     QSettings().setValue("privacy/friend_req_fof", policy == 1);
     QSettings().setValue("privacy/friend_req_server", policy == 2);

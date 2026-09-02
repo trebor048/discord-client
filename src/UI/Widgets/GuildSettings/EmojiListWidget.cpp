@@ -164,7 +164,7 @@ void EmojiListWidget::loadEmojiPreview(EmojiWidget &entry, const Discord::Emoji 
         return;
 
     const QString emojiIdStr = emoji.id->toString();
-    const bool animated = emoji.animated.get();
+    const bool animated = emoji.animated.getOr(false);
     const QUrl url = Discord::Cdn::emojiImage(emojiIdStr, animated, 64);
 
     // Capture QPointer to the preview button so the lambda can safely detect
@@ -254,7 +254,7 @@ void EmojiListWidget::rebuildEmojiList()
         EmojiWidget entry;
         entry.emojiId = emoji.id.get();
         entry.name = emoji.name.get();
-        entry.animated = emoji.animated.get();
+        entry.animated = emoji.animated.getOr(false);
 
         // Emoji preview cell
         auto *cellWidget = new QWidget(gridWidget);
@@ -276,12 +276,12 @@ void EmojiListWidget::rebuildEmojiList()
 
         entry.renameButton = new QPushButton(tr("Rename"), cellWidget);
         entry.renameButton->setFixedSize(64, 24);
-        entry.renameButton->setEnabled(enabled_ && !emoji.managed.get());
+        entry.renameButton->setEnabled(enabled_ && !emoji.managed.getOr(false));
         entry.renameButton->setStyleSheet(QStringLiteral("font-size: 11px;"));
 
         entry.deleteButton = new QPushButton(tr("Delete"), cellWidget);
         entry.deleteButton->setFixedSize(64, 24);
-        entry.deleteButton->setEnabled(enabled_ && !emoji.managed.get());
+        entry.deleteButton->setEnabled(enabled_ && !emoji.managed.getOr(false));
         entry.deleteButton->setStyleSheet(QStringLiteral(
                 "font-size: 11px;"
                 "QPushButton:hover { color: palette(bright-text); }"));

@@ -18,6 +18,12 @@ ChannelFilterProxyModel::ChannelFilterProxyModel(Core::Session *session, QObject
 
 void ChannelFilterProxyModel::setSourceModel(QAbstractItemModel *sourceModel)
 {
+    // Disconnect the previous source's dataChanged handler before switching —
+    // otherwise repeated setSourceModel (account switch / re-init) stacks
+    // lambda connections and re-sorts once per stale source.
+    if (dataChangedConnection)
+        disconnect(dataChangedConnection);
+
     channelModel = qobject_cast<ChannelTreeModel *>(sourceModel);
     QSortFilterProxyModel::setSourceModel(sourceModel);
 
@@ -27,7 +33,7 @@ void ChannelFilterProxyModel::setSourceModel(QAbstractItemModel *sourceModel)
     // a channel reorder would leave the visible order stale after the first
     // manual sort. Re-sort explicitly when those roles change.
     if (sourceModel) {
-        connect(sourceModel, &QAbstractItemModel::dataChanged, this,
+        dataChangedConnection = connect(sourceModel, &QAbstractItemModel::dataChanged, this,
                 [this](const QModelIndex &topLeft, const QModelIndex &, const QVector<int> &roles) {
                     // Per the QAbstractItemModel contract, topLeft may be invalid
                     // ("everything changed"); nothing to gate on then.
@@ -232,7 +238,11 @@ bool ChannelFilterProxyModel::filterAcceptsRow(int sourceRow, const QModelIndex 
         Core::Snowflake channelId =
                 Core::Snowflake(index.data(ChannelTreeModel::IdRole).toULongLong());
 
-        if (permissionManager->hasChannelPermission(userId, channelId, Discord::Permission::VIEW_CHANNEL | Discord::Permission::MANAGE_CHANNELS))
+        // Note: hasChannelPermission requires ALL bits, so VIEW|MANAGE would
+        // AND them. A category header is visible when the user can view OR
+        // manage it; otherwise fall through to hasVisibleChildren.
+        if (permissionManager->hasChannelPermission(userId, channelId, Discord::Permission::VIEW_CHANNEL) ||
+            permissionManager->hasChannelPermission(userId, channelId, Discord::Permission::MANAGE_CHANNELS))
             return true;
         return hasVisibleChildren(index);
     }

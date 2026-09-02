@@ -7,6 +7,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 
+#include <cmath>
+
 #include <curl/header.h>
 
 #include <utility>
@@ -57,6 +59,11 @@ RequestWorker::RequestWorker(HttpClient *owner, QString token, ClientIdentity &i
                              CaptchaResolver *captchaResolver)
     : owner(owner), ownerGuard(owner), token(std::move(token)), identity(identity), captchaResolver(captchaResolver)
 {
+    // QPointer is not thread-safe; protect cross-thread reads with guardMutex
+    QObject::connect(owner, &QObject::destroyed, owner, [this]() {
+        std::lock_guard<std::mutex> lock(guardMutex);
+        ownerGuard.clear();
+    });
     multi = curl_multi_init();
     curl_multi_setopt(multi, CURLMOPT_PIPELINING, static_cast<long>(CURLPIPE_MULTIPLEX));
 
@@ -88,7 +95,10 @@ void RequestWorker::submit(RequestDescriptor descriptor)
     HttpResponse response;
     response.success = false;
     response.error = QStringLiteral("Request rejected: client is shutting down");
-    descriptor.callback(response);
+    if (descriptor.callback)
+        descriptor.callback(response);
+    else
+        qCWarning(LogDiscord) << "Request rejected during shutdown with no callback";
 }
 
 void RequestWorker::shutdown()
@@ -200,6 +210,15 @@ CURL *RequestWorker::buildEasyHandle(TransferContext *ctx)
 
     curl_easy_setopt(curl, CURLOPT_COOKIEFILE, ""); // engine
     curl_easy_setopt(curl, CURLOPT_SHARE, share);
+
+    // Bound total transfer time so a stalled API call can't hang the single
+    // curl_multi worker thread forever. Uploads (large attachments to GCS) get
+    // a longer budget; interactive REST calls get the shorter one.
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 15'000L);
+    if (desc.uploadFilePath.isEmpty() && !ctx->uploadFile)
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 60'000L);
+    else
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 300'000L);
 
     curl_slist *headers = nullptr;
     if (desc.external) {
@@ -330,15 +349,23 @@ void RequestWorker::handleCompletion(TransferContext *ctx, CURLcode result)
         if (httpCode == 429 && !ctx->descriptor.external) {
             const QJsonObject root = QJsonDocument::fromJson(ctx->response.body).object();
             const double retryAfterSec = root["retry_after"].toDouble(-1.0);
-            if (retryAfterSec >= 0.0)
-                ctx->response.retryAfterMs = static_cast<int>(retryAfterSec * 1000.0);
+            // Clamp: guard against NaN/Infinity/huge values which would
+            // overflow int or schedule a 24-day timer.
+            if (std::isfinite(retryAfterSec) && retryAfterSec > 0.0)
+                ctx->response.retryAfterMs =
+                        static_cast<int>(qMin(retryAfterSec, 120.0) * 1000.0);
 
             if (ctx->response.retryAfterMs <= 0) {
                 curl_header *retryAfter = nullptr;
                 curl_easy_header(ctx->easy, "Retry-After", 0, CURLH_HEADER, -1, &retryAfter);
-                if (retryAfter && retryAfter->value)
-                    ctx->response.retryAfterMs =
-                            static_cast<int>(QString::fromLatin1(retryAfter->value).toDouble() * 1000);
+                if (retryAfter && retryAfter->value) {
+                    bool ok = false;
+                    const double headerSec =
+                            QString::fromLatin1(retryAfter->value).toDouble(&ok);
+                    if (ok && std::isfinite(headerSec) && headerSec > 0.0)
+                        ctx->response.retryAfterMs =
+                                static_cast<int>(qMin(headerSec, 120.0) * 1000.0);
+                }
             }
 
             curl_header *scope = nullptr;
@@ -394,8 +421,17 @@ void RequestWorker::failTransfer(TransferContext *ctx, const char *error)
 void RequestWorker::dispatchCompletion(RequestDescriptor descriptor, HttpResponse response,
                                        std::optional<CaptchaChallenge> challenge)
 {
-    QPointer<HttpClient> guard = ownerGuard;
-    QMetaObject::invokeMethod(owner, [guard, descriptor = std::move(descriptor),
+    QPointer<HttpClient> guard;
+    HttpClient *target = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(guardMutex);
+        guard = ownerGuard;
+        target = ownerGuard.data(); // safe copy under lock
+    }
+    if (!target)
+        return;
+    // Use target as context object; if target destroyed before invoke, Qt drops call
+    QMetaObject::invokeMethod(target, [guard, descriptor = std::move(descriptor),
                                       response = std::move(response),
                                       challenge = std::move(challenge)]() mutable {
         if (!guard)

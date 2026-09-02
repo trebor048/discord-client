@@ -209,6 +209,19 @@ void VoiceUserWidget::setSpeaking(bool speaking)
     if (speaking) {
         avatarWidget->setSpeaking(true);
 
+        // setGraphicsEffect() deletes whatever effect is currently installed;
+        // a running opacity animation targeting it (e.g. the join fade-in)
+        // would then tick a deleted QObject (UB/crash). Stop any such
+        // animation and defer the old effect's deletion before swapping.
+        // The speaking glow itself is created below, after this cleanup, so
+        // stopExistingOpacityAnimations can't accidentally kill it.
+        if (QGraphicsEffect *old = graphicsEffect()) {
+            if (old != speakingGlowFx) {
+                Core::AnimationUtils::stopExistingOpacityAnimations(this);
+                old->deleteLater();
+            }
+        }
+
         // Start a subtle glow pulse on the widget
         if (!speakingGlowFx) {
             speakingGlowFx = new QGraphicsOpacityEffect(this);
@@ -879,8 +892,17 @@ void VoiceWindow::onParticipantJoined(Core::Snowflake userId)
     // last chose. setVolume blocks signals so this does not re-emit volumeChanged.
     const int savedPct = QSettings().value("voice/volume/" + QString::number(userId), 100).toInt();
     widget->setVolume(savedPct);
-    if (voiceManager)
-        voiceManager->setUserVolume(userId, qBound(0.0f, static_cast<float>(savedPct) / 100.0f, 2.0f));
+    if (voiceManager) {
+        // A locally-muted user must stay silent after a rejoin: setUserMuted
+        // zeroed the pipeline volume, and blindly restoring the persisted
+        // slider value here would make them audible while the UI still shows
+        // the mute toggle checked.
+        if (voiceManager->isUserMuted(userId))
+            voiceManager->setUserVolume(userId, 0.0f);
+        else
+            voiceManager->setUserVolume(userId,
+                                        qBound(0.0f, static_cast<float>(savedPct) / 100.0f, 2.0f));
+    }
 
     connect(widget, &VoiceUserWidget::volumeChanged, this, [this](Core::Snowflake uid, int pct) {
         // Persist per-user volume so it survives rejoin/restart.
@@ -921,6 +943,14 @@ void VoiceWindow::onParticipantLeft(Core::Snowflake userId)
     VoiceUserWidget *w = it.value();
     userWidgets.erase(it);
     userListLayout->removeWidget(w);
+
+    // The widget may still have the infinite speaking-glow animation running
+    // (and/or the join fade-in). Replacing the effect below deletes the current
+    // one, so stop those animations first — otherwise each subsequent tick
+    // sets "opacity" on a deleted effect (UB/crash).
+    Core::AnimationUtils::stopExistingOpacityAnimations(w);
+    if (QGraphicsEffect *old = w->graphicsEffect())
+        old->deleteLater();
 
     // Fade out, then delete
     auto *fx = new QGraphicsOpacityEffect(w);
