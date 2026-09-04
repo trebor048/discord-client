@@ -21,6 +21,9 @@ public:
     bool saveUsers(const QList<Discord::User> &users, QSqlDatabase &db);
 
     std::optional<Discord::User> getUser(Core::Snowflake userId);
+
+private:
+    static void bindUser(QSqlQuery &q, const Discord::User &user);
 };
 
 } // namespace Storage

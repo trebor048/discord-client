@@ -59,11 +59,20 @@ void TypingTracker::addTyper(Snowflake channelId, Snowflake userId,
 
 void TypingTracker::removeTyper(Snowflake channelId, Snowflake userId)
 {
-    auto &typers = channelTypers[channelId];
-    auto it = std::find_if(typers.begin(), typers.end(),
-                           [userId](const TypingEntry &t) { return t.userId == userId; });
-    if (it != typers.end()) {
-        typers.erase(it);
+    auto it = channelTypers.find(channelId);
+    if (it == channelTypers.end())
+        return;
+
+    auto &typers = it.value();
+    auto tit = std::find_if(typers.begin(), typers.end(),
+                            [userId](const TypingEntry &t) { return t.userId == userId; });
+    if (tit != typers.end()) {
+        typers.erase(tit);
+        // Do not leave an empty list behind: removeTyper runs on every
+        // incoming message, and operator[] on an absent channel would churn a
+        // hash node + QList per message until the next cleanup tick.
+        if (typers.isEmpty())
+            channelTypers.erase(it);
         emit typersChanged();
     }
 }

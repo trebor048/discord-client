@@ -344,7 +344,10 @@ void Parser::setupDefaultRules()
     MarkdownRule url;
     url.name = "url";
     url.order = 16;
-    url.regex = QRegularExpression(R"(\G(https?:\/\/[^\s<]+[^<.,:;"')\]\s]))");
+    // Scheme matched case-insensitively (HTTP:// and http:// both auto-link,
+    // mirroring Discord's linkifier and ChatLayout::extractUrls). firstChars
+    // below must include 'H' or the pre-filter never attempts the rule.
+    url.regex = QRegularExpression(R"(\G([hH][tT]{2}[pP][sS]?:\/\/[^\s<]+[^<.,:;"')\]\s]))");
     url.match = inlineRegex(url.regex);
     url.parse = [](const Capture &match, NestedParseFn nestedParse, ParseState state) -> AstNode {
         AstNode node;
@@ -610,7 +613,7 @@ void Parser::sortRules()
     // at every position. Keep in sync with the regexes in setupDefaultRules().
     static const QMap<QString, QString> ruleFirstChars = {
         { "newline", "\n" },    { "escape", "\\" },   { "codeBlock", "`" },
-        { "url", "h" },         { "link", "[" },      { "em", "_*" },
+        { "url", "hH" },        { "link", "[" },      { "em", "_*" },
         { "user", "<" },        { "channel", "<" },   { "customEmoji", "<" },
         { "strong", "*" },      { "u", "_" },         { "strike", "~" },
         { "spoiler", "|" },     { "inlineCode", "`" }, { "br", "\n" },

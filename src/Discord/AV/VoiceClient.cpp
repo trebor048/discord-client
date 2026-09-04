@@ -598,41 +598,48 @@ void VoiceClient::onGatewayResumed()
 {
     qCInfo(LogVoice) << "Voice session resumed, restoring to Connected state";
 
-    // assume session intact if we could resume
-    if (localSsrc != 0 && !sessionKey.isEmpty()) {
-        // if the transport was torn down while the gateway was away,
-        // re-run the discovery/select-protocol path with the stored Ready data
-        if (!udpTransport && !serverIp.isEmpty()) {
-            qCWarning(LogVoice) << "UDP transport missing after resume, re-running IP discovery";
-
-            setState(State::DiscoveringIP);
-
-            udpTransport = new UdpTransport(this);
-            connect(udpTransport, &UdpTransport::ipDiscovered, this, &VoiceClient::onIpDiscovered);
-            connect(udpTransport, &UdpTransport::ipDiscoveryFailed, this, &VoiceClient::onIpDiscoveryFailed);
-            connect(udpTransport, &UdpTransport::datagramReceived, this, &VoiceClient::onDatagram);
-
-            udpTransport->startIpDiscovery(serverIp, serverPort, localSsrc);
-            return;
-        }
-
-        rtpEpoch = std::chrono::steady_clock::now();
-        setState(State::Connected);
-
-        // just in case
-        if (!encryption) {
-            EncryptionMode mode = encryptionModeFromString(selectedMode);
-            encryption = std::make_unique<VoiceEncryption>(mode, sessionKey);
-        }
-
-        sendSilence();
-        if (!keepaliveTimer) {
-            keepaliveTimer = new QTimer(this);
-            connect(keepaliveTimer, &QTimer::timeout, this, &VoiceClient::sendSilence);
-        }
-        if (!keepaliveTimer->isActive())
-            keepaliveTimer->start(KEEPALIVE_INTERVAL_MS);
+    // A successful RESUME implies a READY was received earlier, so the SSRC and
+    // server endpoint should be known; bail defensively if they are not.
+    if (localSsrc == 0 || serverIp.isEmpty()) {
+        qCWarning(LogVoice) << "Voice resumed without a stored Ready state";
+        return;
     }
+
+    // If the connection dropped before SESSION_DESCRIPTION was processed (WS
+    // lost during IP discovery / protocol selection), or the UDP transport was
+    // torn down while the gateway was away, the server is still waiting for
+    // SELECT_PROTOCOL. Re-run discovery/select-protocol from the stored Ready
+    // data; it is idempotent and the server answers with a fresh
+    // SESSION_DESCRIPTION. Without this the client stalls forever in a
+    // pre-session state ("Securing...") while the gateway is up.
+    if (!encryption || sessionKey.isEmpty() || !udpTransport) {
+        qCWarning(LogVoice) << "Media path incomplete after resume, re-running IP discovery";
+
+        setState(State::DiscoveringIP);
+        cleanupTransport();
+
+        udpTransport = new UdpTransport(this);
+        connect(udpTransport, &UdpTransport::ipDiscovered, this, &VoiceClient::onIpDiscovered);
+        connect(udpTransport, &UdpTransport::ipDiscoveryFailed, this, &VoiceClient::onIpDiscoveryFailed);
+        connect(udpTransport, &UdpTransport::datagramReceived, this, &VoiceClient::onDatagram);
+
+        udpTransport->startIpDiscovery(serverIp, serverPort, localSsrc);
+        return;
+    }
+
+    // Fully-established session that resumed cleanly: the transport, encryption
+    // context and DAVE session all survived, so just restart wall-clock sync,
+    // the keepalive timer and the initial silence frame.
+    rtpEpoch = std::chrono::steady_clock::now();
+    setState(State::Connected);
+
+    sendSilence();
+    if (!keepaliveTimer) {
+        keepaliveTimer = new QTimer(this);
+        connect(keepaliveTimer, &QTimer::timeout, this, &VoiceClient::sendSilence);
+    }
+    if (!keepaliveTimer->isActive())
+        keepaliveTimer->start(KEEPALIVE_INTERVAL_MS);
 }
 
 void VoiceClient::onIpDiscovered(const QString &ip, int port)

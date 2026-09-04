@@ -37,11 +37,23 @@ struct CaptchaSolution
 
 inline void appendCaptchaHeaders(curl_slist *&headers, const CaptchaSolution &solution)
 {
-    headers = curl_slist_append(headers, ("X-Captcha-Key: " + solution.token).toUtf8().constData());
-    if (!solution.sessionId.isEmpty())
-        headers = curl_slist_append(headers, ("X-Captcha-Session-Id: " + solution.sessionId).toUtf8().constData());
-    if (!solution.rqtoken.isEmpty())
-        headers = curl_slist_append(headers, ("X-Captcha-Rqtoken: " + solution.rqtoken).toUtf8().constData());
+    // Values arrive from the local captcha harness (user's own browser), but a
+    // malformed response must never be able to smuggle extra headers into the
+    // Discord request — strip CR/LF first, mirroring RequestWorker.
+    QString key = solution.token;
+    key.remove(QLatin1Char('\r')).remove(QLatin1Char('\n'));
+    headers = curl_slist_append(headers, ("X-Captcha-Key: " + key).toUtf8().constData());
+    if (!solution.sessionId.isEmpty()) {
+        QString sessionId = solution.sessionId;
+        sessionId.remove(QLatin1Char('\r')).remove(QLatin1Char('\n'));
+        headers = curl_slist_append(headers,
+                                    ("X-Captcha-Session-Id: " + sessionId).toUtf8().constData());
+    }
+    if (!solution.rqtoken.isEmpty()) {
+        QString rqtoken = solution.rqtoken;
+        rqtoken.remove(QLatin1Char('\r')).remove(QLatin1Char('\n'));
+        headers = curl_slist_append(headers, ("X-Captcha-Rqtoken: " + rqtoken).toUtf8().constData());
+    }
 }
 
 class CaptchaResolver

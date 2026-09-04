@@ -18,6 +18,8 @@
 #include "Discord/Enums.hpp"
 #include "Storage/ChannelRepository.hpp"
 
+#include <QPointer>
+
 namespace Acheron {
 namespace UI {
 namespace Widgets {
@@ -32,7 +34,6 @@ WebhooksWidget::WebhooksWidget(Core::ClientInstance *instance, Core::Snowflake g
 
     auto *client = m_instance->discord();
     connect(client, &Discord::Client::webhooksUpdated, this, &WebhooksWidget::onWebhooksUpdated);
-    connect(client, &Discord::Client::guildWebhooksFetched, this, &WebhooksWidget::onWebhooksFetched);
 }
 
 void WebhooksWidget::setupUi()
@@ -80,23 +81,22 @@ void WebhooksWidget::load()
     item->setText(QStringLiteral("Loading webhooks..."));
     item->setFlags(item->flags() & ~Qt::ItemIsEnabled & ~Qt::ItemIsSelectable);
 
-    m_instance->discord()->fetchGuildWebhooks(m_guildId, [this](const auto &result) {
-        if (!result.success()) {
-            m_webhookList->clear();
-            auto *item = new QListWidgetItem(m_webhookList);
-            item->setText(QStringLiteral("Failed to load webhooks: %1").arg(result.error));
-            item->setFlags(item->flags() & ~Qt::ItemIsEnabled & ~Qt::ItemIsSelectable);
-        }
-    });
-}
-
-void WebhooksWidget::onWebhooksFetched(Core::Snowflake guildId,
-                                       const QList<Discord::WebhookData> &webhooks)
-{
-    if (guildId != m_guildId)
-        return;
-    m_webhooks = webhooks;
-    populateList(webhooks);
+    const quint64 gen = ++m_fetchGeneration;
+    QPointer<WebhooksWidget> guard(this);
+    m_instance->discord()->fetchGuildWebhooks(m_guildId,
+        [this, guard, gen](const auto &result) {
+            if (!guard || gen != m_fetchGeneration)
+                return;
+            if (!result.success()) {
+                m_webhookList->clear();
+                auto *item = new QListWidgetItem(m_webhookList);
+                item->setText(QStringLiteral("Failed to load webhooks: %1").arg(result.error));
+                item->setFlags(item->flags() & ~Qt::ItemIsEnabled & ~Qt::ItemIsSelectable);
+                return;
+            }
+            m_webhooks = result.value.value();
+            populateList(m_webhooks);
+        });
 }
 
 void WebhooksWidget::populateList(const QList<Discord::WebhookData> &webhooks)

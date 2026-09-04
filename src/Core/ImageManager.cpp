@@ -747,6 +747,17 @@ void ImageManager::fetchRawProxyUrl(const ImageRequestKey &k, const QUrl &url,
     rawRequest.setTransferTimeout(kTransferTimeoutMs);
     QNetworkReply *rawReply = networkManager->get(rawRequest);
     guardReply(rawReply);
+    // SSRF via redirect: this fallback re-fetches the original URL after the
+    // optimized fetch failed, so it must apply the same redirect validation as
+    // fetchFromNetwork() — otherwise a proxy URL that 302s to an internal host
+    // is followed unguarded here.
+    connect(rawReply, &QNetworkReply::redirected, rawReply,
+            [rawReply](const QUrl &redirectUrl) {
+                if (NetUtils::isPrivateHost(redirectUrl.host())) {
+                    qCWarning(LogCore) << "Blocked private-IP redirect" << redirectUrl.host();
+                    rawReply->abort();
+                }
+            });
     connect(rawReply, &QNetworkReply::finished, this,
             [this, rawReply, k, url, size, dpr]() {
         if (rawReply->error() != QNetworkReply::NoError) {

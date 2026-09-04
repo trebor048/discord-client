@@ -55,7 +55,11 @@ QString guildHeaderText(const QList<Core::EmojiCatalogItem> &items)
     return name.isEmpty() ? QStringLiteral("Unknown Server") : name;
 }
 
-constexpr int kDialogMinWidth = 720;
+// Floor width used when there is no wide host window to fill (parentless
+// pickers, very narrow windows). Normally showEvent() widens the dialog to
+// match the hosting window so the emoji grid fills it; EmojiGridMetrics keeps
+// every cell 60+4 px regardless of how many columns that produces.
+constexpr int kDialogMinWidth = 560;
 // Raw GIF payloads are tens of KB to several MB each, so bound the cache by
 // total bytes rather than entry count to keep memory usage predictable.
 constexpr qsizetype kGifCacheMaxBytes = 32 * 1024 * 1024;
@@ -154,6 +158,14 @@ EmojiPickerDialog::~EmojiPickerDialog()
 void EmojiPickerDialog::showEvent(QShowEvent *event)
 {
     wasShown = true;
+    // Pop open at the width of the hosting window so the grid fills it; the
+    // virtual grid derives its column count from the resulting viewport width,
+    // so bigger windows simply show more (still large) emoji per row. Skip when
+    // parentless: there is no window to match.
+    if (QWidget *host = window(); host && host != this) {
+        if (host->width() > minimumWidth())
+            resize(host->width(), qMax(height(), minimumHeight()));
+    }
     QDialog::showEvent(event);
 }
 
@@ -200,7 +212,7 @@ EmojiPickerDialog::EmojiPickerDialog(QWidget *parent) : QDialog(parent)
         btn->setToolButtonStyle(Qt::ToolButtonTextOnly);
         btn->setStyleSheet(QStringLiteral(
                 "QToolButton { border: 1px solid palette(mid); border-radius: 4px; "
-                "padding: 2px 6px; font-size: 11px; }"
+                "padding: 2px 4px; font-size: 11px; }"
                 "QToolButton:hover { background: palette(base); }"));
         const QString cat = category;
         connect(btn, &QToolButton::clicked, this, [this, cat]() {
@@ -705,7 +717,7 @@ bool EmojiPickerDialog::eventFilter(QObject *watched, QEvent *event)
             buf->open(QIODevice::ReadOnly);
             movie->setDevice(buf);
             movie->setFormat(QByteArrayLiteral("gif"));
-            movie->setScaledSize(QSize(24, 24));
+            movie->setScaledSize(QSize(EmojiGridMetrics::kIconSize, EmojiGridMetrics::kIconSize));
 
             if (!movie->isValid()) {
                 delete movie;
@@ -734,7 +746,8 @@ bool EmojiPickerDialog::eventFilter(QObject *watched, QEvent *event)
             if (gifCache.contains(emojiValue)) {
                 QPixmap first;
                 if (first.loadFromData(gifCache.value(emojiValue))) {
-                    first = first.scaled(24, 24, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                    first = first.scaled(EmojiGridMetrics::kIconSize, EmojiGridMetrics::kIconSize,
+                                         Qt::KeepAspectRatio, Qt::SmoothTransformation);
                     btn->setIcon(QIcon(first));
                 }
             }
@@ -820,8 +833,9 @@ void EmojiPickerDialog::applyIconToButton(QToolButton *button, const Core::Emoji
     button->setIcon(QIcon());
 
     if (!item.isCustom()) {
-        // Icon size is already reset to the button's native default by the
-        // grid before this applicator runs, matching the original rendering.
+        // The grid already reset the button's icon size to
+        // EmojiGridMetrics::kIconSize before this applicator runs; render the
+        // glyph at the same resolution so it stays crisp.
         button->setIcon(renderUnicodeEmojiIcon(item.unicodeEmoji, EmojiGridMetrics::kIconSize));
         return;
     }
@@ -831,9 +845,10 @@ void EmojiPickerDialog::applyIconToButton(QToolButton *button, const Core::Emoji
         if (gifCache.contains(value)) {
             QPixmap first;
             if (first.loadFromData(gifCache.value(value))) {
-                first = first.scaled(24, 24, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                first = first.scaled(EmojiGridMetrics::kIconSize, EmojiGridMetrics::kIconSize,
+                                     Qt::KeepAspectRatio, Qt::SmoothTransformation);
                 button->setIcon(QIcon(first));
-                button->setIconSize(QSize(24, 24));
+                button->setIconSize(QSize(EmojiGridMetrics::kIconSize, EmojiGridMetrics::kIconSize));
                 animatedButtons.insert(button);
                 button->installEventFilter(this);
                 return;
@@ -841,7 +856,7 @@ void EmojiPickerDialog::applyIconToButton(QToolButton *button, const Core::Emoji
         }
     } else if (staticEmojiIconCache.contains(value)) {
         button->setIcon(staticEmojiIconCache.value(value));
-        button->setIconSize(QSize(24, 24));
+        button->setIconSize(QSize(EmojiGridMetrics::kIconSize, EmojiGridMetrics::kIconSize));
         return;
     }
 
@@ -870,7 +885,9 @@ void EmojiPickerDialog::requestCustomIconFetch(const Core::EmojiCatalogItem &ite
 void EmojiPickerDialog::startCustomIconFetch(const Core::EmojiCatalogItem &item, const QString &value)
 {
     const bool animated = item.animated;
-    QNetworkReply *reply = nam->get(QNetworkRequest(QUrl(item.cdnUrl(animated ? 64 : 32))));
+    // Fetch at 64px: larger than the display size (EmojiGridMetrics::kIconSize)
+    // so scaled-down custom icons stay crisp on high-DPI displays.
+    QNetworkReply *reply = nam->get(QNetworkRequest(QUrl(item.cdnUrl(64))));
     pendingIconRequests.insert(reply);
     connect(reply, &QNetworkReply::finished, this, [this, reply, value, animated]() {
         if (!pendingIconRequests.remove(reply))

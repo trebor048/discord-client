@@ -1729,17 +1729,22 @@ void Client::tempBanMember(Snowflake guildId, Snowflake userId, int deleteMessag
     // a temp ban (or a restore colliding with a fresh ban) doesn't unban early.
     const QPair<Snowflake, Snowflake> key(guildId, userId);
     if (auto it = m_pendingUnbanTimers.find(key); it != m_pendingUnbanTimers.end()) {
-        if (it.value())
+        if (it.value()) {
             it.value()->stop();
+            it.value()->deleteLater();
+        }
         m_pendingUnbanTimers.erase(it);
     }
 
     auto *timer = new QTimer(this);
     timer->setSingleShot(true);
-    connect(timer, &QTimer::timeout, this, [this, key, guildId, userId]() {
+    connect(timer, &QTimer::timeout, this, [this, key, guildId, userId, timer]() {
         m_pendingUnbanTimers.remove(key);
         unbanMember(guildId, userId);
         removePendingUnban(guildId, userId);
+        // Single-shot, its map entry is gone — don't leak the timer until the
+        // client is destroyed (same pattern as the HTTP 429 retry timers).
+        timer->deleteLater();
     });
     timer->start(delayMs);
     m_pendingUnbanTimers.insert(key, timer);
@@ -1768,10 +1773,13 @@ void Client::restorePendingUnbans()
         const QPair<Snowflake, Snowflake> key(guildId, userId);
         auto *timer = new QTimer(this);
         timer->setSingleShot(true);
-        connect(timer, &QTimer::timeout, this, [this, key, guildId, userId]() {
+        connect(timer, &QTimer::timeout, this, [this, key, guildId, userId, timer]() {
             m_pendingUnbanTimers.remove(key);
             unbanMember(guildId, userId);
             removePendingUnban(guildId, userId);
+            // Single-shot; its map entry is gone — free it now instead of
+            // leaking one QTimer per restored pending unban per session.
+            timer->deleteLater();
         });
         timer->start(delayMs);
         m_pendingUnbanTimers.insert(key, timer);

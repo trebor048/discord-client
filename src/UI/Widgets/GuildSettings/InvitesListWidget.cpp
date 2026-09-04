@@ -12,6 +12,8 @@
 #include "Core/ClientInstance.hpp"
 #include "Discord/Client.hpp"
 
+#include <QPointer>
+
 namespace Acheron {
 namespace UI {
 namespace Widgets {
@@ -27,7 +29,6 @@ InvitesListWidget::InvitesListWidget(Core::ClientInstance *instance, Core::Snowf
     auto *client = m_instance->discord();
     connect(client, &Discord::Client::inviteCreated, this, &InvitesListWidget::onInviteCreated);
     connect(client, &Discord::Client::inviteDeleted, this, &InvitesListWidget::onInviteDeleted);
-    connect(client, &Discord::Client::guildInvitesFetched, this, &InvitesListWidget::onInvitesFetched);
 }
 
 void InvitesListWidget::setupUi()
@@ -69,23 +70,22 @@ void InvitesListWidget::load()
     item->setText(QStringLiteral("Loading invites..."));
     item->setFlags(item->flags() & ~Qt::ItemIsEnabled & ~Qt::ItemIsSelectable);
 
-    m_instance->discord()->fetchGuildInvites(m_guildId, [this](const auto &result) {
-        if (!result.success()) {
-            m_inviteList->clear();
-            auto *item = new QListWidgetItem(m_inviteList);
-            item->setText(QStringLiteral("Failed to load invites: %1").arg(result.error));
-            item->setFlags(item->flags() & ~Qt::ItemIsEnabled & ~Qt::ItemIsSelectable);
-        }
-    });
-}
-
-void InvitesListWidget::onInvitesFetched(Core::Snowflake guildId,
-                                         const QList<Discord::InviteData> &invites)
-{
-    if (guildId != m_guildId)
-        return;
-    m_invites = invites;
-    populateList(invites);
+    const quint64 gen = ++m_fetchGeneration;
+    QPointer<InvitesListWidget> guard(this);
+    m_instance->discord()->fetchGuildInvites(m_guildId,
+        [this, guard, gen](const auto &result) {
+            if (!guard || gen != m_fetchGeneration)
+                return;
+            if (!result.success()) {
+                m_inviteList->clear();
+                auto *item = new QListWidgetItem(m_inviteList);
+                item->setText(QStringLiteral("Failed to load invites: %1").arg(result.error));
+                item->setFlags(item->flags() & ~Qt::ItemIsEnabled & ~Qt::ItemIsSelectable);
+                return;
+            }
+            m_invites = result.value.value();
+            populateList(m_invites);
+        });
 }
 
 void InvitesListWidget::populateList(const QList<Discord::InviteData> &invites)

@@ -255,6 +255,10 @@ void HttpClient::onRequestComplete(RequestDescriptor descriptor, HttpResponse re
                 }
             }
             worker->submit(std::move(forTimer));
+            // The timer is single-shot and its entry was erased above; without
+            // this it stays alive (parented to the client) until destruction,
+            // so a session full of rate-limited requests leaks one QTimer each.
+            timer->deleteLater();
         });
         m_retryTimers.push_back({ timer, std::move(parked) });
         timer->start();

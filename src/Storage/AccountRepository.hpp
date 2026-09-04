@@ -16,7 +16,10 @@ class AccountRepository : public BaseRepository
 public:
     AccountRepository();
 
-    void saveAccount(const Core::AccountInfo &acc);
+    /// Persists \a acc. Returns false (after logging) when the row could not be
+    /// written, so callers can roll back the keychain credential they stored
+    /// first instead of leaving a token with no account row.
+    bool saveAccount(const Core::AccountInfo &acc);
     Core::AccountInfo getAccount(quint64 id);
     QVector<Core::AccountInfo> getAllAccounts();
     void removeAccount(quint64 id);

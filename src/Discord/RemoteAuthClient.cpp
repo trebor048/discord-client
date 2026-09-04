@@ -34,6 +34,21 @@ namespace Discord {
 static constexpr const char *gatewayUrl = "wss://remote-auth-gateway.discord.gg/?v=2";
 static constexpr const char *loginUrl = "https://discord.com/api/v9/users/@me/remote-auth/login";
 
+// Aborts an in-flight curl_easy_perform once the client is stopping. stop()
+// joins the network thread, so without an escape hatch a dialog close during a
+// stalled connect would block the UI thread for the whole CURLOPT_CONNECTTIMEOUT.
+// Mirrors the xferinfo abort pattern RequestWorker already uses.
+static int abortTransferIfStopping(void *clientp, curl_off_t dltotal, curl_off_t dlnow,
+                                   curl_off_t ultotal, curl_off_t ulnow)
+{
+    Q_UNUSED(dltotal);
+    Q_UNUSED(dlnow);
+    Q_UNUSED(ultotal);
+    Q_UNUSED(ulnow);
+    auto *running = static_cast<std::atomic<bool> *>(clientp);
+    return running->load() ? 0 : 1;
+}
+
 RemoteAuthClient::RemoteAuthClient(CaptchaResolver *captchaResolver, QObject *parent)
     : QObject(parent), captchaResolver(captchaResolver)
 {
@@ -174,6 +189,12 @@ void RemoteAuthClient::networkLoop()
     curl_easy_setopt(curl, CURLOPT_URL, gatewayUrl);
     curl_easy_setopt(curl, CURLOPT_CONNECT_ONLY, 2L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+    // Let a stop() join return promptly when the connect is stalling (see
+    // abortTransferIfStopping). Only the joined network thread uses this: the
+    // detached HTTP login thread must not reference members after destruction.
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, abortTransferIfStopping);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &running);
     CurlUtils::applyCommonOptions(curl);
 
     curl_slist *headers = curl_slist_append(nullptr, "Origin: https://discord.com");
@@ -183,13 +204,19 @@ void RemoteAuthClient::networkLoop()
     curl_slist_free_all(headers);
 
     if (res != CURLE_OK) {
-        qCWarning(LogDiscord) << "Remote auth connect failed:" << curl_easy_strerror(res);
+        // CURLE_ABORTED_BY_CALLBACK means stop() tore us down mid-connect;
+        // done is already set, so surface nothing for that intentional path.
+        if (res != CURLE_ABORTED_BY_CALLBACK) {
+            qCWarning(LogDiscord) << "Remote auth connect failed:" << curl_easy_strerror(res);
+            QMetaObject::invokeMethod(this,
+                                      [this] { fail(RemoteAuthError::ConnectionFailed); },
+                                      Qt::QueuedConnection);
+        }
         {
             std::lock_guard lock(curlMutex);
             curl_easy_cleanup(curl);
             curl = nullptr;
         }
-        QMetaObject::invokeMethod(this, [this] { fail(RemoteAuthError::ConnectionFailed); }, Qt::QueuedConnection);
         return;
     }
 
@@ -274,6 +301,9 @@ void RemoteAuthClient::networkLoop()
             curl = nullptr;
         }
     }
+    // Wake the heartbeat thread so it observes the dead socket and exits
+    // instead of lingering (and heartbeating into nothing) until stop().
+    heartbeatCv.notify_all();
 }
 
 void RemoteAuthClient::heartbeatLoop()
@@ -283,6 +313,16 @@ void RemoteAuthClient::heartbeatLoop()
             std::unique_lock lock(heartbeatMutex);
             if (heartbeatCv.wait_for(lock, std::chrono::milliseconds(heartbeatInterval.load()),
                                      [this] { return !running.load(); }))
+                break;
+        }
+
+        // The network loop owns the socket and tears it down (curl = nullptr)
+        // when the connection dies or stop() is called. Once it is gone there
+        // is nothing left to keep alive, so exit instead of waking forever to
+        // send heartbeats into a dead handle until stop().
+        {
+            std::lock_guard lock(curlMutex);
+            if (!curl)
                 break;
         }
 
@@ -523,13 +563,16 @@ void RemoteAuthClient::postLogin(const QString &ticket, std::optional<CaptchaSol
 
                     QByteArray enc = QByteArray::fromBase64(root["encrypted_token"].toString().toLatin1());
                     QByteArray token = self->decrypt(enc);
+                    enc.clear();
                     if (token.isEmpty()) {
                         qCWarning(LogNetwork) << "Remote auth token decryption failed";
                         self->fail(RemoteAuthError::LoginFailed);
                         return;
                     }
 
-                    self->succeed(QString::fromUtf8(token));
+                    const QString tokenStr = QString::fromUtf8(token);
+                    token.clear(); // drop the raw plaintext before it leaves this frame
+                    self->succeed(tokenStr);
                 },
                 Qt::QueuedConnection);
     });

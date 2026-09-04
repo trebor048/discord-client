@@ -20,7 +20,11 @@ bool ForumManager::RequestBatch::add(Snowflake forumId, Snowflake threadId)
     if (requested.contains(threadId))
         return false;
     if (!pending.isEmpty() && this->forumId != forumId) {
-        qCWarning(LogCore) << "Forum request is weird! Dropping" << threadId << "of" << forumId;
+        // The batch is already holding threads for a different forum. Don't
+        // drop the request: park it so take() re-queues it once this batch
+        // drains — two forums enqueuing in the same event-loop turn must both
+        // be answered, not silently lose one.
+        overflow.append({ forumId, threadId });
         return false;
     }
 
@@ -41,7 +45,22 @@ QList<Snowflake> ForumManager::RequestBatch::take(Snowflake &outForumId)
 
     QList<Snowflake> ids;
     ids.swap(pending);
-    lastTaken = ids; // remember for forgetTaken() (empty batch -> empty take)
+
+    // Re-queue requests parked by add() while this batch was busy with a
+    // different forum. flushStarterRequests drains the re-queued forum in the
+    // same pass; flushUnreadRequests (single-flight, see there) hands it out on
+    // the flush that follows this batch's reply. Either way the parked request
+    // is not dropped.
+    if (!overflow.isEmpty()) {
+        const QList<QPair<Snowflake, Snowflake>> parked = overflow;
+        overflow.clear();
+        for (const auto &entry : parked)
+            add(entry.first, entry.second);
+    }
+
+    lastTaken = ids; // track for the no-arg forgetTaken()/hasOutstanding()
+    if (!ids.isEmpty())
+        outstandingSince = QDateTime::currentMSecsSinceEpoch();
     return ids;
 }
 
@@ -190,42 +209,91 @@ void ForumManager::ensureUnreadCount(Snowflake forumId, Snowflake threadId)
 
 void ForumManager::flushUnreadRequests()
 {
-    Snowflake forumId;
-    const QList<Snowflake> ids = unreadBatch.take(forumId);
-    if (ids.isEmpty() || !forumId.isValid())
+    // Single-flight unread requests: the gateway FORUM_UNREADS reply does not
+    // carry the request/forum id it answers, so if two forums' requests were
+    // outstanding at once the first reply could not be attributed and would
+    // clear the wrong forum's in-flight markers. Hand out ONE forum per
+    // invocation; onForumUnreads (or the reply watchdog below) re-invokes this
+    // when the round trip completes, so requests parked for other forums (the
+    // overflow add()/take() re-queue) are still served — one at a time.
+    if (unreadBatch.hasOutstanding()) {
+        // A reply that never arrives (gateway dropped the request mid-session
+        // and silently resumed) must not stall every later unread request.
+        if (QDateTime::currentMSecsSinceEpoch() - unreadBatch.outstandingSinceMs()
+            >= kUnreadReplyTimeoutMs) {
+            qCWarning(LogCore) << "Forum unread request timed out; clearing in-flight markers";
+            unreadBatch.forgetTaken();
+        } else {
+            return;
+        }
+    }
+
+    while (unreadBatch.hasPending()) {
+        Snowflake forumId;
+        const QList<Snowflake> ids = unreadBatch.take(forumId);
+        if (ids.isEmpty() || !forumId.isValid())
+            continue;
+
+        for (int i = 0; i < ids.size(); i += kMaxUnreadRequest) {
+            QList<QPair<Snowflake, Snowflake>> request;
+            for (Snowflake threadId : ids.mid(i, kMaxUnreadRequest))
+                request.append({ threadId, readState->effectiveAckId(threadId, Snowflake()) });
+            client->requestForumUnreads(forumId, request);
+        }
+
+        // Watchdog: drop this batch if no reply ever arrives (see the guard at
+        // the top of this function). One-shot per handed-out batch.
+        QTimer::singleShot(kUnreadReplyTimeoutMs, this, [this]() { onUnreadReplyTimeout(); });
+        return; // exactly one forum in flight; further queued forums await its reply
+    }
+}
+
+void ForumManager::onUnreadReplyTimeout()
+{
+    if (!unreadBatch.hasOutstanding())
+        return; // answered in time — nothing stale
+
+    // Only drop the batch this watchdog belongs to; if a reply already advanced
+    // the queue to a newer generation, that one gets its own, later watchdog.
+    if (QDateTime::currentMSecsSinceEpoch() - unreadBatch.outstandingSinceMs()
+        < kUnreadReplyTimeoutMs)
         return;
 
-    for (int i = 0; i < ids.size(); i += kMaxUnreadRequest) {
-        QList<QPair<Snowflake, Snowflake>> request;
-        for (Snowflake threadId : ids.mid(i, kMaxUnreadRequest))
-            request.append({ threadId, readState->effectiveAckId(threadId, Snowflake()) });
-        client->requestForumUnreads(forumId, request);
-    }
+    qCWarning(LogCore) << "Forum unread request timed out; clearing in-flight markers";
+    unreadBatch.forgetTaken();
+    if (unreadBatch.hasPending())
+        flushUnreadRequests();
 }
 
 void ForumManager::onForumUnreads(const Discord::ForumUnreads &event)
 {
-    // The taken batch is now answered — or failed (permission denied, no
-    // threads payload). Clear its in-flight markers either way so the threads
-    // can be re-requested when needed and `requested` doesn't accumulate.
+    // This reply answers the single outstanding unread batch (see
+    // flushUnreadRequests): clearing the markers of the batch most recently
+    // handed out by take() is exact because no other forum's request can be in
+    // flight. Clear on success and failure (permission denied, no threads
+    // payload) so threads answered with nothing can be re-requested when needed
+    // and `requested` never accumulates across a session.
     unreadBatch.forgetTaken();
 
-    if (event.permissionDenied.hasValue() && event.permissionDenied.get())
-        return;
-    if (!event.threads.hasValue())
-        return;
+    if (!(event.permissionDenied.hasValue() && event.permissionDenied.get())
+        && event.threads.hasValue()) {
+        for (const auto &unread : event.threads.get()) {
+            const Snowflake threadId = unread.threadId.get();
+            unreadBatch.forget(threadId);
+            if (!unread.count.hasValue())
+                continue;
 
-    for (const auto &unread : event.threads.get()) {
-        const Snowflake threadId = unread.threadId.get();
-        unreadBatch.forget(threadId);
-        if (!unread.count.hasValue())
-            continue;
-
-        unreadCounts.insert(threadId, unread.count.get());
-        Snowflake forumId = forumOfPost(threadId);
-        if (forumId.isValid())
-            emit postUpdated(forumId, threadId);
+            unreadCounts.insert(threadId, unread.count.get());
+            Snowflake forumId = forumOfPost(threadId);
+            if (forumId.isValid())
+                emit postUpdated(forumId, threadId);
+        }
     }
+
+    // The outstanding batch is now answered; serve the next parked forum so
+    // every forum queued in one event-loop turn is eventually answered.
+    if (unreadBatch.hasPending())
+        flushUnreadRequests();
 }
 
 QList<Discord::Channel> ForumManager::joinedPosts(Snowflake forumId) const
@@ -707,31 +775,39 @@ void ForumManager::ensureStarter(Snowflake forumId, Snowflake threadId)
 
 void ForumManager::flushStarterRequests()
 {
-    Snowflake forumId;
-    const QList<Snowflake> ids = starterBatch.take(forumId);
-    if (ids.isEmpty() || !forumId.isValid())
-        return;
+    // Drain every pending forum in this pass: unlike unread replies, each post-
+    // data reply is correlated to its request (the callback captures its forum
+    // and chunk), so several forums may be in flight at once. take() re-queues
+    // parked cross-forum requests, so stopping early would lose the later
+    // forum's fetch.
+    while (starterBatch.hasPending()) {
+        Snowflake forumId;
+        const QList<Snowflake> ids = starterBatch.take(forumId);
+        if (ids.isEmpty() || !forumId.isValid())
+            continue;
 
-    for (int i = 0; i < ids.size(); i += kPostDataBatch) {
-        const QList<Snowflake> batch = ids.mid(i, kPostDataBatch);
-        client->fetchForumPostData(
-                forumId, batch,
-                [this, forumId, batch](const Core::Result<QHash<Snowflake, Discord::Message>> &res) {
-                    // Clear the in-flight markers for the whole taken batch on
-                    // success too: threads the API answered with nothing have no
-                    // starter message, and re-requesting them later is harmless
-                    // (starterMessages gates re-fetches for ones we have).
-                    starterBatch.forgetTaken();
-                    if (!res.success()) {
-                        for (Snowflake id : batch)
-                            starterBatch.forget(id);
-                        return;
-                    }
-                    for (auto it = res.value->constBegin(); it != res.value->constEnd(); ++it) {
-                        starterMessages.insert(it.key(), it.value());
-                        emit postUpdated(forumId, it.key());
-                    }
-                });
+        for (int i = 0; i < ids.size(); i += kPostDataBatch) {
+            const QList<Snowflake> batch = ids.mid(i, kPostDataBatch);
+            client->fetchForumPostData(
+                    forumId, batch,
+                    [this, forumId, batch](const Core::Result<QHash<Snowflake, Discord::Message>> &res) {
+                        // Clear the in-flight markers for EXACTLY this chunk on
+                        // success and failure: several forums' (and this forum's
+                        // other chunks') requests can be outstanding from one
+                        // flush turn, and clearing a global "last batch" would
+                        // wipe a still-in-flight forum's markers while this one's
+                        // leaked. Threads the API answered with nothing have no
+                        // starter message; re-requesting them later is harmless
+                        // (starterMessages gates re-fetches for ones we have).
+                        starterBatch.forgetTaken(batch);
+                        if (!res.success())
+                            return;
+                        for (auto it = res.value->constBegin(); it != res.value->constEnd(); ++it) {
+                            starterMessages.insert(it.key(), it.value());
+                            emit postUpdated(forumId, it.key());
+                        }
+                    });
+        }
     }
 }
 

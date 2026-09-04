@@ -34,7 +34,6 @@ private slots:
     void onDeleteWebhook();
     void onEditWebhook();
     void onWebhooksUpdated(const Discord::WebhooksUpdate &event);
-    void onWebhooksFetched(Core::Snowflake guildId, const QList<Discord::WebhookData> &webhooks);
 
 private:
     void setupUi();
@@ -46,6 +45,11 @@ private:
     QPushButton *m_deleteButton = nullptr;
 
     QList<Discord::WebhookData> m_webhooks;
+
+    /// Bumped on every load(); responses whose token is stale are dropped so a
+    /// slow reply can never clobber the result of a newer refresh, and a reply
+    /// that arrives after the widget was destroyed is a safe no-op.
+    quint64 m_fetchGeneration = 0;
 };
 
 } // namespace Widgets

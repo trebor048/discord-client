@@ -30,6 +30,11 @@ UdpTransport::~UdpTransport()
 void UdpTransport::startIpDiscovery(const QString &ip, int port, quint32 ssrc)
 {
     serverAddress = QHostAddress(ip);
+    if (serverAddress.isNull()) {
+        qCWarning(LogVoice) << "Invalid voice server address:" << ip;
+        emit ipDiscoveryFailed("Invalid voice server address: " + ip);
+        return;
+    }
     serverPort = static_cast<quint16>(port);
     discoveryPending = true;
     this->ssrc = ssrc;
@@ -42,7 +47,13 @@ void UdpTransport::startIpDiscovery(const QString &ip, int port, quint32 ssrc)
     socket = new QUdpSocket(this);
     connect(socket, &QUdpSocket::readyRead, this, &UdpTransport::onReadyRead);
 
-    if (!socket->bind(QHostAddress(QHostAddress::Any), 0)) {
+    // Bind to the same address family as the media endpoint. QHostAddress::Any
+    // is IPv4-only, so an IPv6 endpoint would silently fail every writeDatagram
+    // on a socket bound to it.
+    const QHostAddress bindAddress = (serverAddress.protocol() == QAbstractSocket::IPv6Protocol)
+                                             ? QHostAddress(QHostAddress::AnyIPv6)
+                                             : QHostAddress(QHostAddress::Any);
+    if (!socket->bind(bindAddress, 0)) {
         qCWarning(LogVoice) << "Failed to bind UDP socket:" << socket->errorString();
         emit ipDiscoveryFailed("Failed to bind UDP socket: " + socket->errorString());
         return;

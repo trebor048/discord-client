@@ -44,14 +44,15 @@ void JitterBuffer::push(uint16_t sequence, const QByteArray &data)
     // the old approach of static_cast<uint16_t>(it.key() + capacity) would
     // wrap the sum and cause false-positive evictions when it.key() is
     // near 65535 and the sum wraps to a small value.
-    QList<uint16_t> stale;
-    for (auto it = frames.begin(); it != frames.end(); ++it) {
+    // Erase inline (Qt 6 QHash::erase returns the next iterator) so push()
+    // does not allocate a QList per packet on the 50-100 pps receive path.
+    for (auto it = frames.begin(); it != frames.end();) {
         int16_t delta = static_cast<int16_t>(nextSequence - it.key());
         if (delta > capacity)
-            stale.append(it.key());
+            it = frames.erase(it);
+        else
+            ++it;
     }
-    for (uint16_t seq : stale)
-        frames.remove(seq);
 
     if (prebuffering && frames.size() >= targetDelay)
         prebuffering = false;

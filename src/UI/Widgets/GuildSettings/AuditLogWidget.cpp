@@ -12,6 +12,8 @@
 #include "Core/Logging.hpp"
 #include "Discord/Client.hpp"
 
+#include <QPointer>
+
 namespace Acheron {
 namespace UI {
 namespace Widgets {
@@ -23,9 +25,6 @@ AuditLogWidget::AuditLogWidget(Core::ClientInstance *instance, Core::Snowflake g
     : GuildSettingsPage(instance, guildId, parent)
 {
     setupUi();
-
-    connect(m_instance->discord(), &Discord::Client::auditLogFetched, this,
-            &AuditLogWidget::onLogFetched);
 }
 
 void AuditLogWidget::setupUi()
@@ -109,6 +108,11 @@ void AuditLogWidget::load()
     m_loading = true;
     m_loadMoreButton->setEnabled(false);
 
+    fetchPage(Snowflake::Invalid);
+}
+
+void AuditLogWidget::fetchPage(Core::Snowflake beforeId)
+{
     Snowflake userId(m_userFilterCombo->currentData().toULongLong());
     if (!userId.isValid())
         userId = Snowflake::Invalid;
@@ -117,36 +121,59 @@ void AuditLogWidget::load()
     if (!actionType.isValid())
         actionType = Snowflake::Invalid;
 
-    m_instance->discord()->fetchGuildAuditLog(m_guildId, userId, actionType,
-                                                Snowflake::Invalid, 50, [this](const auto &result) {
-        if (!result.success()) {
-            m_loading = false;
-            m_loadMoreButton->setEnabled(false);
-            m_logList->clear();
-            auto *item = new QListWidgetItem(m_logList);
-            item->setText(QStringLiteral("Failed to load audit log: %1").arg(result.error));
-            item->setFlags(item->flags() & ~Qt::ItemIsEnabled & ~Qt::ItemIsSelectable);
-        }
-    });
-}
+    // The per-request callback carries the payload, so drive both the success
+    // and the failure path from it (generation- and lifetime-guarded) instead
+    // of the broadcast auditLogFetched signal, which cannot be matched to the
+    // request that produced it.
+    const quint64 token = ++m_fetchToken;
+    QPointer<AuditLogWidget> guard(this);
+    m_instance->discord()->fetchGuildAuditLog(
+            m_guildId, userId, actionType, beforeId, 50,
+            [this, guard, token, beforeId](const auto &result) {
+                if (!guard || token != m_fetchToken)
+                    return; // destroyed, or superseded by a newer request
 
-void AuditLogWidget::onLogFetched(Core::Snowflake guildId, const Discord::AuditLogData &log)
-{
-    if (guildId != m_guildId)
-        return;
+                m_loading = false;
 
-    m_loading = false;
+                if (!result.success()) {
+                    if (beforeId.isValid()) {
+                        // Load-more failure keeps the current entries so the
+                        // user can retry.
+                        m_loadMoreButton->setEnabled(true);
+                        qCWarning(LogDiscord) << "Failed to load more audit log entries:"
+                                              << result.error;
+                        return;
+                    }
+                    m_loadMoreButton->setEnabled(false);
+                    m_logList->clear();
+                    auto *item = new QListWidgetItem(m_logList);
+                    item->setText(QStringLiteral("Failed to load audit log: %1")
+                                          .arg(result.error));
+                    item->setFlags(item->flags() & ~Qt::ItemIsEnabled
+                                   & ~Qt::ItemIsSelectable);
+                    return;
+                }
 
-    // Build user map
-    if (log.users.hasValue()) {
-        for (const auto &user : log.users.get())
-            m_userMap[user.id.get()] = user;
-    }
+                const Discord::AuditLogData log = result.value.value();
 
-    const auto &entries = log.auditLogEntries.getOr(QList<Discord::AuditLogEntry>{});
-    appendEntries(entries, m_userMap);
+                // Build / extend the user map for this page.
+                if (log.users.hasValue()) {
+                    for (const auto &user : log.users.get())
+                        m_userMap[user.id.get()] = user;
+                }
 
-    m_loadMoreButton->setEnabled(!entries.isEmpty());
+                const QList<Discord::AuditLogEntry> entries =
+                        log.auditLogEntries.getOr(QList<Discord::AuditLogEntry>{});
+                // A fresh load() already cleared the list; only a load-more page
+                // appends. If the list is unexpectedly non-empty for a fresh
+                // fetch (a stale page landed before this one started), don't
+                // blend the two pages together.
+                if (!beforeId.isValid() && m_logList->count() > 0)
+                    m_logList->clear();
+                appendEntries(entries, m_userMap);
+
+                m_loadMoreButton->setEnabled(!entries.isEmpty());
+            });
 }
 
 void AuditLogWidget::appendEntries(const QList<Discord::AuditLogEntry> &entries,
@@ -181,22 +208,7 @@ void AuditLogWidget::onLoadMore()
     m_loading = true;
     m_loadMoreButton->setEnabled(false);
 
-    Snowflake userId(m_userFilterCombo->currentData().toULongLong());
-    if (!userId.isValid())
-        userId = Snowflake::Invalid;
-
-    Snowflake actionType(m_actionFilterCombo->currentData().toULongLong());
-    if (!actionType.isValid())
-        actionType = Snowflake::Invalid;
-
-    m_instance->discord()->fetchGuildAuditLog(m_guildId, userId, actionType,
-                                                m_lastEntryId, 50, [this](const auto &result) {
-        m_loading = false;
-        if (!result.success()) {
-            m_loadMoreButton->setEnabled(true);
-            qCWarning(LogDiscord) << "Failed to load more audit log entries:" << result.error;
-        }
-    });
+    fetchPage(m_lastEntryId);
 }
 
 void AuditLogWidget::onFilterChanged()

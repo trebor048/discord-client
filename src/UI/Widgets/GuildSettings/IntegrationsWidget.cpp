@@ -10,6 +10,8 @@
 #include "Core/ClientInstance.hpp"
 #include "Discord/Client.hpp"
 
+#include <QPointer>
+
 namespace Acheron {
 namespace UI {
 namespace Widgets {
@@ -29,8 +31,6 @@ IntegrationsWidget::IntegrationsWidget(Core::ClientInstance *instance, Core::Sno
             &IntegrationsWidget::onIntegrationDeleted);
     connect(client, &Discord::Client::integrationUpdated, this,
             &IntegrationsWidget::onIntegrationUpdated);
-    connect(client, &Discord::Client::guildIntegrationsFetched, this,
-            &IntegrationsWidget::onIntegrationsFetched);
 }
 
 void IntegrationsWidget::setupUi()
@@ -72,23 +72,22 @@ void IntegrationsWidget::load()
     item->setText(QStringLiteral("Loading integrations..."));
     item->setFlags(item->flags() & ~Qt::ItemIsEnabled & ~Qt::ItemIsSelectable);
 
-    m_instance->discord()->fetchGuildIntegrations(m_guildId, [this](const auto &result) {
-        if (!result.success()) {
-            m_integrationList->clear();
-            auto *item = new QListWidgetItem(m_integrationList);
-            item->setText(QStringLiteral("Failed to load integrations: %1").arg(result.error));
-            item->setFlags(item->flags() & ~Qt::ItemIsEnabled & ~Qt::ItemIsSelectable);
-        }
-    });
-}
-
-void IntegrationsWidget::onIntegrationsFetched(Core::Snowflake guildId,
-                                               const QList<Discord::IntegrationData> &integrations)
-{
-    if (guildId != m_guildId)
-        return;
-    m_integrations = integrations;
-    populateList(integrations);
+    const quint64 gen = ++m_fetchGeneration;
+    QPointer<IntegrationsWidget> guard(this);
+    m_instance->discord()->fetchGuildIntegrations(m_guildId,
+        [this, guard, gen](const auto &result) {
+            if (!guard || gen != m_fetchGeneration)
+                return;
+            if (!result.success()) {
+                m_integrationList->clear();
+                auto *item = new QListWidgetItem(m_integrationList);
+                item->setText(QStringLiteral("Failed to load integrations: %1").arg(result.error));
+                item->setFlags(item->flags() & ~Qt::ItemIsEnabled & ~Qt::ItemIsSelectable);
+                return;
+            }
+            m_integrations = result.value.value();
+            populateList(m_integrations);
+        });
 }
 
 void IntegrationsWidget::populateList(const QList<Discord::IntegrationData> &integrations)

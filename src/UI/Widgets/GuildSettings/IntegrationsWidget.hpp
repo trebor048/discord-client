@@ -33,8 +33,6 @@ private slots:
     void onIntegrationCreated(const Discord::IntegrationCreate &event);
     void onIntegrationDeleted(const Discord::IntegrationDelete &event);
     void onIntegrationUpdated(const Discord::IntegrationUpdate &event);
-    void onIntegrationsFetched(Core::Snowflake guildId,
-                               const QList<Discord::IntegrationData> &integrations);
 
 private:
     void setupUi();
@@ -44,6 +42,11 @@ private:
     QPushButton *m_deleteButton = nullptr;
     QPushButton *m_refreshButton = nullptr;
     QList<Discord::IntegrationData> m_integrations;
+
+    /// Bumped on every load(); responses whose token is stale are dropped so a
+    /// slow reply can never clobber the result of a newer refresh, and a reply
+    /// that arrives after the widget was destroyed is a safe no-op.
+    quint64 m_fetchGeneration = 0;
 };
 
 } // namespace Widgets

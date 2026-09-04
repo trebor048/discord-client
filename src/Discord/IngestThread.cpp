@@ -41,6 +41,10 @@ void IngestThread::stop()
 
     cv.notify_one();
 
+    // Two callers can reach here concurrently (Gateway::stop on the UI thread
+    // and the network loop's tail on the network thread); std::thread::join
+    // must not run twice on the same thread object.
+    std::lock_guard<std::mutex> joinLock(joinMutex);
     if (thread.joinable())
         thread.join();
 }

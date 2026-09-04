@@ -42,6 +42,7 @@ signals:
 private slots:
     void onTabChanged(int index);
     void onRelationshipChanged(Core::Snowflake userId);
+    void onPresenceChanged(Core::Snowflake userId);
     void onAddFriendClicked();
     void onItemClicked(QListWidgetItem *item);
 

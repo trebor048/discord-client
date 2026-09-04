@@ -308,6 +308,13 @@ void VoiceGateway::handleResumed()
 {
     qCInfo(LogVoice) << "Voice session resumed";
     canResume = true;
+    // A RESUMED frame means the session was genuinely re-established, so the
+    // reconnect budget must start over. handleReady() already does this for a
+    // fresh Identify; without it here, a flaky network that blips ~5 times over
+    // a long call (each blip recovering via a successful RESUME) would exhaust
+    // the budget and terminally kill the voice session even though every
+    // reconnect succeeded.
+    reconnectAttempts = 0;
     emit resumed();
 }
 

@@ -509,7 +509,23 @@ struct GatewayGuild : Core::JsonUtils::JsonObject
         // READY.guilds — id, name, icon, owner_id, ... sit at the top level
         // next to channels/roles/members. There is no "properties" wrapper key;
         // parse the same object into the guild fields AND the child collections.
-        guild.properties = Guild::fromJson(obj);
+        //
+        // Newer READY/GUILD_CREATE payloads nest the guild settings entity
+        // (id, name, icon, owner_id, premium_tier, ...) under a "properties"
+        // object, keeping channels/roles/members/threads at the top level. A
+        // flat parse alone then leaves name/icon/etc. empty, which cascades
+        // into blank guild names and missing icons (plus null-name cache rows).
+        // Merge the nested "properties" keys into the flat object, preferring
+        // the top-level value when a key appears in both places.
+        QJsonObject flat = obj;
+        const QJsonObject nested = obj.value(QLatin1String("properties")).toObject();
+        if (!nested.isEmpty()) {
+            for (auto it = nested.constBegin(); it != nested.constEnd(); ++it)
+                if (!flat.contains(it.key()))
+                    flat.insert(it.key(), it.value());
+        }
+        guild.properties = Guild::fromJson(flat);
+
         get(obj, "channels", guild.channels);
         get(obj, "threads", guild.threads);
         get(obj, "roles", guild.roles);

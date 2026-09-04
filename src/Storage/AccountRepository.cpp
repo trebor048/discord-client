@@ -11,12 +11,12 @@ AccountRepository::AccountRepository()
 {
 }
 
-void AccountRepository::saveAccount(const Core::AccountInfo &acc)
+bool AccountRepository::saveAccount(const Core::AccountInfo &acc)
 {
     auto db = getDb();
     if (!db.isOpen()) {
         qCWarning(LogDB) << "AccountRepository: Persistent DB not open!";
-        return;
+        return false;
     }
 
     QSqlQuery query(db);
@@ -36,8 +36,11 @@ void AccountRepository::saveAccount(const Core::AccountInfo &acc)
     query.bindValue(":display_order", acc.displayOrder);
     query.bindValue(":auto_connect", acc.autoConnect ? 1 : 0);
 
-    if (!query.exec())
+    if (!query.exec()) {
         qCWarning(LogDB) << "AccountRepository: Save failed:" << query.lastError().text();
+        return false;
+    }
+    return true;
 }
 
 Core::AccountInfo AccountRepository::getAccount(quint64 id)
@@ -138,7 +141,13 @@ void AccountRepository::removeAccount(quint64 id)
         return;
     }
 
-    Core::TokenStore::deleteToken(Core::Snowflake(id));
+    // Delete the DB row first on purpose: if the keychain delete below fails we
+    // may orphan a credential, but the reverse order risks a worse state (a row
+    // that still exists with its token already gone) whenever the token delete
+    // fails while the row delete would have succeeded.
+    if (!Core::TokenStore::deleteToken(Core::Snowflake(id)))
+        qCWarning(LogDB) << "AccountRepository: Failed to delete token for removed account"
+                         << id << "; credential may be orphaned in the keychain";
 }
 
 void AccountRepository::updateDisplayOrder(quint64 id, int order)

@@ -403,6 +403,20 @@ void ChatView::setModel(QAbstractItemModel *model)
         appearRows.clear();
         if (appearAnimation)
             appearAnimation->stop();
+        // The inline editor, the drag text selection and the search-match row
+        // numbers all index into the *old* channel's row space. A channel
+        // switch (model reset) must drop them: a still-visible editor would
+        // float over the new channel, a stale selection would copy text from
+        // the wrong messages, and stale search-match rows would highlight
+        // random rows of the new history.
+        if (inlineEditWidget && (currentEditingIndex.isValid() || inlineEditWidget->isVisible()))
+            cancelInlineEdit();
+        if (selectionAnchor.isValid()) {
+            selectionAnchor = { -1, -1 };
+            selectionHead = { -1, -1 };
+        }
+        if (searchPanel && searchPanel->isVisible())
+            searchDebounceTimer->start();
         // A channel switch resets the model; start from a clean not-at-bottom
         // state so history top-insertion never re-glides, then settle to the
         // bottom smoothly.
@@ -417,7 +431,17 @@ void ChatView::setModel(QAbstractItemModel *model)
     }));
 
     modelConnections.append(connect(model, &QAbstractItemModel::rowsAboutToBeRemoved, this,
-                                    [this]() { hoverLayoutRow = -1; }));
+                                    [this](const QModelIndex &parent, int first, int last) {
+                                        hoverLayoutRow = -1;
+                                        // If the message being edited is removed
+                                        // (deleted here or in another session),
+                                        // abandon the inline editor instead of
+                                        // letting it keep editing a vanished row.
+                                        if (!parent.isValid() && currentEditingIndex.isValid() &&
+                                            currentEditingIndex.row() >= first &&
+                                            currentEditingIndex.row() <= last)
+                                            cancelInlineEdit();
+                                    }));
     modelConnections.append(connect(model, &QAbstractItemModel::rowsAboutToBeInserted, this,
                                     &ChatView::onRowsAboutToBeInserted));
     modelConnections.append(connect(model, &QAbstractItemModel::rowsInserted, this,

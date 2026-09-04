@@ -14,6 +14,7 @@
 
 #include <QJsonDocument>
 #include <QJsonParseError>
+#include <QMetaType>
 #include <QUrl>
 
 #include <algorithm>
@@ -33,6 +34,13 @@ Gateway::Gateway(const QString &token, const QString &gatewayUrl, ClientIdentity
                  QObject *parent)
     : QObject(parent), token(token), gatewayUrl(gatewayUrl), identity(identity), running(false)
 {
+    // disconnected(CloseCode, ...) is emitted from the network thread, so it
+    // reaches Client::onDisconnected (UI thread) through a queued connection.
+    // Without this registration Qt drops queued arguments of unknown type, and
+    // every disconnect — including fatal close codes like AUTHENTICATION_FAILED —
+    // would be silently swallowed. Register once per gateway instance; the
+    // constructor runs before Client wires the signal, so delivery is armed.
+    qRegisterMetaType<Acheron::Discord::CloseCode>("Acheron::Discord::CloseCode");
 }
 
 Gateway::~Gateway()
@@ -176,6 +184,16 @@ void Gateway::sendPayload(const QByteArray &data)
 
 void Gateway::onPayloadReceived(const QJsonObject &root)
 {
+    // Payloads already queued on the UI thread when stop()/hardStop() ran belong
+    // to a session being torn down (or already gone). Dispatching them would let
+    // a dying session mutate live state — e.g. a queued READY landing after
+    // logout, or a queued HELLO re-arming heartbeats while the socket is closed.
+    // Drop them: the network thread never emits for a stopped gateway.
+    if (!running || wantToClose) {
+        qCDebug(LogDiscord) << "Dropping gateway payload received after stop";
+        return;
+    }
+
     Inbound msg = Inbound::fromJson(root);
 
     qCDebug(LogDiscord) << "Received payload"
@@ -999,8 +1017,21 @@ void Gateway::networkLoop()
             // reconnect rather than busy-looping forever in a silently-dead
             // "connected" state.
             if (res == CURLE_GOT_NOTHING) {
-                qCWarning(LogDiscord) << "Gateway connection returned no data; reconnecting";
-                shouldReconnect = true;
+                qCWarning(LogDiscord) << "Gateway connection returned no data"
+                                      << (wantToClose ? "during close handshake" : "— reconnecting");
+                if (!wantToClose) {
+                    shouldReconnect = true;
+                } else {
+                    // A stop() requested a graceful close, but the peer never
+                    // got (or answered) our close frame — the socket just died.
+                    // Report the disconnect so Client can leave the
+                    // Disconnecting state; otherwise it would sit there until
+                    // the next start(). Do not set shouldReconnect: the user
+                    // asked to stop, so a reconnect (and its Connecting-state
+                    // flash) must not follow.
+                    emit disconnected(CloseCode::INTERNAL,
+                                      QStringLiteral("Gateway connection closed before close handshake"));
+                }
                 break;
             }
 
@@ -1010,8 +1041,16 @@ void Gateway::networkLoop()
                 // break out and reconnect instead of busy-looping at 100% CPU.
                 qCWarning(LogDiscord) << "Gateway recv error" << res
                                       << "- treating as connection failure";
-                if (!wantToClose)
+                if (!wantToClose) {
                     shouldReconnect = true;
+                } else {
+                    // Same close-state hole as CURLE_GOT_NOTHING above: the
+                    // stop() close handshake can never complete on a dead
+                    // socket, so surface the disconnect instead of leaving the
+                    // caller stuck in Disconnecting.
+                    emit disconnected(CloseCode::INTERNAL,
+                                      QStringLiteral("Gateway connection error during close handshake"));
+                }
                 break;
             }
 

@@ -529,6 +529,53 @@ if(BUILD_TESTS)
     endif()
     add_test(NAME ReadStateTests COMMAND TestReadState)
 
+    qt_add_executable(TestCoreManagers
+        tests/tst_CoreManagers.cpp
+        src/Core/ReadStateManager.cpp
+        src/Core/PermissionManager.cpp
+        src/Core/PermissionComputer.cpp
+        src/Core/Snowflake.cpp
+        src/Core/Logging.cpp
+        src/Storage/BaseRepository.cpp
+        src/Storage/ChannelRepository.cpp
+        src/Storage/RoleRepository.cpp
+        src/Storage/MemberRepository.cpp
+        src/Storage/GuildRepository.cpp
+        src/Storage/UserRepository.cpp
+        src/Storage/DatabaseManager.cpp
+        src/Storage/Transaction.cpp
+    )
+    target_link_libraries(TestCoreManagers PRIVATE Qt::Core Qt::Gui Qt::Sql Qt::Test)
+    target_include_directories(TestCoreManagers PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    if(USE_PCH)
+        target_include_directories(TestCoreManagers PRIVATE
+            ${Qt6Widgets_INCLUDE_DIRS}
+            ${Qt6Network_INCLUDE_DIRS}
+            ${Qt6Concurrent_INCLUDE_DIRS}
+            ${Qt6Multimedia_INCLUDE_DIRS}
+            ${Qt6MultimediaWidgets_INCLUDE_DIRS}
+            ${Qt6Svg_INCLUDE_DIRS}
+            ${CURL_INCLUDE_DIRS}
+        )
+        target_precompile_headers(TestCoreManagers PRIVATE src/pch.h)
+    endif()
+    add_test(NAME CoreManagersTests COMMAND TestCoreManagers)
+
+    qt_add_executable(TestTokenSecurity
+        tests/tst_TokenSecurity.cpp
+        src/Core/Snowflake.cpp
+    )
+    target_link_libraries(TestTokenSecurity PRIVATE Qt::Core Qt::Gui Qt::Test)
+    target_include_directories(TestTokenSecurity PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CURL_INCLUDE_DIRS}
+    )
+    add_test(NAME TokenSecurityTests COMMAND TestTokenSecurity)
+
+    qt_add_executable(TestStorageSql tests/tst_StorageSql.cpp)
+    target_link_libraries(TestStorageSql PRIVATE Qt::Core Qt::Sql Qt::Test)
+    add_test(NAME StorageSqlTests COMMAND TestStorageSql)
+
     # The CTest smoke test runs the build-tree executable, which on Windows
     # depends on runtime DLLs (Qt, opus, curl-impersonate) that are only
     # assembled beside it by the deploy step; running it here would hang on a
@@ -559,6 +606,9 @@ if(BUILD_TESTS)
             AppearanceConfigTests
             ScaleStepperTests
             ReadStateTests
+            CoreManagersTests
+            TokenSecurityTests
+            StorageSqlTests
             PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORM_PLUGIN_PATH=${QT_INSTALL_PREFIX}/plugins/platforms"
         )
         if(NOT WIN32)

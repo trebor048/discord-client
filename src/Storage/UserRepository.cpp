@@ -7,6 +7,19 @@
 namespace Acheron {
 namespace Storage {
 
+namespace {
+const char *const USER_UPSERT_SQL = R"(
+    INSERT INTO users
+    (id, username, global_name, avatar, bot)
+    VALUES (:id, :username, :global_name, :avatar, :bot)
+    ON CONFLICT(id) DO UPDATE SET
+        username = excluded.username,
+        global_name = excluded.global_name,
+        avatar = excluded.avatar,
+        bot = excluded.bot
+)";
+} // namespace
+
 UserRepository::UserRepository(Core::Snowflake accountId)
     : BaseRepository(DatabaseManager::getCacheConnectionName(accountId))
 {
@@ -21,22 +34,8 @@ bool UserRepository::saveUser(const Discord::User &user)
 bool UserRepository::saveUser(const Discord::User &user, QSqlDatabase &db)
 {
     QSqlQuery q(db);
-    q.prepare(R"(
-        INSERT INTO users
-        (id, username, global_name, avatar, bot)
-        VALUES (:id, :username, :global_name, :avatar, :bot)
-        ON CONFLICT(id) DO UPDATE SET
-            username = excluded.username,
-            global_name = excluded.global_name,
-            avatar = excluded.avatar,
-            bot = excluded.bot
-    )");
-
-    q.bindValue(":id", static_cast<qint64>(user.id.get()));
-    q.bindValue(":username", user.username);
-    bindOptional(q, ":global_name", user.globalName);
-    bindOptional(q, ":avatar", user.avatar);
-    bindOptional(q, ":bot", user.bot);
+    q.prepare(QLatin1String(USER_UPSERT_SQL));
+    bindUser(q, user);
 
     return execLogged(q, "UserRepository: Save user");
 }
@@ -62,9 +61,17 @@ bool UserRepository::saveUsers(const QList<Discord::User> &users, QSqlDatabase &
         ownsTransaction = true;
     }
 
-    for (const auto &user : users)
-        if (!saveUser(user, db))
+    // Prepare the user upsert once and rebind per row instead of re-preparing
+    // an INSERT per user (see MessageRepository::saveMessages for the same
+    // pattern applied to embedded authors).
+    QSqlQuery q(db);
+    q.prepare(QLatin1String(USER_UPSERT_SQL));
+
+    for (const auto &user : users) {
+        bindUser(q, user);
+        if (!execLogged(q, "UserRepository: Save user"))
             goto rollback;
+    }
 
     if (ownsTransaction && !db.commit()) {
         qCWarning(LogDB) << "UserRepository: failed to commit transaction";
@@ -77,6 +84,15 @@ rollback:
     if (ownsTransaction)
         db.rollback();
     return false;
+}
+
+void UserRepository::bindUser(QSqlQuery &q, const Discord::User &user)
+{
+    q.bindValue(":id", static_cast<qint64>(user.id.get()));
+    q.bindValue(":username", user.username);
+    bindOptional(q, ":global_name", user.globalName);
+    bindOptional(q, ":avatar", user.avatar);
+    bindOptional(q, ":bot", user.bot);
 }
 
 std::optional<Discord::User> UserRepository::getUser(Core::Snowflake userId)

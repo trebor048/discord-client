@@ -62,7 +62,12 @@ void Session::connectAccount(Snowflake accountId)
     }
 
     AccountInfo acc = repo.getAccount(accountId);
-    if (static_cast<quint64>(acc.id) == 0) {
+    // AccountRepository::getAccount returns a default-constructed AccountInfo
+    // when no row exists, whose id is Snowflake::Invalid (-1ULL) — never 0.
+    // The previous `== 0` test could not fire, so a DB row missing while a
+    // keychain token survived would have built a ClientInstance with an
+    // invalid account id.
+    if (!acc.id.isValid()) {
         qCWarning(LogCore) << "Account not found:" << accountId;
         return;
     }
@@ -118,11 +123,21 @@ void Session::disconnectAccount(Snowflake accountId)
 
     instance->stop();
 
-    // Free the cache DB connection synchronously so a rapid reconnect for the
-    // same account doesn't reuse a connection that the pending deleteLater
-    // destructor will shortly removeDatabase() out from under the new instance.
-    Storage::DatabaseManager::instance().closeCacheDatabase(accountId);
+    // Invariant: no live ClientInstance may hold repository QSqlDatabase handles
+    // when the cache connection is removed. closeCacheDatabase() closes and
+    // removeDatabase()s the per-account connection (and its per-thread clones);
+    // running it while this instance is still alive would leave a queued event
+    // able to touch a deregistered connection and trip Qt's "connection still in
+    // use" warning. Defer the close until the deferred delete below has actually
+    // destroyed the instance (which also destroys its managers/repos and cancels
+    // any queued deliveries).
+    connect(instance, &QObject::destroyed, this, [this, accountId]() {
+        Storage::DatabaseManager::instance().closeCacheDatabase(accountId);
+    });
 
+    // Keep deleteLater rather than deleting synchronously: stop() lets the
+    // client finish its close handshake and report Disconnected to the UI, and
+    // the destroyed() handler above runs only once the instance is really gone.
     instance->deleteLater();
 }
 

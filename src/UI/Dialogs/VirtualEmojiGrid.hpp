@@ -23,10 +23,15 @@ namespace UI {
 
 // Shared grid metrics so the picker dialog and the virtualized grid agree on
 // geometry without duplicating magic numbers.
+//
+// Cells are sized to stay large enough to be read at a glance (kCellSize is
+// the padded button, kIconSize the glyph). kColumns is only the fallback count
+// used until the first relayout: the live column count is derived from the
+// viewport width so the grid always fills the width of the picker window.
 namespace EmojiGridMetrics {
-    inline constexpr int kColumns = 12;
-    inline constexpr int kCellSize = 44;
-    inline constexpr int kIconSize = 36;
+    inline constexpr int kColumns = 7;
+    inline constexpr int kCellSize = 60;
+    inline constexpr int kIconSize = 48;
 } // namespace EmojiGridMetrics
 
 struct EmojiGridSection
@@ -83,9 +88,9 @@ private:
     QString m_selectedValue;
     QSize m_defaultIconSize;
 
-    // Number of grid columns, derived from the viewport width so the grid
-    // fills the window horizontally instead of leaving a dead strip at the
-    // right edge when the dialog is resized wider.
+    // Number of grid columns per row, derived from the viewport width on every
+    // relayout so the grid fills the window horizontally (EmojiGridMetrics::
+    // kColumns is only the initial value used before the first relayout).
     int m_columns = EmojiGridMetrics::kColumns;
 
     // Layout model (content-space offsets).

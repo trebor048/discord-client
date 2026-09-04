@@ -10,6 +10,21 @@
 namespace Acheron {
 namespace Storage {
 
+namespace {
+const char *const MEMBER_UPSERT_SQL = R"(
+    INSERT INTO members
+    (user_id, guild_id, nick, avatar, roles, joined_at, premium_since,
+     deaf, mute, flags, pending, communication_disabled_until)
+    VALUES (:user_id, :guild_id, :nick, :avatar, :roles, :joined_at, :premium_since,
+            :deaf, :mute, :flags, :pending, :communication_disabled_until)
+    ON CONFLICT(user_id, guild_id) DO UPDATE SET
+        nick=excluded.nick, avatar=excluded.avatar, roles=excluded.roles,
+        joined_at=excluded.joined_at, premium_since=excluded.premium_since,
+        deaf=excluded.deaf, mute=excluded.mute, flags=excluded.flags,
+        pending=excluded.pending, communication_disabled_until=excluded.communication_disabled_until
+)";
+} // namespace
+
 MemberRepository::MemberRepository(Core::Snowflake accountId)
     : BaseRepository(DatabaseManager::getCacheConnectionName(accountId))
 {
@@ -68,19 +83,15 @@ bool MemberRepository::saveMember(Core::Snowflake guildId, Core::Snowflake userI
                                   const Discord::Member &member, QSqlDatabase &db)
 {
     QSqlQuery q(db);
-    q.prepare(R"(
-        INSERT INTO members
-        (user_id, guild_id, nick, avatar, roles, joined_at, premium_since,
-         deaf, mute, flags, pending, communication_disabled_until)
-        VALUES (:user_id, :guild_id, :nick, :avatar, :roles, :joined_at, :premium_since,
-                :deaf, :mute, :flags, :pending, :communication_disabled_until)
-        ON CONFLICT(user_id, guild_id) DO UPDATE SET
-            nick=excluded.nick, avatar=excluded.avatar, roles=excluded.roles,
-            joined_at=excluded.joined_at, premium_since=excluded.premium_since,
-            deaf=excluded.deaf, mute=excluded.mute, flags=excluded.flags,
-            pending=excluded.pending, communication_disabled_until=excluded.communication_disabled_until
-    )");
+    q.prepare(QLatin1String(MEMBER_UPSERT_SQL));
+    bindMember(q, guildId, userId, member);
 
+    return execLogged(q, "MemberRepository: Save member");
+}
+
+void MemberRepository::bindMember(QSqlQuery &q, Core::Snowflake guildId, Core::Snowflake userId,
+                                  const Discord::Member &member)
+{
     q.bindValue(":user_id", static_cast<qint64>(userId));
     q.bindValue(":guild_id", static_cast<qint64>(guildId));
     bindOptional(q, ":nick", member.nick);
@@ -93,8 +104,6 @@ bool MemberRepository::saveMember(Core::Snowflake guildId, Core::Snowflake userI
     bindOptional(q, ":flags", member.flags);
     bindOptional(q, ":pending", member.pending);
     bindOptional(q, ":communication_disabled_until", member.communicationDisabledUntil);
-
-    return execLogged(q, "MemberRepository: Save member");
 }
 
 bool MemberRepository::saveMembers(Core::Snowflake guildId, const QList<Discord::Member> &members)
@@ -112,10 +121,16 @@ bool MemberRepository::saveMembers(Core::Snowflake guildId, const QList<Discord:
         }
         ownsTransaction = true;
     }
+    // Prepare the member upsert once and rebind per row instead of re-preparing
+    // an INSERT per member (see RoleRepository::saveRoles for the same pattern).
+    QSqlQuery q(db);
+    q.prepare(QLatin1String(MEMBER_UPSERT_SQL));
+
     for (const auto &member : members) {
         if (!member.user.hasValue() || !member.user->id.hasValue())
             continue;
-        if (!saveMember(guildId, member.user->id.get(), member, db))
+        bindMember(q, guildId, member.user->id.get(), member);
+        if (!execLogged(q, "MemberRepository: Save member"))
             goto rollback;
     }
     if (ownsTransaction && !db.commit()) {

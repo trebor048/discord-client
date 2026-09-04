@@ -3,6 +3,7 @@
 #include <QHash>
 #include <QList>
 #include <QObject>
+#include <QPair>
 #include <QSet>
 
 #include "Core/Snowflake.hpp"
@@ -122,29 +123,67 @@ private:
     public:
         bool add(Snowflake forumId, Snowflake threadId);
         QList<Snowflake> take(Snowflake &forumId);
+        // Anything left to hand out — the pending batch plus any cross-forum
+        // requests parked in `overflow` (see add()/take()).
+        [[nodiscard]] bool hasPending() const { return !pending.isEmpty() || !overflow.isEmpty(); }
         [[nodiscard]] bool contains(Snowflake threadId) const { return requested.contains(threadId); }
         void forget(Snowflake threadId)
         {
             requested.remove(threadId);
             pending.removeOne(threadId);
+            // Purge any still-parked copy so a thread removed while queued for a
+            // different forum is not re-queued by the next take().
+            for (int i = overflow.size() - 1; i >= 0; --i) {
+                if (overflow[i].second == threadId)
+                    overflow.removeAt(i);
+            }
         }
-        // Clears the in-flight markers for the batch most recently handed out
-        // by take(). Called when the request completes (success or failure) so
-        // threads answered with nothing — or never answered at all (permission
-        // denied, empty payload) — can be re-requested later instead of being
-        // stuck in `requested` forever, and so `requested` never grows
-        // unboundedly across a session.
+        // True while the batch most recently handed out by take() is still
+        // awaiting its reply. Only meaningful for the single-flight unread
+        // flush (see flushUnreadRequests): the gateway FORUM_UNREADS reply
+        // carries no request/forum id, so at most one forum's unread request
+        // may be outstanding at a time.
+        [[nodiscard]] bool hasOutstanding() const { return !lastTaken.isEmpty(); }
+        // Wall-clock ms when the outstanding batch was handed out (0 when none
+        // is outstanding); lets the reply watchdog drop a batch whose reply
+        // never arrived instead of stalling every later unread request.
+        [[nodiscard]] qint64 outstandingSinceMs() const { return outstandingSince; }
+        // Clears the in-flight markers for EXACTLY \a ids. Each completion
+        // handler captures the ids it asked for and clears only those — never a
+        // different forum's still-outstanding batch when several forums'
+        // requests are in flight from one flush turn.
+        void forgetTaken(const QList<Snowflake> &ids)
+        {
+            for (Snowflake id : ids)
+                requested.remove(id);
+        }
+        // Clears the in-flight markers for the batch most recently handed out by
+        // take(). Call ONLY when that batch is the one being answered: the unread
+        // reply handler relies on flushUnreadRequests keeping at most one forum's
+        // batch in flight. Runs on success and failure (permission denied, empty
+        // payload) so threads answered with nothing — or never answered at all —
+        // can be re-requested later instead of being stuck in `requested`
+        // forever, and so `requested` never grows unboundedly across a session.
         void forgetTaken()
         {
             for (Snowflake id : lastTaken)
                 requested.remove(id);
             lastTaken.clear();
+            outstandingSince = 0;
         }
 
     private:
         QSet<Snowflake> requested; // asked but not yet answered
         QList<Snowflake> pending;
-        QList<Snowflake> lastTaken; // handed out by the last take()
+        // Ids handed out by the latest take() and not yet answered (see
+        // forgetTaken()/hasOutstanding()).
+        QList<Snowflake> lastTaken;
+        qint64 outstandingSince = 0;
+        // (forumId, threadId) pairs queued by add() while `pending` was holding
+        // a batch for a different forum; take() re-queues them into `pending`
+        // once the current batch drains, so cross-forum requests are never
+        // dropped.
+        QList<QPair<Snowflake, Snowflake>> overflow;
         Snowflake forumId;
         bool flushScheduled = false;
     };
@@ -155,6 +194,10 @@ private:
     void applySearchAppend(Snowflake forumId, ForumState &st, const QList<Discord::Channel> &threads);
     void flushStarterRequests();
     void flushUnreadRequests();
+    // Fires kUnreadReplyTimeoutMs after an unread request is sent when no reply
+    // has arrived; drops the stale in-flight markers and serves the next queued
+    // forum (see flushUnreadRequests).
+    void onUnreadReplyTimeout();
     Discord::Channel *mutablePost(Snowflake threadId, Snowflake &forumId);
     void forgetPost(Snowflake threadId);
     int indexOfPost(const ForumState &st, Snowflake threadId) const;
@@ -192,6 +235,9 @@ private:
     static constexpr int kMaxUnreadRequest = 180;
     static constexpr int kMaxRetries = 5;
     static constexpr int kPostDataBatch = 10;
+    // How long to wait for a FORUM_UNREADS reply before treating the batch as
+    // lost (gateway dropped the request mid-session and silently resumed).
+    static constexpr int kUnreadReplyTimeoutMs = 30000;
 };
 
 } // namespace Core

@@ -1,7 +1,5 @@
 #include "PermissionComputer.hpp"
 
-#include <algorithm>
-
 namespace Acheron {
 namespace Core {
 
@@ -127,9 +125,8 @@ Discord::Permissions PermissionComputer::computeChannelPermissions(
     if (guildOwnerId == userId)
         return Discord::ALL_PERMISSIONS;
 
-    // Build the role map once and reuse it for the base-permission pass and the
-    // position lookup below (the old code rebuilt the map inside
-    // computeBasePermissions and scanned all roles per comparator call).
+    // Build the role map once and reuse it for the base-permission pass (the
+    // old code rebuilt the map inside computeBasePermissions on every call).
     auto roleMap = buildRoleMap(allRoles);
 
     auto basePerms = computeBasePermissionsWithMap(guildOwnerId, userId, guildId, memberRoleIds,
@@ -138,26 +135,12 @@ Discord::Permissions PermissionComputer::computeChannelPermissions(
     if (basePerms & Discord::Permission::ADMINISTRATOR)
         return Discord::ALL_PERMISSIONS;
 
-    // Discord applies role channel-overwrites in role-position order: the
-    // highest-position role is applied last and therefore takes precedence.
-    // Sort the member's roles so conflicting role overwrites resolve like
-    // Discord does instead of in arbitrary array order.
-    QHash<Snowflake, int> rolePositions;
-    rolePositions.reserve(roleMap.size());
-    for (auto it = roleMap.constBegin(); it != roleMap.constEnd(); ++it)
-        rolePositions.insert(it.key(), it.value().position.get());
-
-    QList<Snowflake> orderedRoles = memberRoleIds;
-    std::sort(orderedRoles.begin(), orderedRoles.end(),
-              [&rolePositions](const Snowflake &a, const Snowflake &b) {
-                  const int posA = rolePositions.value(a, 0);
-                  const int posB = rolePositions.value(b, 0);
-                  if (posA != posB)
-                      return posA < posB;
-                  return a < b; // stable tie-break
-              });
-
-    return computeOverwrites(basePerms, userId, guildId, orderedRoles, overwrites);
+    // Channel role-overwrites do NOT follow the role hierarchy: computeOverwrites
+    // ORs all of the member's role allows together and all role denies together,
+    // then applies deny once and allow once (see the comment there). The result
+    // is independent of the order the member's roles are examined in, so no
+    // position sort (or the O(#roles) position map it required) is needed here.
+    return computeOverwrites(basePerms, userId, guildId, memberRoleIds, overwrites);
 }
 
 } // namespace Core

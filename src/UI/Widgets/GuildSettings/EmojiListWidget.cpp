@@ -102,20 +102,48 @@ void EmojiListWidget::setHttpClient(Discord::HttpClient *http)
 
 void EmojiListWidget::setEnabled(bool enabled)
 {
+    // EmojiPage::load() runs on every navigation to the Emoji tab and always
+    // calls setEnabled() with the same value. Rebuilding the whole grid (and
+    // re-fetching every emoji image) on a no-op toggle would hammer the CDN.
+    const bool changed = enabled != enabled_;
     enabled_ = enabled;
     uploadButton_->setEnabled(enabled);
     permissionLabel_->setText(enabled
             ? tr("You can manage emojis for this server.")
             : tr("You need the Manage Expressions permission to manage emojis."));
-    rebuildEmojiList();
+    if (changed)
+        rebuildEmojiList();
 }
 
 void EmojiListWidget::setEmojis(const QList<Discord::Emoji> &emojis)
 {
-    emojis_ = emojis;
-    std::sort(emojis_.begin(), emojis_.end(), [](const Discord::Emoji &a, const Discord::Emoji &b) {
+    QList<Discord::Emoji> sorted = emojis;
+    std::sort(sorted.begin(), sorted.end(), [](const Discord::Emoji &a, const Discord::Emoji &b) {
         return a.name.get().toCaseFolded() < b.name.get().toCaseFolded();
     });
+
+    // Skip the rebuild when the set is unchanged: the caller (EmojiPage) fires
+    // this on every page visit and on every gateway customEmojisChanged, and a
+    // full reset would re-create every cell and re-download every preview.
+    // Compare every field a cell renders: id/name/animated drive the preview
+    // and label, and `managed` drives whether Rename/Delete are enabled — a
+    // gateway update flipping only that would otherwise leave the buttons stale.
+    if (sorted.size() == emojis_.size()) {
+        bool same = true;
+        for (int i = 0; i < sorted.size(); ++i) {
+            if (sorted[i].id.get() != emojis_[i].id.get()
+                || sorted[i].name.get() != emojis_[i].name.get()
+                || sorted[i].animated.getOr(false) != emojis_[i].animated.getOr(false)
+                || sorted[i].managed.getOr(false) != emojis_[i].managed.getOr(false)) {
+                same = false;
+                break;
+            }
+        }
+        if (same)
+            return;
+    }
+
+    emojis_ = sorted;
     rebuildEmojiList();
 }
 

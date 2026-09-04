@@ -28,6 +28,8 @@ public:
 private:
     static QString rolesToJson(const QList<Core::Snowflake> &roles);
     static QList<Core::Snowflake> rolesFromJson(const QString &json);
+    static void bindMember(QSqlQuery &q, Core::Snowflake guildId, Core::Snowflake userId,
+                           const Discord::Member &member);
 };
 
 } // namespace Storage

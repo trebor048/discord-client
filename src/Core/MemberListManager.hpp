@@ -82,6 +82,12 @@ public:
 
     void updateSubscriptionRange(int firstVisible, int lastVisible);
 
+    // Re-issues the member-list subscription for the currently open channel.
+    // A reconnect that falls back to a fresh IDENTIFY makes Discord drop every
+    // lazy member-list subscription, and the active channel does not change,
+    // so nothing else would re-request it. No-op when no channel is active.
+    void refreshActiveSubscription();
+
     // virtual row count (cached; invalidated only on list reset/update)
     [[nodiscard]] int totalItemCount() const;
 

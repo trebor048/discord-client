@@ -30,10 +30,10 @@ public:
 private slots:
     void onLoadMore();
     void onFilterChanged();
-    void onLogFetched(Core::Snowflake guildId, const Discord::AuditLogData &log);
 
 private:
     void setupUi();
+    void fetchPage(Core::Snowflake beforeId);
     void appendEntries(const QList<Discord::AuditLogEntry> &entries,
                        const QHash<Core::Snowflake, Discord::User> &userMap);
     static QString actionTypeToString(int actionType);
@@ -48,6 +48,12 @@ private:
     Core::Snowflake m_lastEntryId;
     QHash<Core::Snowflake, Discord::User> m_userMap;
     bool m_loading = false;
+
+    /// Bumped on every page request. A response whose token is stale is dropped:
+    /// filter changes, page revisits and load-more clicks can otherwise let a
+    /// slow older response append under the wrong filter, and a response that
+    /// arrives after the widget was destroyed would touch freed memory.
+    quint64 m_fetchToken = 0;
 };
 
 } // namespace Widgets

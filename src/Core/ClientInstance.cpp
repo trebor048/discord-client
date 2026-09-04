@@ -192,6 +192,14 @@ ClientInstance::ClientInstance(const AccountInfo &info,
                         const QList<Discord::Member> *members =
                                 i < pairedCount ? &ready.mergedMembers->at(i) : nullptr;
                         saveGuild(guild, members, ready.user->id.get(), db);
+
+                        // A reconnect that falls back to a fresh IDENTIFY
+                        // re-delivers READY on this same ClientInstance. Roles
+                        // may have changed server-side while offline, so the
+                        // per-guild role cache from the previous session is now
+                        // stale; the roleRepo rows were just refreshed above,
+                        // so drop the cache and let getRolesForGuild() reload.
+                        rolesCacheByGuild.remove(guild.properties->id.get());
                     }
 
                     if (ready.privateChannels.hasValue()) {
@@ -213,6 +221,15 @@ ClientInstance::ClientInstance(const AccountInfo &info,
                 }
             }
         }
+
+        // A reconnect that falls back to a fresh IDENTIFY makes Discord drop
+        // every lazy member-list subscription from the previous session, and
+        // the active channel does not change — so nothing else re-issues it.
+        // Re-request the member list for the still-open channel so it
+        // repopulates instead of staying stale until the user scrolls or
+        // switches channels. This is a no-op on first connect because no
+        // channel has been opened yet (the UI subscribes when it selects one).
+        memberListManager->refreshActiveSubscription();
 
         // Emit ready AFTER cache persistence — the UI depends on this signal
         // to populate the channel tree and show content to the user.
@@ -427,9 +444,16 @@ ClientInstance::ClientInstance(const AccountInfo &info,
 #ifndef ACHERON_NO_VOICE
     connect(client, &Discord::Client::voiceServerUpdated, this,
             [this](const Discord::VoiceServerUpdate &event) {
+                // Never log the voice token — not even a prefix fragment. Only
+                // report presence + length so the log stays useful without
+                // leaking a secret.
+                const QString tokenInfo = event.token.get().isEmpty()
+                        ? QStringLiteral("absent")
+                        : QStringLiteral("present (%1 chars)")
+                                  .arg(static_cast<qlonglong>(event.token.get().size()));
                 qCInfo(LogVoice) << "VOICE_SERVER_UPDATE: guild" << event.guildId.get()
                                  << "endpoint" << (event.endpoint.isNull() ? "null" : event.endpoint.get())
-                                 << "token" << event.token.get().left(8) + "...";
+                                 << "token" << tokenInfo;
 
                 voiceManager->handleVoiceServerUpdate(event);
             });

@@ -88,6 +88,12 @@ FriendsPage::FriendsPage(Core::ClientInstance *instance, QWidget *parent)
     connect(relationships, &Core::RelationshipManager::relationshipChanged,
             this, &FriendsPage::onRelationshipChanged);
 
+    // Presence decides which friends belong on the "Online" tab; without this
+    // a friend coming online (or going offline) while the page is open would
+    // not move between tabs until the next relationship change.
+    connect(instance, &Core::ClientInstance::userPresenceChanged,
+            this, &FriendsPage::onPresenceChanged);
+
     refresh();
 }
 
@@ -108,6 +114,24 @@ void FriendsPage::onRelationshipChanged(Core::Snowflake userId)
     // Coalesce bursts of relationship changes (e.g. a batch arriving in one
     // event-loop pass) into a single deferred rebuild: the previous handler
     // destroyed and recreated every widget on each individual change.
+    changedUserIds.insert(userId);
+    scheduleRebuild();
+}
+
+void FriendsPage::onPresenceChanged(Core::Snowflake userId)
+{
+    // PRESENCE_UPDATE fires for every visible user in shared guilds; only a
+    // friend's presence can move a row between the Online and All tabs, and
+    // only while the Online tab is showing.
+    if (tabs->currentIndex() != static_cast<int>(Tab::Online))
+        return;
+
+    const auto relOpt = relationships->getRelationship(userId);
+    if (!relOpt || relOpt->type.get() != Discord::RelationshipType::FRIEND)
+        return;
+
+    // Same coalescing path as relationship changes; applyPendingRelationship
+    // moves the row in/out of the Online tab (or updates it in place).
     changedUserIds.insert(userId);
     scheduleRebuild();
 }

@@ -37,7 +37,12 @@ public:
 
     const Core::AccountInfo *getAccountById(Core::Snowflake id) const;
 
-    void addAccount(const Core::AccountInfo &account);
+    /// Adds an account (DB + keychain + model). Returns false — leaving neither
+    /// an account row nor a stored credential behind — when the token could not
+    /// be stored in the keychain, or when the DB insert then fails (the just-
+    /// stored token is deleted again). A failed save can't leave an account that
+    /// exists on next startup with no stored token, nor a token with no row.
+    bool addAccount(const Core::AccountInfo &account);
     void removeAccount(int row);
 
     void setConnectionState(int row, Core::ConnectionState state);

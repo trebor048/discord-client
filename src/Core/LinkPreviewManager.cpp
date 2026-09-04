@@ -192,6 +192,10 @@ void LinkPreviewManager::finishReply(QNetworkReply *reply, const QUrl &requested
         processNext();
         return;
     }
+    // Relative og: URLs must resolve against the FINAL post-redirect URL, not
+    // the pre-redirect `requestedUrl` (a short link may land on another host
+    // or a different path). reply->url() is the final document address.
+    const QUrl finalUrl = reply->url();
     reply->deleteLater();
     m_inFlight.remove(requestedUrl);
 
@@ -219,7 +223,7 @@ void LinkPreviewManager::finishReply(QNetworkReply *reply, const QUrl &requested
         out.isVideo = true;
         out.valid = true;
     } else if (ct == QStringLiteral("text/html") || ct.contains(QStringLiteral("html"))) {
-        parseHtml(reply->read(kMaxBodyBytes), requestedUrl, &out);
+        parseHtml(reply->read(kMaxBodyBytes), finalUrl, &out);
     } else if (ct.startsWith(QStringLiteral("application/octet-stream")) || ct.isEmpty()) {
         // Extension-less direct media (klipy-style) occasionally arrives as
         // octet-stream — or with NO content type at all (many CDNs omit it on
@@ -230,7 +234,7 @@ void LinkPreviewManager::finishReply(QNetworkReply *reply, const QUrl &requested
         out.isVideo = looksLikeVideoPath(requestedUrl);
         out.valid = out.isImage || out.isVideo;
         if (!out.valid)
-            parseHtml(reply->read(kMaxBodyBytes), requestedUrl, &out);
+            parseHtml(reply->read(kMaxBodyBytes), finalUrl, &out);
     }
 
     if (!out.valid) {

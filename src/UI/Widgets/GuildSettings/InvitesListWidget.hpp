@@ -31,7 +31,6 @@ private slots:
     void onRevokeClicked();
     void onInviteCreated(const Discord::InviteCreate &event);
     void onInviteDeleted(const Discord::InviteDelete &event);
-    void onInvitesFetched(Core::Snowflake guildId, const QList<Discord::InviteData> &invites);
 
 private:
     void setupUi();
@@ -41,6 +40,11 @@ private:
     QPushButton *m_refreshButton = nullptr;
     QPushButton *m_revokeButton = nullptr;
     QList<Discord::InviteData> m_invites;
+
+    /// Bumped on every load(); responses whose token is stale are dropped so a
+    /// slow reply can never clobber the result of a newer refresh, and a reply
+    /// that arrives after the widget was destroyed is a safe no-op.
+    quint64 m_fetchGeneration = 0;
 };
 
 } // namespace Widgets

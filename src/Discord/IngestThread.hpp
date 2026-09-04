@@ -45,6 +45,10 @@ private:
 
     std::mutex mutex;
     std::condition_variable cv;
+    // Serializes stop() so a UI-thread stop (Gateway::stop) and the network
+    // thread's final cleanup (networkLoop tail) can't both join the same
+    // std::thread concurrently.
+    std::mutex joinMutex;
     std::deque<TaggedData> queue;
     size_t queuedBytes = 0;
     // Backpressure cap: if the consumer falls this far behind, drop oldest

@@ -10,6 +10,8 @@
 #include "Core/ClientInstance.hpp"
 #include "Discord/Client.hpp"
 
+#include <QPointer>
+
 namespace Acheron {
 namespace UI {
 namespace Widgets {
@@ -25,7 +27,6 @@ BanListWidget::BanListWidget(Core::ClientInstance *instance, Core::Snowflake gui
     auto *client = m_instance->discord();
     connect(client, &Discord::Client::guildBanAdded, this, &BanListWidget::onBanAdded);
     connect(client, &Discord::Client::guildBanRemoved, this, &BanListWidget::onBanRemoved);
-    connect(client, &Discord::Client::guildBansFetched, this, &BanListWidget::onBansFetched);
 }
 
 void BanListWidget::setupUi()
@@ -68,23 +69,26 @@ void BanListWidget::load()
     item->setText(QStringLiteral("Loading bans..."));
     item->setFlags(item->flags() & ~Qt::ItemIsEnabled & ~Qt::ItemIsSelectable);
 
-    m_instance->discord()->fetchGuildBans(m_guildId, [this](const auto &result) {
-        if (!result.success()) {
-            m_banList->clear();
-            auto *item = new QListWidgetItem(m_banList);
-            item->setText(QStringLiteral("Failed to load bans: %1").arg(result.error));
-            item->setFlags(item->flags() & ~Qt::ItemIsEnabled & ~Qt::ItemIsSelectable);
-        }
-    });
-}
-
-void BanListWidget::onBansFetched(Core::Snowflake guildId, const QList<Discord::BanEntry> &bans)
-{
-    if (guildId != m_guildId)
-        return;
-
-    m_bans = bans;
-    populateList(bans);
+    // The callback carries the page payload, so drive both the success and the
+    // failure path from it (generation- and lifetime-guarded) instead of the
+    // broadcast guildBansFetched signal, which cannot be matched to the request
+    // that produced it.
+    const quint64 gen = ++m_fetchGeneration;
+    QPointer<BanListWidget> guard(this);
+    m_instance->discord()->fetchGuildBans(m_guildId,
+        [this, guard, gen](const auto &result) {
+            if (!guard || gen != m_fetchGeneration)
+                return;
+            if (!result.success()) {
+                m_banList->clear();
+                auto *item = new QListWidgetItem(m_banList);
+                item->setText(QStringLiteral("Failed to load bans: %1").arg(result.error));
+                item->setFlags(item->flags() & ~Qt::ItemIsEnabled & ~Qt::ItemIsSelectable);
+                return;
+            }
+            m_bans = result.value.value();
+            populateList(m_bans);
+        });
 }
 
 void BanListWidget::populateList(const QList<Discord::BanEntry> &bans)

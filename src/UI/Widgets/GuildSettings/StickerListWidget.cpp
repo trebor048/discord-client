@@ -103,22 +103,50 @@ void StickerListWidget::setEnabled(bool enabled)
     // Also propagate to the widget itself: without this, the scroll area and
     // its children (selection, previews) stay fully interactive even when a
     // caller considers the widget "disabled".
-    QWidget::setEnabled(enabled);
+    const bool changed = enabled != enabled_;
     enabled_ = enabled;
+    QWidget::setEnabled(enabled);
     uploadButton_->setEnabled(enabled);
     permissionLabel_->setText(enabled
             ? tr("You can manage stickers for this server.")
             : tr("You need the Manage Expressions permission to manage stickers."));
-    rebuildStickerList();
+    // Rebuilding the whole grid on a no-op toggle (the page reloads enabled()
+    // on every visit) would re-fetch every sticker preview unnecessarily.
+    if (changed)
+        rebuildStickerList();
 }
 
 void StickerListWidget::setStickers(const QList<Discord::Sticker> &stickers)
 {
-    stickers_ = stickers;
-    std::sort(stickers_.begin(), stickers_.end(),
+    QList<Discord::Sticker> sorted = stickers;
+    std::sort(sorted.begin(), sorted.end(),
               [](const Discord::Sticker &a, const Discord::Sticker &b) {
                   return a.name.get().toCaseFolded() < b.name.get().toCaseFolded();
               });
+
+    // Skip the rebuild when the set is unchanged: the caller fires this on
+    // gateway sticker-store updates and after every upload/rename/delete, and a
+    // full reset would re-create every cell and re-download every preview.
+    // Compare every field a cell renders: id/name/formatType drive the preview
+    // and labels, while description/tags are shown in the cell tooltip — a
+    // gateway update flipping only those would otherwise leave tooltips stale.
+    if (sorted.size() == stickers_.size()) {
+        bool same = true;
+        for (int i = 0; i < sorted.size(); ++i) {
+            if (sorted[i].id.get() != stickers_[i].id.get()
+                || sorted[i].name.get() != stickers_[i].name.get()
+                || sorted[i].formatType.get() != stickers_[i].formatType.get()
+                || sorted[i].description.getOr(QString()) != stickers_[i].description.getOr(QString())
+                || sorted[i].tags.getOr(QString()) != stickers_[i].tags.getOr(QString())) {
+                same = false;
+                break;
+            }
+        }
+        if (same)
+            return;
+    }
+
+    stickers_ = sorted;
     rebuildStickerList();
 }
 

@@ -534,12 +534,6 @@ void ReadStateManager::handleMessageCreated(Snowflake channelId, Snowflake messa
         return;
     }
 
-    if (!unreadMessageCounts.contains(channelId))
-        unreadMessageCounts.insert(channelId, 1);
-    else
-        ++unreadMessageCounts[channelId];
-    emit readStateUpdated(channelId);
-
     if (isMention) {
         auto it = channelReadStates.find(channelId);
         if (it == channelReadStates.end()) {
@@ -551,8 +545,18 @@ void ReadStateManager::handleMessageCreated(Snowflake channelId, Snowflake messa
             int current = it->mentionCount.hasValue() ? it->mentionCount.get() : 0;
             it->mentionCount = current + 1;
         }
-        emit readStateUpdated(channelId);
     }
+
+    if (!unreadMessageCounts.contains(channelId))
+        unreadMessageCounts.insert(channelId, 1);
+    else
+        ++unreadMessageCounts[channelId];
+
+    // Emit exactly once per message: the pre-refactor double emit (one after
+    // the unread-count increment and again after the mention increment) ran
+    // the channel-tree read-state refresh + tab refresh twice on every
+    // incoming mention in a non-active channel.
+    emit readStateUpdated(channelId);
 }
 
 int ReadStateManager::unreadMessageCount(Snowflake channelId) const

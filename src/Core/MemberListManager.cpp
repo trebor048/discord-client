@@ -613,6 +613,21 @@ void MemberListManager::flushPendingRanges()
     }
 }
 
+void MemberListManager::refreshActiveSubscription()
+{
+    if (!activeGuildId.isValid() || !activeChannelId.isValid() || ranges.isEmpty())
+        return;
+
+    // A fresh IDENTIFY (reconnect) makes Discord drop every lazy member-list
+    // subscription, and the active channel does not change — so nothing else
+    // re-issues it. Re-request the active ranges here; the gateway answers
+    // with a full re-sync that repopulates the list.
+    awaitingResponse = true;
+    hasPendingRanges = false;
+    responseTimer.start();
+    emit subscriptionRequested(activeGuildId, activeChannelId, ranges);
+}
+
 void MemberListManager::evictUnsubscribedItems(const QList<QPair<int, int>> &,
                                                const QList<QPair<int, int>> &newRanges)
 {

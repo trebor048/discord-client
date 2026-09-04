@@ -40,6 +40,32 @@ void setSchemaVersion(QSqlDatabase &db, int version)
     QSqlQuery query(db);
     query.exec(QString("PRAGMA user_version = %1").arg(version));
 }
+
+// Checkpoint, close, and removeDatabase() every registered connection whose
+// name starts with \a namePrefix. Used both at process shutdown and when a
+// single cache DB is closed so that per-thread clones (BaseRepository::getDb,
+// named "<conn>_t<tid>") never outlive the primary connection: an orphaned
+// clone keeps its file/WAL handle open (fd leak; on Windows the cache file
+// stays locked against deletion) and, for shared-cache in-memory DBs, pins the
+// old cache in memory across a logout/login of the same account.
+// Only safe to call once the worker threads that used the clones have stopped
+// (same precondition as the process-wide shutdown below).
+static void closeAndRemoveConnections(const QString &namePrefix)
+{
+    const QStringList names = QSqlDatabase::connectionNames();
+    for (const QString &name : names) {
+        if (!name.startsWith(namePrefix))
+            continue;
+        {
+            QSqlDatabase db = QSqlDatabase::database(name);
+            if (db.isOpen()) {
+                QSqlQuery(db).exec("PRAGMA wal_checkpoint(TRUNCATE)");
+                db.close();
+            }
+        }
+        QSqlDatabase::removeDatabase(name);
+    }
+}
 } // namespace
 
 DatabaseManager &DatabaseManager::instance()
@@ -115,35 +141,12 @@ void DatabaseManager::shutdown()
     // Worker-thread clones (named "..._t<tid>") are closed here too: by the time
     // shutdown() runs, gateway/ingest threads have been joined, so no live worker
     // can be using them.
-    const QStringList allConns = QSqlDatabase::connectionNames();
-    for (const QString &name : allConns) {
-        if (!name.startsWith("Acheron_Cache_"))
-            continue;
-        {
-            QSqlDatabase db = QSqlDatabase::database(name);
-            if (db.isOpen()) {
-                QSqlQuery(db).exec("PRAGMA wal_checkpoint(TRUNCATE)");
-                db.close();
-            }
-        }
-        QSqlDatabase::removeDatabase(name);
-    }
+    closeAndRemoveConnections(QLatin1String("Acheron_Cache_"));
     // Persistent connection clones (file-based) were previously never closed,
     // leaking the fd + WAL handles per thread. Close them here as well (the
-    // main persistent connection is handled below, so skip it here).
-    for (const QString &name : allConns) {
-        if (!name.startsWith(QStringLiteral("Acheron_Persistent"))
-            || name == QLatin1String(PERSISTENT_CONN_NAME))
-            continue;
-        {
-            QSqlDatabase db = QSqlDatabase::database(name);
-            if (db.isOpen()) {
-                QSqlQuery(db).exec("PRAGMA wal_checkpoint(TRUNCATE)");
-                db.close();
-            }
-        }
-        QSqlDatabase::removeDatabase(name);
-    }
+    // main persistent connection is handled below, so skip it here). The prefix
+    // "Acheron_Persistent_t" selects the clones but not the primary connection.
+    closeAndRemoveConnections(QLatin1String("Acheron_Persistent_t"));
     {
         QSqlDatabase db = QSqlDatabase::database(PERSISTENT_CONN_NAME);
         if (db.isValid() && db.isOpen()) {
@@ -212,7 +215,14 @@ QString DatabaseManager::openCacheDatabase(Core::Snowflake accountId)
 void DatabaseManager::closeCacheDatabase(Core::Snowflake accountId)
 {
     QMutexLocker locker(&dbMutex);
-    QString connName = getCacheConnectionName(accountId);
+    const QString connName = getCacheConnectionName(accountId);
+
+    // Tear down per-thread clones first: BaseRepository::getDb() creates
+    // "<conn>_t<tid>" connections on first access from a non-owning thread,
+    // and those would otherwise keep the cache file/WAL handle open after
+    // logout (fd + WAL leak, and on Windows the cache file stays locked
+    // against deletion). Safe once the owning client instance has stopped.
+    closeAndRemoveConnections(connName + QLatin1String("_t"));
 
     if (QSqlDatabase::contains(connName)) {
         {

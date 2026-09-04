@@ -21,8 +21,8 @@ constexpr int kRecycleBufferPx = 200;
 // grow the pool on demand via ensureButtonPoolSize(). The picker dialog's
 // minimum height is 520px, so a 640px budget already covers the whole dialog
 // with recycle buffer; sizing the pool for a 1200px viewport upfront would
-// allocate ~408 QToolButtons per grid at construction, and two grids (the
-// picker owns both a category grid and a server grid) make that ~816 widgets
+// allocate ~180 QToolButtons per grid at construction, and two grids (the
+// picker owns both a category grid and a server grid) make that ~360 widgets
 // — by far the largest single allocation burst in the app. Under low-memory
 // conditions that burst is what trips the crash, so the pool starts small and
 // grows on demand instead.
@@ -30,14 +30,14 @@ constexpr int kMaxViewportHeight = 640;
 constexpr int kButtonPoolSize =
         ((kMaxViewportHeight + 2 * kRecycleBufferPx)
          / (EmojiGridMetrics::kCellSize + kCellSpacing) + 1)
-        * EmojiGridMetrics::kColumns; // 22 rows x 12 columns
+        * EmojiGridMetrics::kColumns; // 17 rows x 7 columns
 constexpr int kHeaderPoolSize = 32;
 } // namespace
 
 VirtualEmojiGrid::VirtualEmojiGrid(QWidget *parent) : QWidget(parent)
 {
     // The initial pool is the largest single allocation burst in the app (two
-    // grids of 264 buttons + 32 headers each live in the emoji picker). If it
+    // grids of 119 buttons + 32 headers each live in the emoji picker). If it
     // fails under memory pressure, degrade to a smaller pool — relayout()
     // already skips cells beyond m_buttons.size() — instead of letting the
     // exception escape during dialog construction and aborting the process.
@@ -51,8 +51,9 @@ VirtualEmojiGrid::VirtualEmojiGrid(QWidget *parent) : QWidget(parent)
     }
 
     // Capture the button's pristine icon size so recycled buttons can be reset
-    // to their native rendering (unicode emoji) before a custom icon overrides
-    // it with a 24px size.
+    // before a custom-icon applicator overrides the rendering. The size is set
+    // in createPoolButton() so Unicode glyphs and fetched custom emoji render
+    // at the same EmojiGridMetrics::kIconSize.
     if (!m_buttons.isEmpty())
         m_defaultIconSize = m_buttons.first()->iconSize();
 
@@ -86,6 +87,9 @@ QToolButton *VirtualEmojiGrid::createPoolButton()
     button->setAutoRaise(true);
     button->setToolButtonStyle(Qt::ToolButtonIconOnly);
     button->setFixedSize(QSize(EmojiGridMetrics::kCellSize, EmojiGridMetrics::kCellSize));
+    // Explicit icon size (rather than the style default) so both Unicode glyphs
+    // and custom-emoji icons render at the larger, readable grid size.
+    button->setIconSize(QSize(EmojiGridMetrics::kIconSize, EmojiGridMetrics::kIconSize));
     button->setProperty("emojiGridButton", true);
     button->setContextMenuPolicy(Qt::CustomContextMenu);
     button->hide();
@@ -263,9 +267,10 @@ void VirtualEmojiGrid::relayout()
     const int viewportHeight = m_scrollArea->viewport()->height();
 
     // Responsive columns: fit as many cells as the viewport width allows so
-    // the grid fills the window horizontally. Changing the column count
-    // changes how many rows each section takes, so the layout model (section
-    // offsets, total height) must be rebuilt to stay in sync.
+    // the grid fills the picker window edge to edge while keeping each cell at
+    // the (large) EmojiGridMetrics size. Changing the column count changes how
+    // many rows each section takes, so the layout model (section offsets,
+    // total height) must be rebuilt to stay in sync.
     const int cellPitch = EmojiGridMetrics::kCellSize + kCellSpacing;
     const int newColumns = qMax(1, viewportWidth / cellPitch);
     if (newColumns != m_columns) {

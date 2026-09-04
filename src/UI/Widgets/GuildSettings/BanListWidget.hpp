@@ -30,7 +30,6 @@ private slots:
     void onUnbanClicked();
     void onBanAdded(const Discord::GuildBan &event);
     void onBanRemoved(const Discord::GuildBan &event);
-    void onBansFetched(Core::Snowflake guildId, const QList<Discord::BanEntry> &bans);
 
 private:
     void setupUi();
@@ -40,6 +39,11 @@ private:
     QPushButton *m_refreshButton = nullptr;
     QPushButton *m_unbanButton = nullptr;
     QList<Discord::BanEntry> m_bans;
+
+    /// Bumped on every load(); responses whose token is stale are dropped so a
+    /// slow reply can never clobber the result of a newer refresh, and a reply
+    /// that arrives after the widget was destroyed is a safe no-op.
+    quint64 m_fetchGeneration = 0;
 };
 
 } // namespace Widgets

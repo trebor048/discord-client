@@ -108,7 +108,7 @@ const AccountInfo *AccountsModel::getAccountById(Snowflake id) const
     return nullptr;
 }
 
-void AccountsModel::addAccount(const AccountInfo &account)
+bool AccountsModel::addAccount(const AccountInfo &account)
 {
     AccountInfo newAccount = account;
 
@@ -119,10 +119,22 @@ void AccountsModel::addAccount(const AccountInfo &account)
     }
     newAccount.displayOrder = maxOrder + 1;
 
-    Core::TokenStore::saveToken(newAccount.id, newAccount.token);
+    if (!Core::TokenStore::saveToken(newAccount.id, newAccount.token)) {
+        // The keychain write is what makes the account usable across restarts.
+        // Bail out (nothing persisted, nothing shown) so a failed save can't
+        // leave an account row that exists with no stored token.
+        return false;
+    }
 
     AccountRepository repo;
-    repo.saveAccount(newAccount);
+    if (!repo.saveAccount(newAccount)) {
+        // The keychain write above succeeded but the DB row could not be
+        // created. Remove the credential so a failed add can't leave a keychain
+        // token with no account row — the ghost login this method's keychain
+        // guard prevents on its own leg.
+        Core::TokenStore::deleteToken(newAccount.id);
+        return false;
+    }
 
     // Don't keep the token in the in-memory model
     newAccount.token.clear();
@@ -130,6 +142,8 @@ void AccountsModel::addAccount(const AccountInfo &account)
     beginInsertRows(QModelIndex(), accounts.size(), accounts.size());
     accounts.append(newAccount);
     endInsertRows();
+
+    return true;
 }
 
 void AccountsModel::removeAccount(int row)

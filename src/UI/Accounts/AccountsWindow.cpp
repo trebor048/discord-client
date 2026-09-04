@@ -204,7 +204,11 @@ void AccountsWindow::onAddClicked()
     acc.username = "unknown";
     acc.token = token;
 
-    model->addAccount(acc);
+    if (!model->addAccount(acc)) {
+        QMessageBox::critical(this, tr("Add Account Failed"),
+                              tr("Failed to save the token securely. The account was not added."));
+        return;
+    }
 }
 
 void AccountsWindow::onQrLoginClicked()
@@ -229,7 +233,11 @@ void AccountsWindow::onQrLoginClicked()
     acc.username = dlg.getUsername().isEmpty() ? QStringLiteral("unknown") : dlg.getUsername();
     acc.displayName = acc.username;
 
-    model->addAccount(acc);
+    if (!model->addAccount(acc)) {
+        QMessageBox::critical(this, tr("Login Failed"),
+                              tr("Failed to save the token securely. Please try again."));
+        return;
+    }
 }
 
 void AccountsWindow::onContextMenuRequested(const QPoint &pos)

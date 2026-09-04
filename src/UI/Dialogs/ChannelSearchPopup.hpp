@@ -110,7 +110,6 @@ private:
 
     // Avatar fetches: url -> rows of the results list awaiting that avatar.
     QHash<QUrl, QVector<int>> avatarPendingRows;
-    bool avatarFetchConnected = false;
 
     static constexpr int kMaxHistoryPages = 4;
 };
