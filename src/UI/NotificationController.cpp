@@ -2,6 +2,9 @@
 
 #include <optional>
 
+#include <QPointer>
+#include <QTimer>
+
 #include "MainWindow.hpp"
 #include "Settings/SettingsWindow.hpp"
 #include "Settings/NotificationsPage.hpp"
@@ -54,6 +57,23 @@ void NotificationController::setupForInstance(Core::ClientInstance *instance)
             m_window->showNormal();
         m_window->raise();
         m_window->activateWindow();
+
+        // Win11 activation rules can keep raise() from surfacing the window
+        // above a focused foreign app, so briefly re-apply the top-most hint
+        // (pop above everything), then drop it so normal stacking resumes.
+        if (!(m_window->windowFlags() & Qt::WindowStaysOnTopHint)) {
+            const QPointer<MainWindow> guard(m_window);
+            m_window->setWindowFlag(Qt::WindowStaysOnTopHint, true);
+            m_window->show();
+            QTimer::singleShot(400, guard, [guard]() {
+                if (!guard)
+                    return;
+                guard->setWindowFlag(Qt::WindowStaysOnTopHint, false);
+                guard->show();
+                guard->raise();
+                guard->activateWindow();
+            });
+        }
     };
 
     // Connect notification navigation signals

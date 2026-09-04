@@ -96,6 +96,10 @@ void ToastNotification::applyTheme()
     m_closePressedBg = m_highlightColor;
     m_closePressedBg.setAlpha(55);
 
+    // Keep the always-visible dismiss button in sync with theme changes.
+    if (m_dismissButton)
+        m_dismissButton->setStyleSheet(dismissButtonStyle());
+
     if (m_data.coloredAccents) {
         m_avatarColor = m_data.badgeColor.isValid() ? m_data.badgeColor : m_highlightColor;
         m_channelColor = m_data.channelColor.isValid() ? m_data.channelColor : m_highlightColor;
@@ -237,30 +241,15 @@ void ToastNotification::setupUi()
 
     mainLayout->addLayout(m_contentLayout, 1);
 
-    // Dismiss button: a round, softly-filled × with a generous hit area.
+    // Dismiss button: a larger, always-visible × with a generous hit area so
+    // it is easy to spot and to hit without hunting for it; hover/pressed
+    // fills are theme-derived (restyled on theme change via applyTheme()).
     m_dismissButton = new QPushButton(QStringLiteral("×"), this);
-    m_dismissButton->setFixedSize(22, 22);
+    m_dismissButton->setFixedSize(26, 26);
     m_dismissButton->setCursor(Qt::PointingHandCursor);
-    m_dismissButton->setStyleSheet(QStringLiteral(
-            "QPushButton {"
-            "   border: none;"
-            "   border-radius: 11px;"
-            "   background-color: transparent;"
-            "   color: %1;"
-            "   font-size: 15px;"
-            "   font-weight: 600;"
-            "   padding: 0px;"
-            "}"
-            "QPushButton:hover {"
-            "   background-color: %2;"
-            "   color: %3;"
-            "}"
-            "QPushButton:pressed {"
-            "   background-color: %4;"
-            "}")
-            .arg(m_mutedColor.name(), m_closeHoverBg.name(QColor::HexArgb),
-                 m_titleColor.name(), m_closePressedBg.name(QColor::HexArgb)));
-    m_dismissButton->hide();
+    m_dismissButton->setToolTip(tr("Dismiss"));
+    m_dismissButton->setStyleSheet(dismissButtonStyle());
+    m_dismissButton->show();
     connect(m_dismissButton, &QPushButton::clicked, this, &ToastNotification::dismiss);
 
     auto *rightLayout = new QVBoxLayout();
@@ -367,6 +356,33 @@ void ToastNotification::rebuildGroupEntries()
         });
         m_groupLayout->addWidget(row);
     }
+}
+
+QString ToastNotification::dismissButtonStyle() const
+{
+    // A clearly visible ×: idle glyph is a lightened muted tone on a
+    // translucent circular fill so it reads against any card color; hover
+    // swaps to a highlight-tinted fill with a high-contrast glyph.
+    const QColor idle = m_mutedColor.lighter(170);
+    return QStringLiteral(
+            "QPushButton {"
+            "   border: none;"
+            "   border-radius: 13px;"
+            "   background-color: rgba(0,0,0,0);"
+            "   color: %1;"
+            "   font-size: 18px;"
+            "   font-weight: 600;"
+            "   padding: 0px;"
+            "}"
+            "QPushButton:hover {"
+            "   background-color: %2;"
+            "   color: %3;"
+            "}"
+            "QPushButton:pressed {"
+            "   background-color: %4;"
+            "}")
+            .arg(idle.name(), m_closeHoverBg.name(QColor::HexArgb), m_titleColor.name(),
+                 m_closePressedBg.name(QColor::HexArgb));
 }
 
 void ToastNotification::setGroupExpanded(bool expanded)
@@ -869,7 +885,21 @@ void ToastNotification::paintEvent(QPaintEvent *event)
 
 void ToastNotification::mousePressEvent(QMouseEvent *event)
 {
+    if (event->button() == Qt::RightButton) {
+        // Right-click anywhere on the toast dismisses it immediately.
+        event->accept();
+        closeReplyComposer();
+        dismiss();
+        return;
+    }
     if (event->button() == Qt::LeftButton) {
+        // A click while the inline reply composer is open closes the composer
+        // instead of navigating away from the message being answered.
+        if (m_replyRow && !m_replyRow->isHidden()) {
+            event->accept();
+            closeReplyComposer();
+            return;
+        }
         emit clicked(m_data);
     }
     QWidget::mousePressEvent(event);
@@ -908,7 +938,6 @@ void ToastNotification::enterEvent(QEnterEvent *event)
 {
     Q_UNUSED(event);
     m_hovered = true;
-    m_dismissButton->show();
     if (m_data.pauseOnHover)
         pauseCountdown();
     update();
@@ -919,7 +948,6 @@ void ToastNotification::leaveEvent(QEvent *event)
 {
     Q_UNUSED(event);
     m_hovered = false;
-    m_dismissButton->hide();
     if (!m_dismissing && m_data.pauseOnHover && !m_groupExpanded && m_replyRow->isHidden()) {
         resumeCountdown();
     }

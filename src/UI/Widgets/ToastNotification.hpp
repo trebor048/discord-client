@@ -95,6 +95,7 @@ private:
     void rebuildGroupEntries();
     void loadImages();
     void applyTheme();
+    QString dismissButtonStyle() const;
     void startTimeout();
     void stopTimeout();
     void pauseCountdown();

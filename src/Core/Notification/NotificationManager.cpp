@@ -83,6 +83,23 @@ bool streamingSoftwareRunning()
 namespace Acheron {
 namespace Core {
 
+namespace {
+
+/// Parse a snowflake stored as a decimal string ("0"/empty/invalid → nullopt).
+std::optional<Core::Snowflake> snowflakeFromDecimal(const QString &raw)
+{
+    bool ok = false;
+    const quint64 value = raw.toULongLong(&ok);
+    if (!ok || value == 0)
+        return std::nullopt;
+    const Core::Snowflake id(value);
+    if (!id.isValid())
+        return std::nullopt;
+    return id;
+}
+
+} // namespace
+
 NotificationManager::NotificationManager(Core::ClientInstance *instance, QObject *parent)
     : QObject(parent), m_instance(instance)
 {
@@ -121,6 +138,7 @@ void NotificationManager::initialize()
     connect(m_toastContainer, &UI::ToastContainer::notificationClicked,
             this, [this](const Notification::ToastNotificationData &data) {
         if (data.onClick) data.onClick();
+        openToastTarget(data);
     });
     connect(m_toastContainer, &UI::ToastContainer::notificationIconClicked,
             this, [this](const Notification::ToastNotificationData &data) {
@@ -159,6 +177,20 @@ void NotificationManager::initialize()
     // tick, so streamer mode (and its notification suppression) is active from
     // the moment the client starts rather than after a startup gap.
     checkStreamerMode();
+}
+
+void NotificationManager::openToastTarget(const Notification::ToastNotificationData &data)
+{
+    const std::optional<Core::Snowflake> channel = snowflakeFromDecimal(data.channelId);
+    if (!channel.has_value())
+        return; // friend-request / system toasts have no conversation to open
+
+    // Prefer the exact message; the receiving side raises the window, opens
+    // the channel and scrolls to (or loads) the message.
+    if (data.messageId.isValid())
+        emit jumpToMessageRequested(*channel, data.messageId);
+    else
+        emit openChannelRequested(*channel);
 }
 
 void NotificationManager::shutdown()

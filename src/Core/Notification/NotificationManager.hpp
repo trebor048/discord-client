@@ -160,6 +160,10 @@ private:
                         const Notification::ToastNotificationData &data,
                         const QString &text);
 
+    // Toast left-click navigation: surfaces + jumps to the toast's channel /
+    // message when the payload carries valid targets (no-op otherwise).
+    void openToastTarget(const Notification::ToastNotificationData &data);
+
     Core::ClientInstance *m_instance = nullptr;
     Core::ImageManager *m_imageManager = nullptr;
     QWidget *m_inWindowParent = nullptr;

@@ -178,15 +178,28 @@ void Manager::apply()
     // colors (and keep accumulating entries) until eviction.
     Icons::clearPixmapCache();
     qApp->setPalette(buildPalette());
-    qApp->setStyleSheet(buildStyleSheet());
+    qApp->setStyleSheet(buildStyleSheet() + extraCss());
     emit themeChanged();
 }
 
 void Manager::applyFonts()
 {
     qApp->setFont(font(FontRole::Ui));
-    qApp->setStyleSheet(buildStyleSheet());
+    qApp->setStyleSheet(buildStyleSheet() + extraCss());
     emit metricsChanged();
+}
+
+QString Manager::extraCss() const
+{
+    return QSettings().value(QLatin1String(kExtraCssKey)).toString();
+}
+
+void Manager::setExtraCss(const QString &css)
+{
+    if (css == extraCss())
+        return;
+    QSettings().setValue(QLatin1String(kExtraCssKey), css);
+    scheduleApply(true, false);
 }
 
 QString Manager::defaultThemePath()
@@ -214,12 +227,21 @@ QJsonObject Manager::toObject(bool includeDefaults) const
             continue;
         obj[QString::fromUtf8(d.id)] = font(d.role).toString();
     }
+    const QString css = extraCss();
+    if (!css.isEmpty())
+        obj[QLatin1String("_extraCss")] = css;
     return obj;
 }
 
 void Manager::loadFromObject(const QJsonObject &obj)
 {
     for (auto it = obj.begin(); it != obj.end(); ++it) {
+        // User CSS travels in the same theme file under a reserved key; apply
+        // it before the generic '_'-prefixed skip below.
+        if (it.key() == QLatin1String("_extraCss") && it.value().isString()) {
+            setExtraCss(it.value().toString());
+            continue;
+        }
         if (it.key().startsWith(QLatin1Char('_')))
             continue;
         if (!it.value().isString())

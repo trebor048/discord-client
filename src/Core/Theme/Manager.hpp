@@ -41,6 +41,15 @@ public:
     void setFontOverride(FontRole role, const QFont &font);
     void clearFontOverride(FontRole role);
 
+    /// User-supplied extra QSS appended on top of the generated theme
+    /// stylesheet on every apply. Lets power users restyle anything the token
+    /// system does not cover; persisted in QSettings and in exported theme
+    /// files (as `_extraCss`).
+    QString extraCss() const;
+    void setExtraCss(const QString &css);
+
+    static constexpr const char *kExtraCssKey = "appearance/extraCss";
+
     QPalette buildPalette() const;
     void apply();
     void applyFonts();
