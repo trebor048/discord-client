@@ -161,7 +161,9 @@ void ChannelTreeView::mousePressEvent(QMouseEvent *event)
 
     bool handledCategory = handleMouseEventForExpansion(event);
 
-    reorderSourceIndex = {};
+    // QPersistentModelIndex() (not `= {}`): GCC rejects brace-assignment to
+    // QPersistentModelIndex as ambiguous (copy-assign vs. assign-from-QModelIndex).
+    reorderSourceIndex = QPersistentModelIndex();
     reorderDragging = false;
     if (!handledCategory) {
         if (auto *proxy = qobject_cast<ChannelFilterProxyModel *>(model())) {
@@ -206,14 +208,14 @@ void ChannelTreeView::mouseReleaseEvent(QMouseEvent *event)
             sourceModel->moveNodeWithinParent(reorderSourceIndex, targetSource.row());
             proxy->sort(0);
         }
-        reorderSourceIndex = {};
+        reorderSourceIndex = QPersistentModelIndex();
         reorderDragging = false;
         event->accept();
         return;
     }
 
     viewport()->unsetCursor();
-    reorderSourceIndex = {};
+    reorderSourceIndex = QPersistentModelIndex();
     reorderDragging = false;
     QTreeView::mouseReleaseEvent(event);
 }
