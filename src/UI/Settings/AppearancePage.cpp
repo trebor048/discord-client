@@ -28,6 +28,7 @@
 #include <QRandomGenerator>
 #include <QSettings>
 #include <QSignalBlocker>
+#include <QStringList>
 #include <QSlider>
 #include <QSpinBox>
 #include <QTimer>
@@ -70,11 +71,31 @@ QString swatchStyle(const QColor &c)
             .arg(cssColor(c));
 }
 
-/// Normalize typed hex input: accept "#RGB"/"#RRGGBB"/"#AARRGGBB" as well as
-/// the bare 3/6/8-digit forms; returns empty when unparseable.
+/// Normalize typed color input: accept "#RGB"/"#RRGGBB"/"#AARRGGBB" (and the
+/// bare 3/6/8-digit forms) as well as the "rgba(r,g,b,a)" spelling cssColor()
+/// uses for translucent tokens, so the hex field round-trips what it displays;
+/// returns empty when unparseable.
 QString normalizeHex(const QString &input)
 {
     QString s = input.trimmed();
+
+    if (s.startsWith(QLatin1String("rgba(")) && s.endsWith(QLatin1Char(')'))) {
+        const QStringList parts = s.mid(5, s.size() - 6).split(QLatin1Char(','));
+        if (parts.size() == 4) {
+            bool ok = true;
+            const int r = parts[0].trimmed().toInt(&ok);
+            const int g = ok ? parts[1].trimmed().toInt(&ok) : 0;
+            const int b = ok ? parts[2].trimmed().toInt(&ok) : 0;
+            const int a = ok ? parts[3].trimmed().toInt(&ok) : 0;
+            if (ok) {
+                const QColor color(r, g, b, a);
+                if (color.isValid())
+                    return color.name(QColor::HexArgb);
+            }
+        }
+        return QString();
+    }
+
     if (s.startsWith(QLatin1Char('#')))
         s = s.mid(1);
     if (s.size() == 3) { // #RGB -> #RRGGBB

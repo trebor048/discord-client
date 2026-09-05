@@ -318,6 +318,11 @@ bool Manager::importFrom(const QString &path)
 
     overrides.clear();
     fontOverrides.clear();
+    // An imported theme file is a complete snapshot: when it carries no
+    // `_extraCss` key, any previously-applied custom CSS must not survive the
+    // import. loadFromObject() only *sets* extra CSS when the key is present,
+    // so clear it up front to keep the round-trip lossless.
+    setExtraCss(QString());
     loadFromObject(doc.object());
     return true;
 }
